@@ -3,7 +3,7 @@ title: 'Edits run as undoable commands with saved state'
 type: 'feature'
 ticket: '4'
 created: '2026-11-05'
-status: 'built'
+status: done
 baseline_revision: '04b453fad66ecdf3795942c5350463c1537f86ae'
 route: 'full'
 route_source: 'auto'
