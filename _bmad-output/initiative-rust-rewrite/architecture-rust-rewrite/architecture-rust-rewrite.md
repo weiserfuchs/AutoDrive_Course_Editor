@@ -262,7 +262,7 @@ graph TD
 - **Prevents:** marker ids, group lists and park destinations each being modelled differently by the loader, the marker tools and the vehicles writer.
 - **Rule:**
   - A node carries at most one `Marker { name, group, parked_vehicles: Vec<String> }`.
-  - Marker order is the node order (AD-2).
+  - Marker order is the order of `<mmN>` in the loaded file, kept as an ordered list in `Network`; new markers are appended. The fixture's markers are not in node order, so regenerating them in node order would break the byte-identical round trip (AD-6).
   - Groups have no table of their own in the game config. The set of groups is derived from markers. The route-manager group list is held by ad-io for that format only.
   - Renaming a group is one `RenameGroup` command over all affected markers.
   - Marker file ids and `parkDestination` values are derived at save from the `SaveIdMap` and marker order. `vehicles.xml` is rewritten only on a real Save, and only its `parkDestination` attributes change.
