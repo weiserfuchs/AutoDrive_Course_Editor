@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use ad_core::network::{LoadedNode, Marker, Network, NetworkError, Node, NodeFlag, NodeId};
 use quick_xml::events::Event;
@@ -40,6 +41,11 @@ pub enum ConfigError {
     UnknownNode { element: String, value: String },
     #[error(transparent)]
     Network(#[from] NetworkError),
+    #[error("cannot write {}: {source}", path.display())]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 fn xml_err(e: impl std::fmt::Display) -> ConfigError {
@@ -366,9 +372,33 @@ fn escape_text(s: &str, out: &mut String) {
     }
 }
 
+/// The dense 1-based file ids of one save, assigned from `Network::order` (AD-2).
+/// It is the only source of ids written to the file.
+#[derive(Debug, Clone)]
+pub struct SaveIdMap(HashMap<NodeId, usize>);
+
+impl SaveIdMap {
+    pub fn from_network(network: &Network) -> Self {
+        Self(
+            network
+                .order()
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (*id, i + 1))
+                .collect(),
+        )
+    }
+
+    pub fn get(&self, id: NodeId) -> Option<usize> {
+        self.0.get(&id).copied()
+    }
+}
+
+/// Joins one adjacency list per node. Entries that refer to a node no longer in the
+/// network are skipped; an empty list is written as `-1`.
 fn join_nodes(
     network: &Network,
-    file_ids: &HashMap<NodeId, usize>,
+    file_ids: &SaveIdMap,
     pick: impl Fn(&Node) -> &[NodeId],
 ) -> String {
     let mut out = String::new();
@@ -376,17 +406,21 @@ fn join_nodes(
         if i > 0 {
             out.push(';');
         }
-        let list = network.node(*id).map(&pick).filter(|l| !l.is_empty());
-        match list {
-            None => out.push_str("-1"),
-            Some(list) => {
-                for (j, target) in list.iter().enumerate() {
-                    if j > 0 {
-                        out.push(',');
-                    }
-                    let _ = write!(out, "{}", file_ids.get(target).copied().unwrap_or(0));
-                }
+        let targets: Vec<usize> = network
+            .node(*id)
+            .map(&pick)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|t| file_ids.get(*t))
+            .collect();
+        if targets.is_empty() {
+            out.push_str("-1");
+        }
+        for (j, file_id) in targets.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
             }
+            let _ = write!(out, "{file_id}");
         }
     }
     out
@@ -402,7 +436,7 @@ fn join_nodes_values(network: &Network, f: impl Fn(&Node) -> String) -> String {
     parts.join(",")
 }
 
-fn waypoints_block(cfg: &LoadedConfig, file_ids: &HashMap<NodeId, usize>) -> String {
+fn waypoints_block(cfg: &LoadedConfig, file_ids: &SaveIdMap) -> String {
     let net = &cfg.network;
     let nl = &cfg.newline;
     let child_indent = format!("{}{}", cfg.base_indent, cfg.unit);
@@ -429,15 +463,20 @@ fn waypoints_block(cfg: &LoadedConfig, file_ids: &HashMap<NodeId, usize>) -> Str
     out
 }
 
-fn mapmarker_block(cfg: &LoadedConfig, file_ids: &HashMap<NodeId, usize>) -> String {
+fn mapmarker_block(cfg: &LoadedConfig, file_ids: &SaveIdMap) -> String {
     let nl = &cfg.newline;
     let i1 = format!("{}{}", cfg.base_indent, cfg.unit);
     let i2 = format!("{i1}{}", cfg.unit);
     let mut out = String::from("<mapmarker>");
     out.push_str(nl);
-    for (i, m) in cfg.network.markers().iter().enumerate() {
+    // Markers whose node is gone are skipped, so the `mmN` numbering stays dense.
+    let written = cfg
+        .network
+        .markers()
+        .iter()
+        .filter_map(|m| file_ids.get(m.node).map(|file_id| (file_id, m)));
+    for (i, (file_id, m)) in written.enumerate() {
         let n = i + 1;
-        let file_id = file_ids.get(&m.node).copied().unwrap_or(0);
         let _ = write!(
             out,
             "{i1}<mm{n}>{nl}{i2}<id>{file_id}.000000</id>{nl}{i2}<name>"
@@ -454,13 +493,7 @@ fn mapmarker_block(cfg: &LoadedConfig, file_ids: &HashMap<NodeId, usize>) -> Str
 
 /// Regenerates the two modelled blocks and splices them into the original bytes.
 pub fn save(cfg: &LoadedConfig) -> Vec<u8> {
-    let file_ids: HashMap<NodeId, usize> = cfg
-        .network
-        .order()
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (*id, i + 1))
-        .collect();
+    let file_ids = SaveIdMap::from_network(&cfg.network);
     let orig = &cfg.original;
     // Replacements as (source range, new bytes), spliced in source-byte order.
     let mut parts: Vec<(Range<usize>, String)> =
@@ -489,6 +522,40 @@ pub fn save(cfg: &LoadedConfig) -> Vec<u8> {
     }
     out.extend_from_slice(&orig[pos..]);
     out
+}
+
+/// Writes the saved bytes to a temp file in the target's directory and renames it over
+/// the target. On any error the target is untouched and the temp file is removed.
+pub fn save_to(cfg: &LoadedConfig, target: &Path) -> Result<(), ConfigError> {
+    let io_err = |source| ConfigError::Io {
+        path: target.to_path_buf(),
+        source,
+    };
+    let dir = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let name = target.file_name().ok_or_else(|| {
+        io_err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no file name",
+        ))
+    })?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = dir.join(tmp_name);
+    let result = std::fs::File::create(&tmp)
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, &save(cfg))?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, target));
+    if let Err(source) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_err(source));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -660,5 +727,164 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    fn three_node_config(extra: &str) -> Vec<u8> {
+        format!(
+            "<AutoDrive>\n    <waypoints>\n        <id>1,2,3</id>\n        <x>1.000,2.000,3.000</x>\n        <y>0.000,0.000,0.000</y>\n        <z>0.000,0.000,0.000</z>\n        <out>2,3;3;-1</out>\n        <incoming>-1;1;2,1</incoming>\n        <flags>0,0,0</flags>\n    </waypoints>\n{extra}</AutoDrive>\n"
+        )
+        .into_bytes()
+    }
+
+    fn history_apply(cfg: &mut LoadedConfig, commands: Vec<ad_core::command::Command>) {
+        let mut history = ad_core::history::History::default();
+        history
+            .apply(
+                &mut cfg.network,
+                ad_core::command::Transaction::new(commands),
+            )
+            .expect("applies");
+    }
+
+    fn saved_text(cfg: &LoadedConfig) -> String {
+        String::from_utf8(save(cfg)).expect("utf8")
+    }
+
+    #[test]
+    fn deleting_a_middle_node_renumbers() {
+        use ad_core::command::{Command, DeleteNodes};
+        let mm = marker_block("\n", "Shop").replace("2.000000", "3.000000");
+        let mut cfg = load(&three_node_config(&mm)).expect("loads");
+        let order = cfg.network.order().to_vec();
+        history_apply(
+            &mut cfg,
+            vec![Command::DeleteNodes(DeleteNodes::new(vec![order[1]]))],
+        );
+        let text = saved_text(&cfg);
+        assert!(text.contains("<id>1,2</id>"), "{text}");
+        assert!(text.contains("<out>2;-1</out>"), "{text}");
+        assert!(text.contains("<incoming>-1;1</incoming>"), "{text}");
+        assert!(text.contains("<id>2.000000</id>"), "{text}");
+        let reloaded = load(text.as_bytes()).expect("reloads");
+        assert_eq!(reloaded.network.len(), 2);
+        assert_eq!(reloaded.network.markers().len(), 1);
+    }
+
+    #[test]
+    fn missing_flags_are_generated_as_zeros() {
+        let text = String::from_utf8(config("\n", false, ""))
+            .expect("utf8")
+            .replace("        <flags>0,1</flags>\n", "");
+        let cfg = load(text.as_bytes()).expect("loads");
+        let out = saved_text(&cfg);
+        assert!(
+            out.contains("        <flags>0,0</flags>\n    </waypoints>"),
+            "{out}"
+        );
+        let reloaded = load(out.as_bytes()).expect("reloads");
+        for id in reloaded.network.order() {
+            assert_eq!(
+                reloaded.network.node(*id).map(|n| n.flag),
+                Some(NodeFlag(0))
+            );
+        }
+    }
+
+    #[test]
+    fn missing_mapmarker_is_inserted_before_root_end() {
+        use ad_core::command::{Command, EditMarker};
+        for nl in ["\n", "\r\n"] {
+            let mut cfg = load(&config(nl, false, "")).expect("loads");
+            let node = cfg.network.order()[1];
+            history_apply(
+                &mut cfg,
+                vec![Command::EditMarker(EditMarker::new(
+                    node,
+                    Some(("Shop".to_owned(), "All".to_owned())),
+                ))],
+            );
+            let out = saved_text(&cfg);
+            let expected = config(nl, false, &marker_block(nl, "Shop"));
+            assert_eq!(out, String::from_utf8(expected).expect("utf8"));
+            let reloaded = load(out.as_bytes()).expect("reloads");
+            assert_eq!(reloaded.network.markers().len(), 1);
+        }
+    }
+
+    #[test]
+    fn removing_all_markers_writes_an_empty_block() {
+        use ad_core::command::{Command, EditMarker};
+        let mut cfg = load(&config("\n", false, &marker_block("\n", "Shop"))).expect("loads");
+        let node = cfg.network.order()[1];
+        history_apply(
+            &mut cfg,
+            vec![Command::EditMarker(EditMarker::new(node, None))],
+        );
+        let out = saved_text(&cfg);
+        assert!(out.contains("    <mapmarker>\n    </mapmarker>\n"), "{out}");
+        let reloaded = load(out.as_bytes()).expect("reloads");
+        assert!(reloaded.network.markers().is_empty());
+    }
+
+    #[test]
+    fn dangling_incoming_reference_is_skipped() {
+        use ad_core::command::{Command, DeleteNodes};
+        // Node 2 lists `incoming` from node 1, but node 1 has no matching `out`.
+        let text = String::from_utf8(config("\n", false, ""))
+            .expect("utf8")
+            .replace("<out>2;-1</out>", "<out>-1;-1</out>");
+        let mut cfg = load(text.as_bytes()).expect("loads");
+        let first = cfg.network.order()[0];
+        history_apply(
+            &mut cfg,
+            vec![Command::DeleteNodes(DeleteNodes::new(vec![first]))],
+        );
+        let out = saved_text(&cfg);
+        assert!(out.contains("<incoming>-1</incoming>"), "{out}");
+        assert!(out.contains("<out>-1</out>"), "{out}");
+        assert_eq!(load(out.as_bytes()).expect("reloads").network.len(), 1);
+    }
+
+    #[test]
+    fn save_id_map_follows_order() {
+        let cfg = load(&config("\n", false, "")).expect("loads");
+        let ids = SaveIdMap::from_network(&cfg.network);
+        let order = cfg.network.order();
+        assert_eq!((ids.get(order[0]), ids.get(order[1])), (Some(1), Some(2)));
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ad_io_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    #[test]
+    fn save_to_replaces_target_and_leaves_no_temp_file() {
+        let dir = scratch_dir("ok");
+        let target = dir.join("AutoDrive_config.xml");
+        std::fs::write(&target, b"old").expect("seed");
+        let bytes = config("\n", false, "");
+        let cfg = load(&bytes).expect("loads");
+        save_to(&cfg, &target).expect("saves");
+        assert_eq!(std::fs::read(&target).expect("read"), bytes);
+        assert_eq!(std::fs::read_dir(&dir).expect("ls").count(), 1);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn save_to_missing_directory_fails_with_io_error() {
+        let dir = scratch_dir("fail");
+        let target = dir.join("missing").join("AutoDrive_config.xml");
+        let cfg = load(&config("\n", false, "")).expect("loads");
+        match save_to(&cfg, &target) {
+            Err(e @ ConfigError::Io { .. }) => {
+                assert!(e.to_string().contains("AutoDrive_config.xml"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(!dir.join("missing").exists());
+        assert_eq!(std::fs::read_dir(&dir).expect("ls").count(), 0);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

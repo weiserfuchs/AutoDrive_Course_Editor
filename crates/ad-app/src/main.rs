@@ -50,8 +50,8 @@ impl App {
         let Some(target) = dialog.save_file() else {
             return;
         };
-        if let Err(e) = std::fs::write(&target, config_xml::save(config)) {
-            self.error = Some(format!("Cannot write {}: {e}", target.display()));
+        if let Err(e) = config_xml::save_to(config, &target) {
+            self.error = Some(e.to_string());
         }
     }
 
