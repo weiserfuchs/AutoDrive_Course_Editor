@@ -3,7 +3,7 @@ title: 'The fixture opens, shows its nodes and saves byte-identically'
 type: 'feature'
 ticket: '2'
 created: '2026-11-05'
-status: 'built'
+status: done
 baseline_revision: 'ccf8e09f3c842e44e58b958f1fb0c03e531ea934'
 route: 'full'
 route_source: 'auto'
@@ -113,6 +113,8 @@ context: ['{project-root}/_bmad-output/initiative-rust-rewrite/architecture-rust
 - Given a malformed config opened in the app, when loading fails, then an error window names the problem, and the previously loaded network stays shown.
 
 ## Implementation Notes
+
+- 2026-11-05: user confirmed that the app opens `AutoDrive_config.xml`, shows the network, and Save leaves the fixture byte-identical (`git status` clean).
 
 ## Plan Change Log
 
