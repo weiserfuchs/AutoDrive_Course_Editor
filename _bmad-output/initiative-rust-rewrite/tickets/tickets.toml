@@ -1,0 +1,88 @@
+# Epics of initiative-rust-rewrite in build order.
+
+[[epic]]
+id = 1
+slug = "epic-core-config-roundtrip"
+title = "FS25 configs load, display and save losslessly"
+description = "The Rust workspace, CI, core model, History (undo/redo, saved_at), job runner and Settings skeleton exist; the editor opens the FS25 fixture in the background, draws its nodes and connections plainly, honours read-only legacy configs, and saves byte-identically."
+covers = ["R1", "R2", "R3", "R7"]
+
+[[epic]]
+id = 2
+slug = "epic-map-view"
+title = "The map view is fast and complete"
+description = "Local map-image and heightmap lookup, PNG load, MapContext attach and height sampling exist; map image, nodes, connections, markers, icons and grid render with cursor-centred zoom and pan within the frame budget on the fixture."
+covers = ["R8", "R9", "R15"]
+after = [{ epic = 1, needs = "Document, Network queries and a loaded fixture" }]
+
+[[epic]]
+id = 3
+slug = "epic-node-connection-tools"
+title = "Users edit nodes and connections"
+description = "Add, move, delete, connect, priority, flip and rotate tools work through undoable commands that respect read-only mode; per-edit node warnings update; the unsaved state is shown and closing asks for confirmation."
+covers = ["R4", "R7"]
+after = [{ epic = 2, needs = "ViewTransform, hit-testing and overlay drawing" }]
+
+[[epic]]
+id = 4
+slug = "epic-selection-clipboard"
+title = "Users select, align, copy and paste"
+description = "Rectangle, lasso and click selection, axis alignment, location editing and copy/cut/paste work on the fixture and undo cleanly."
+covers = ["R6"]
+after = [{ epic = 3, needs = "the Tool trait and core edit commands" }]
+
+[[epic]]
+id = 5
+slug = "epic-curves-lines"
+title = "Users draw curves and lines"
+description = "Bezier curves, arc splines and straight lines preview, adjust and commit as nodes and connections with heightmap heights."
+covers = ["R5"]
+after = [{ epic = 3, needs = "the Tool trait, connect commands and overlays" }]
+
+[[epic]]
+id = 6
+slug = "epic-markers-parking"
+title = "Users manage markers, groups and parking"
+description = "Markers and groups are added, edited and deleted; vehicles.xml park destinations survive and update on save."
+covers = ["R10"]
+after = [{ epic = 3, needs = "the Tool trait and command pattern" }]
+
+[[epic]]
+id = 7
+slug = "epic-map-images-import"
+title = "Map images arrive from anywhere"
+description = "Map images and heightmaps are downloaded on demand and imported from DDS files and mod zips, proven by a DDS format spike; local lookup and attach come from epic 2."
+covers = ["R9"]
+after = [{ epic = 2, needs = "MapContext attach and map texture upload" }]
+
+[[epic]]
+id = 8
+slug = "epic-scans-autosave"
+title = "The network stays healthy and recoverable"
+description = "Overlap, out-of-bounds and connection-consistency scans fix problems undoably; merge backups and rotating autosave write side files."
+covers = ["R11", "R12"]
+after = [{ epic = 3, needs = "edit commands and the job runner" }]
+
+[[epic]]
+id = 11
+slug = "epic-route-manager"
+title = "Route-manager files load and save"
+description = "Route-manager XML (routeExport with markers and groups) loads into the same model and saves back in its own format."
+covers = ["R13"]
+after = [{ epic = 1, needs = "Document, Network and config I/O patterns" }, { epic = 6, needs = "marker and group model" }]
+
+[[epic]]
+id = 9
+slug = "epic-settings-ui-shell"
+title = "Settings, shortcuts and the full UI shell"
+description = "Settings, per-map info and shortcuts persist in TOML; every remaining Java menu, toggle and the update check exist, checked against the UI-shell inventory."
+covers = ["R14", "R16"]
+after = [{ epic = 4, needs = "selection and align tools" }, { epic = 5, needs = "curve tools" }, { epic = 6, needs = "marker tools" }, { epic = 7, needs = "import menus" }, { epic = 8, needs = "scan menus" }, { epic = 11, needs = "route-manager menus" }]
+
+[[epic]]
+id = 10
+slug = "epic-release-java-removal"
+title = "The Rust editor ships and Java is gone"
+description = "A tagged release publishes the Windows executable, parity is signed off against R1-R16, the frame budget is re-measured, and src/main/java with the Maven build is removed."
+covers = ["R15", "R16"]
+after = [{ epic = 9, needs = "feature parity across all menus and tools" }]

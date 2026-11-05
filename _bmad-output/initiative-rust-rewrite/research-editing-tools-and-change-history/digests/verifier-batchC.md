@@ -1,0 +1,4 @@
+Verifier batch C (refs 29-41) @ e4fe43e: 12 verified, 1 disputed (32).
+29 verified RedoMenu.java:17 VK_Z SHIFT_DOWN_MASK. 30 verified UndoMenu.java:17 VK_Z CTRL_DOWN_MASK. 31 verified MultiSelectManager.java:90-99.
+32 disputed MultiSelectManager.java:156-200: rectangle branch (180+) loops all nodes with strict </> (186) but adds only if alwaysSelectHidden or isSelectable (188); freeform branch not covered by claim; cited range ends before branch end.
+33 verified 102-153; BUTTON3, drag active, selectedNodes non-empty. 34 verified WidgetManager.java:207-212. 35 verified AlignBaseButton.java:36-51 BUTTON1. 36 verified HorizontalAlignButton.java:58-65. 37 verified VerticalAlignButton.java:59-66. 38 verified AlignBaseButton.java:81-146, ZStore 121-144. 39 verified EditLocationButton.java:41-84 (mouseClicked, showEditNodeLocationDialog). 40 verified SnapShot.java:62-87. 41 verified SnapShot.java:403-456; connectionList only internal (createSnapShot :218).
