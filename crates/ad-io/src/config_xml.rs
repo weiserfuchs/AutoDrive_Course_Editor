@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Range;
 
-use ad_core::network::{Marker, Network, Node, NodeFlag, NodeId};
+use ad_core::network::{LoadedNode, Marker, Network, NetworkError, Node, NodeFlag, NodeId};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
 use thiserror::Error;
@@ -38,6 +38,8 @@ pub enum ConfigError {
     },
     #[error("<{element}> refers to unknown node {value:?}")]
     UnknownNode { element: String, value: String },
+    #[error(transparent)]
+    Network(#[from] NetworkError),
 }
 
 fn xml_err(e: impl std::fmt::Display) -> ConfigError {
@@ -160,8 +162,8 @@ fn parse_adjacency(
     element: &str,
     text: &str,
     expected: usize,
-    by_file_id: &HashMap<i64, NodeId>,
-) -> Result<Vec<Vec<NodeId>>, ConfigError> {
+    by_file_id: &HashMap<i64, usize>,
+) -> Result<Vec<Vec<usize>>, ConfigError> {
     let mut out = Vec::with_capacity(expected);
     if !text.trim().is_empty() {
         for group in text.split(';') {
@@ -205,42 +207,43 @@ fn build_network(waypoints: &Elem, mapmarker: Option<&Elem>) -> Result<Network, 
     })?;
     let n = ids.len();
     let xs = parse_list("x", require(waypoints, "x")?, Some(n), |s| {
-        s.parse::<f64>().ok()
+        s.parse::<f64>().ok().filter(|v| v.is_finite())
     })?;
     let ys = parse_list("y", require(waypoints, "y")?, Some(n), |s| {
-        s.parse::<f64>().ok()
+        s.parse::<f64>().ok().filter(|v| v.is_finite())
     })?;
     let zs = parse_list("z", require(waypoints, "z")?, Some(n), |s| {
-        s.parse::<f64>().ok()
+        s.parse::<f64>().ok().filter(|v| v.is_finite())
     })?;
     let flags = match require(waypoints, "flags") {
         Ok(t) => parse_list("flags", t, Some(n), |s| s.parse::<u8>().ok())?,
         Err(_) => vec![0; n],
     };
 
-    let mut network = Network::new();
     let mut by_file_id = HashMap::with_capacity(n);
-    let mut order = Vec::with_capacity(n);
-    for i in 0..n {
-        let id = network.push_node(Node {
+    for (i, file_id) in ids.iter().enumerate() {
+        by_file_id.insert(*file_id, i);
+    }
+    let outs = parse_adjacency("out", require(waypoints, "out")?, n, &by_file_id)?;
+    let ins = parse_adjacency("incoming", require(waypoints, "incoming")?, n, &by_file_id)?;
+    let loaded = outs
+        .into_iter()
+        .zip(ins)
+        .enumerate()
+        .map(|(i, (outgoing, incoming))| LoadedNode {
             x: xs[i],
             y: ys[i],
             z: zs[i],
             flag: NodeFlag(flags[i]),
-            outgoing: Vec::new(),
-            incoming: Vec::new(),
-        });
-        by_file_id.insert(ids[i], id);
-        order.push(id);
-    }
-    let outs = parse_adjacency("out", require(waypoints, "out")?, n, &by_file_id)?;
-    let ins = parse_adjacency("incoming", require(waypoints, "incoming")?, n, &by_file_id)?;
-    for ((id, out), inc) in order.iter().zip(outs).zip(ins) {
-        if let Some(node) = network.node_mut(*id) {
-            node.outgoing = out;
-            node.incoming = inc;
-        }
-    }
+            outgoing,
+            incoming,
+        })
+        .collect();
+    let mut network = Network::from_loaded(loaded)?;
+    let by_file_id: HashMap<i64, NodeId> = by_file_id
+        .into_iter()
+        .map(|(file_id, i)| (file_id, network.order()[i]))
+        .collect();
 
     for entry in mapmarker.map(|m| m.children.as_slice()).unwrap_or_default() {
         let id_text = require(entry, "id")?;
@@ -366,7 +369,7 @@ fn escape_text(s: &str, out: &mut String) {
 fn join_nodes(
     network: &Network,
     file_ids: &HashMap<NodeId, usize>,
-    pick: impl Fn(&Node) -> &Vec<NodeId>,
+    pick: impl Fn(&Node) -> &[NodeId],
 ) -> String {
     let mut out = String::new();
     for (i, id) in network.order().iter().enumerate() {
@@ -414,8 +417,8 @@ fn waypoints_block(cfg: &LoadedConfig, file_ids: &HashMap<NodeId, usize>) -> Str
             "x" => join_nodes_values(net, |n| format!("{:.3}", n.x)),
             "y" => join_nodes_values(net, |n| format!("{:.3}", n.y)),
             "z" => join_nodes_values(net, |n| format!("{:.3}", n.z)),
-            "out" => join_nodes(net, file_ids, |n| &n.outgoing),
-            "incoming" => join_nodes(net, file_ids, |n| &n.incoming),
+            "out" => join_nodes(net, file_ids, |n| n.outgoing()),
+            "incoming" => join_nodes(net, file_ids, |n| n.incoming()),
             "flags" => join_nodes_values(net, |n| n.flag.0.to_string()),
             _ => continue,
         };
@@ -545,6 +548,16 @@ mod tests {
     }
 
     #[test]
+    fn unusual_flag_value_roundtrips() {
+        let text = String::from_utf8(config("\n", false, ""))
+            .expect("utf8")
+            .replace("<flags>0,1</flags>", "<flags>0,7</flags>");
+        let cfg = roundtrip(text.as_bytes());
+        let second = cfg.network.order()[1];
+        assert_eq!(cfg.network.node(second).map(|n| n.flag), Some(NodeFlag(7)));
+    }
+
+    #[test]
     fn small_lf_file_roundtrips() {
         let cfg = roundtrip(&config("\n", false, &marker_block("\n", "Shop")));
         assert_eq!(cfg.network.len(), 2);
@@ -566,7 +579,7 @@ mod tests {
     fn empty_adjacency_roundtrips() {
         let cfg = roundtrip(&config("\n", false, ""));
         let first = cfg.network.order()[1];
-        assert!(cfg.network.node(first).expect("node").outgoing.is_empty());
+        assert!(cfg.network.node(first).expect("node").outgoing().is_empty());
     }
 
     #[test]
@@ -607,6 +620,22 @@ mod tests {
         let bad = text.replace("<x>1.000,2.500</x>", "<x>1.000</x>");
         match load(bad.as_bytes()) {
             Err(ConfigError::CountMismatch { element, .. }) => assert_eq!(element, "x"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_finite_coordinate_is_rejected() {
+        let text = String::from_utf8(config(
+            "
+", false, "",
+        ))
+        .expect("utf8");
+        let bad = text.replace("<x>1.000,2.500</x>", "<x>NaN,2.500</x>");
+        match load(bad.as_bytes()) {
+            Err(ConfigError::InvalidValue { element, value }) => {
+                assert_eq!((element.as_str(), value.as_str()), ("x", "NaN"));
+            }
             other => panic!("unexpected {other:?}"),
         }
     }

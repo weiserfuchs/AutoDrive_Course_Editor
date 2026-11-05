@@ -92,7 +92,7 @@ impl App {
                 continue;
             };
             let from = to_screen(node.x, node.z);
-            for target in &node.outgoing {
+            for target in node.outgoing() {
                 if let Some(t) = net.node(*target) {
                     painter.line_segment([from, to_screen(t.x, t.z)], line);
                 }

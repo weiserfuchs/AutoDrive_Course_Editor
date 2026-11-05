@@ -1,7 +1,7 @@
 //! Fails when `ad-core` gains a dependency that is not on the allowlist (AD-1).
 
 /// Crates `ad-core` may depend on. Later stories extend this (for example `rstar`).
-const ALLOWED: &[&str] = &[];
+const ALLOWED: &[&str] = &["rstar", "thiserror"];
 
 /// Crates that must never appear in `ad-core`.
 const FORBIDDEN: &[&str] = &[

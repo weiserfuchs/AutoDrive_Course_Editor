@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rstar.workspace = true
+thiserror.workspace = true
 
 [lints.clippy]
 unwrap_used = "deny"
