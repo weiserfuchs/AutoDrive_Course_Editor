@@ -109,6 +109,63 @@ pub struct Marker {
     pub group: String,
 }
 
+/// Which adjacency list of a node a record refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Out,
+    In,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkChange {
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinkRecord {
+    node: NodeId,
+    side: Side,
+    index: usize,
+    value: NodeId,
+    change: LinkChange,
+}
+
+/// The list entries a link operation added or removed, with their positions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkDelta(Vec<LinkRecord>);
+
+impl LinkDelta {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// A node taken out of the network, with what `Network::reinsert` needs to restore it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemovedNode {
+    id: NodeId,
+    node: Node,
+    order_pos: usize,
+    links: LinkDelta,
+    markers: Vec<(usize, Marker)>,
+}
+
+impl RemovedNode {
+    pub fn id(&self) -> NodeId {
+        self.id
+    }
+}
+
+/// What a marker edit changed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MarkerDelta {
+    Unchanged,
+    Added { index: usize },
+    Replaced { index: usize, old: Marker },
+    Removed { index: usize, marker: Marker },
+}
+
 type NodeEntry = GeomWithData<[f64; 2], NodeId>;
 type EdgeEntry = GeomWithData<Line<[f64; 2]>, (NodeId, NodeId)>;
 
@@ -290,12 +347,41 @@ impl Network {
         Ok(())
     }
 
+    fn list_mut(&mut self, node: NodeId, side: Side) -> Option<&mut Vec<NodeId>> {
+        self.nodes.get_mut(&node).map(|n| match side {
+            Side::Out => &mut n.outgoing,
+            Side::In => &mut n.incoming,
+        })
+    }
+
+    /// Removes one edge-index entry for `a -> b` when both nodes exist.
+    fn drop_edge(&mut self, a: NodeId, b: NodeId) {
+        if let (Some(from), Some(to)) = (self.nodes.get(&a), self.nodes.get(&b)) {
+            let entry = edge_entry(from, to, (a, b));
+            self.edge_index.remove(&entry);
+        }
+    }
+
+    /// Inserts an edge-index entry for `a -> b` when both nodes exist.
+    fn put_edge(&mut self, a: NodeId, b: NodeId) {
+        if let (Some(from), Some(to)) = (self.nodes.get(&a), self.nodes.get(&b)) {
+            self.edge_index.insert(edge_entry(from, to, (a, b)));
+        }
+    }
+
     /// Adds `a.out + b` (and optionally `b.in + a`) when missing. Both nodes must exist.
-    fn add_link(&mut self, a: NodeId, b: NodeId, with_incoming: bool) {
+    fn add_link(&mut self, a: NodeId, b: NodeId, with_incoming: bool, delta: &mut LinkDelta) {
         let mut added = false;
         if let Some(node) = self.nodes.get_mut(&a)
             && !node.outgoing.contains(&b)
         {
+            delta.0.push(LinkRecord {
+                node: a,
+                side: Side::Out,
+                index: node.outgoing.len(),
+                value: b,
+                change: LinkChange::Added,
+            });
             node.outgoing.push(b);
             added = true;
         }
@@ -303,10 +389,67 @@ impl Network {
             && let Some(node) = self.nodes.get_mut(&b)
             && !node.incoming.contains(&a)
         {
+            delta.0.push(LinkRecord {
+                node: b,
+                side: Side::In,
+                index: node.incoming.len(),
+                value: a,
+                change: LinkChange::Added,
+            });
             node.incoming.push(a);
         }
-        if added && let (Some(from), Some(to)) = (self.nodes.get(&a), self.nodes.get(&b)) {
-            self.edge_index.insert(edge_entry(from, to, (a, b)));
+        if added {
+            self.put_edge(a, b);
+        }
+    }
+
+    /// Removes every `value` from the list, highest index first, and records each removal.
+    fn take_entries(&mut self, node: NodeId, side: Side, value: NodeId, delta: &mut LinkDelta) {
+        let Some(list) = self.list_mut(node, side) else {
+            return;
+        };
+        let hits: Vec<usize> = list
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| **v == value)
+            .map(|(i, _)| i)
+            .collect();
+        for &index in hits.iter().rev() {
+            list.remove(index);
+            delta.0.push(LinkRecord {
+                node,
+                side,
+                index,
+                value,
+                change: LinkChange::Removed,
+            });
+        }
+        if side == Side::Out {
+            for _ in &hits {
+                self.drop_edge(node, value);
+            }
+        }
+    }
+
+    /// Undoes a delta exactly: records are replayed backwards.
+    pub fn revert_links(&mut self, delta: &LinkDelta) {
+        for r in delta.0.iter().rev() {
+            if let Some(list) = self.list_mut(r.node, r.side) {
+                match r.change {
+                    LinkChange::Added => {
+                        if r.index < list.len() {
+                            list.remove(r.index);
+                        }
+                    }
+                    LinkChange::Removed => list.insert(r.index.min(list.len()), r.value),
+                }
+            }
+            if r.side == Side::Out {
+                match r.change {
+                    LinkChange::Added => self.drop_edge(r.node, r.value),
+                    LinkChange::Removed => self.put_edge(r.node, r.value),
+                }
+            }
         }
     }
 
@@ -316,40 +459,29 @@ impl Network {
         a: NodeId,
         b: NodeId,
         shape: ConnectionShape,
-    ) -> Result<(), NetworkError> {
+    ) -> Result<LinkDelta, NetworkError> {
         self.check_pair(a, b)?;
+        let mut delta = LinkDelta::default();
         match shape {
-            ConnectionShape::OneWay => self.add_link(a, b, true),
-            ConnectionShape::Reverse => self.add_link(a, b, false),
+            ConnectionShape::OneWay => self.add_link(a, b, true, &mut delta),
+            ConnectionShape::Reverse => self.add_link(a, b, false, &mut delta),
             ConnectionShape::Dual => {
-                self.add_link(a, b, true);
-                self.add_link(b, a, true);
+                self.add_link(a, b, true, &mut delta);
+                self.add_link(b, a, true, &mut delta);
             }
         }
-        Ok(())
+        Ok(delta)
     }
 
     /// Removes every link between `a` and `b`, in both directions.
-    pub fn disconnect(&mut self, a: NodeId, b: NodeId) -> Result<(), NetworkError> {
+    pub fn disconnect(&mut self, a: NodeId, b: NodeId) -> Result<LinkDelta, NetworkError> {
         self.check_pair(a, b)?;
+        let mut delta = LinkDelta::default();
         for (from, to) in [(a, b), (b, a)] {
-            let mut removed = 0;
-            if let Some(node) = self.nodes.get_mut(&from) {
-                let before = node.outgoing.len();
-                node.outgoing.retain(|t| *t != to);
-                removed = before - node.outgoing.len();
-                node.incoming.retain(|t| *t != to);
-            }
-            if removed > 0
-                && let (Some(f), Some(t)) = (self.nodes.get(&from), self.nodes.get(&to))
-            {
-                let entry = edge_entry(f, t, (from, to));
-                for _ in 0..removed {
-                    self.edge_index.remove(&entry);
-                }
-            }
+            self.take_entries(from, Side::Out, to, &mut delta);
+            self.take_entries(from, Side::In, to, &mut delta);
         }
-        Ok(())
+        Ok(delta)
     }
 
     /// Makes the link between `a` and `b` exactly `shape`.
@@ -358,9 +490,140 @@ impl Network {
         a: NodeId,
         b: NodeId,
         shape: ConnectionShape,
-    ) -> Result<(), NetworkError> {
-        self.disconnect(a, b)?;
-        self.connect(a, b, shape)
+    ) -> Result<LinkDelta, NetworkError> {
+        let mut delta = self.disconnect(a, b)?;
+        delta.0.extend(self.connect(a, b, shape)?.0);
+        Ok(delta)
+    }
+
+    /// Removes a node, every list entry that points at it and its markers. The record
+    /// restores all of it through `reinsert`, provided later removals were reinserted first.
+    pub fn remove_node(&mut self, id: NodeId) -> Result<RemovedNode, NetworkError> {
+        let node = self.require(id)?;
+        let own_out = node.outgoing.clone();
+        let mut neighbours: Vec<NodeId> = node
+            .outgoing
+            .iter()
+            .chain(&node.incoming)
+            .copied()
+            .filter(|n| *n != id)
+            .collect();
+        // Sources of one-way (Reverse) links are not in the node's own lists.
+        neighbours.extend(
+            self.edge_index
+                .locate_in_envelope_intersecting(AABB::from_point([node.x, node.z]))
+                .filter(|e| e.data.1 == id && e.data.0 != id)
+                .map(|e| e.data.0),
+        );
+        neighbours.sort();
+        neighbours.dedup();
+        for t in own_out {
+            self.drop_edge(id, t);
+        }
+        let mut links = LinkDelta::default();
+        for n in neighbours {
+            self.take_entries(n, Side::Out, id, &mut links);
+            self.take_entries(n, Side::In, id, &mut links);
+        }
+        let (point, node) = match self.nodes.remove(&id) {
+            Some(node) => ([node.x, node.z], node),
+            None => return Err(NetworkError::UnknownNode(id)),
+        };
+        self.node_index.remove(&GeomWithData::new(point, id));
+        let order_pos = self.order.iter().position(|o| *o == id).unwrap_or(0);
+        if order_pos < self.order.len() {
+            self.order.remove(order_pos);
+        }
+        let mut markers = Vec::new();
+        for index in (0..self.markers.len()).rev() {
+            if self.markers[index].node == id {
+                markers.push((index, self.markers.remove(index)));
+            }
+        }
+        markers.reverse();
+        Ok(RemovedNode {
+            id,
+            node,
+            order_pos,
+            links,
+            markers,
+        })
+    }
+
+    /// Restores a removed node under its original id, at its original order position.
+    pub fn reinsert(&mut self, removed: RemovedNode) {
+        let RemovedNode {
+            id,
+            node,
+            order_pos,
+            links,
+            markers,
+        } = removed;
+        let point = [node.x, node.z];
+        let own_out = node.outgoing.clone();
+        self.nodes.insert(id, node);
+        self.order.insert(order_pos.min(self.order.len()), id);
+        self.node_index.insert(GeomWithData::new(point, id));
+        self.revert_links(&links);
+        for t in own_out {
+            self.put_edge(id, t);
+        }
+        for (index, marker) in markers {
+            self.markers.insert(index.min(self.markers.len()), marker);
+        }
+        self.next_id = self.next_id.max(id.0 + 1);
+    }
+
+    /// Sets the marker of `node`, replacing it in place or appending a new one.
+    pub fn set_marker(
+        &mut self,
+        node: NodeId,
+        name: String,
+        group: String,
+    ) -> Result<MarkerDelta, NetworkError> {
+        self.require(node)?;
+        let marker = Marker { node, name, group };
+        if let Some(index) = self.markers.iter().position(|m| m.node == node) {
+            let old = std::mem::replace(&mut self.markers[index], marker);
+            Ok(MarkerDelta::Replaced { index, old })
+        } else {
+            self.markers.push(marker);
+            Ok(MarkerDelta::Added {
+                index: self.markers.len() - 1,
+            })
+        }
+    }
+
+    /// Removes the marker of `node`, if it has one.
+    pub fn remove_marker(&mut self, node: NodeId) -> Result<MarkerDelta, NetworkError> {
+        self.require(node)?;
+        Ok(match self.markers.iter().position(|m| m.node == node) {
+            Some(index) => MarkerDelta::Removed {
+                index,
+                marker: self.markers.remove(index),
+            },
+            None => MarkerDelta::Unchanged,
+        })
+    }
+
+    pub fn revert_marker(&mut self, delta: &MarkerDelta) {
+        match delta {
+            MarkerDelta::Unchanged => {}
+            MarkerDelta::Added { index } => {
+                if *index < self.markers.len() {
+                    self.markers.remove(*index);
+                }
+            }
+            MarkerDelta::Replaced { index, old } => {
+                if let Some(slot) = self.markers.get_mut(*index) {
+                    *slot = old.clone();
+                }
+            }
+            MarkerDelta::Removed { index, marker } => {
+                self.markers
+                    .insert((*index).min(self.markers.len()), marker.clone());
+            }
+        }
     }
 
     /// The displayed kind of the link from `a` to `b` (Java `RoadMap.getConnection`).
@@ -614,6 +877,116 @@ mod tests {
         assert_eq!(n.nodes, before);
         assert!(n.edges_near(0.0, 0.0, HUGE).is_empty());
         assert!(ghost.to_string().contains("99"));
+    }
+
+    #[test]
+    fn link_deltas_revert_exactly() {
+        let (mut n, a, b) = two();
+        let c = n.add_node(5.0, 0.0, 5.0, NodeFlag::REGULAR);
+        n.connect(a, b, ConnectionShape::Dual).expect("ok");
+        n.connect(c, a, ConnectionShape::OneWay).expect("ok");
+        n.connect(a, c, ConnectionShape::Reverse).expect("ok");
+        let before = (n.nodes.clone(), n.edges_near(0.0, 0.0, HUGE));
+        let d1 = n.set_shape(a, b, ConnectionShape::Reverse).expect("ok");
+        let d2 = n.disconnect(a, c).expect("ok");
+        let d3 = n.connect(b, c, ConnectionShape::Dual).expect("ok");
+        assert!(!d1.is_empty() && !d2.is_empty() && !d3.is_empty());
+        for d in [&d3, &d2, &d1] {
+            n.revert_links(d);
+        }
+        assert_eq!((n.nodes.clone(), n.edges_near(0.0, 0.0, HUGE)), before);
+    }
+
+    #[test]
+    fn remove_and_reinsert_restore_everything() {
+        let (mut n, a, b) = two();
+        let c = n.add_node(5.0, 0.0, 5.0, NodeFlag(3));
+        n.connect(a, b, ConnectionShape::Dual).expect("ok");
+        n.connect(c, b, ConnectionShape::OneWay).expect("ok");
+        n.connect(b, c, ConnectionShape::Reverse).expect("ok");
+        n.push_marker(Marker {
+            node: a,
+            name: "A".into(),
+            group: "g".into(),
+        });
+        n.push_marker(Marker {
+            node: b,
+            name: "B".into(),
+            group: "g".into(),
+        });
+        let before = (
+            n.nodes.clone(),
+            n.order.clone(),
+            n.markers.clone(),
+            n.edges_near(0.0, 0.0, HUGE),
+            n.in_rect(-HUGE, -HUGE, HUGE, HUGE),
+        );
+        let removed = n.remove_node(a).expect("ok");
+        assert_eq!(removed.id(), a);
+        assert!(n.node(a).is_none() && n.order() == [b, c]);
+        assert_eq!(n.markers().len(), 1);
+        assert_eq!(n.in_rect(-HUGE, -HUGE, HUGE, HUGE), vec![b, c]);
+        assert_eq!(n.remove_node(a).err(), Some(NetworkError::UnknownNode(a)));
+        n.reinsert(removed);
+        assert_eq!(
+            (
+                n.nodes.clone(),
+                n.order.clone(),
+                n.markers.clone(),
+                n.edges_near(0.0, 0.0, HUGE),
+                n.in_rect(-HUGE, -HUGE, HUGE, HUGE),
+            ),
+            before
+        );
+        assert_eq!(n.nearest(0.1, 0.1), Some(a));
+    }
+
+    #[test]
+    fn marker_deltas_revert() {
+        let (mut n, a, b) = two();
+        let d1 = n.set_marker(a, "A".into(), "g".into()).expect("ok");
+        let d2 = n.set_marker(b, "B".into(), "g".into()).expect("ok");
+        let d3 = n.set_marker(a, "A2".into(), "h".into()).expect("ok");
+        let d4 = n.remove_marker(a).expect("ok");
+        assert_eq!(n.markers().len(), 1);
+        assert_eq!(n.remove_marker(a).expect("ok"), MarkerDelta::Unchanged);
+        for d in [&d4, &d3] {
+            n.revert_marker(d);
+        }
+        assert_eq!(n.markers()[0].name, "A");
+        n.revert_marker(&d2);
+        n.revert_marker(&d1);
+        assert!(n.markers().is_empty());
+        let ghost = NodeId(99);
+        assert_eq!(
+            n.set_marker(ghost, String::new(), String::new()),
+            Err(NetworkError::UnknownNode(ghost))
+        );
+    }
+
+    #[test]
+    fn deleting_the_target_of_a_reverse_link_leaves_no_reference() {
+        let (mut n, a, d) = two();
+        n.connect(a, d, ConnectionShape::Reverse).expect("ok");
+        let snap = |n: &Network| {
+            (
+                n.nodes.clone(),
+                n.order.clone(),
+                n.edges_near(0.0, 0.0, HUGE),
+                n.in_rect(-HUGE, -HUGE, HUGE, HUGE),
+            )
+        };
+        let before = snap(&n);
+        let removed = n.remove_node(d).expect("ok");
+        assert!(out(&n, a).is_empty());
+        assert!(n.edges_near(0.0, 0.0, HUGE).is_empty());
+        let after = snap(&n);
+        n.reinsert(removed);
+        assert_eq!(snap(&n), before);
+        let removed = n.remove_node(d).expect("ok");
+        assert_eq!(snap(&n), after);
+        n.reinsert(removed);
+        assert_eq!(snap(&n), before);
     }
 
     #[test]
