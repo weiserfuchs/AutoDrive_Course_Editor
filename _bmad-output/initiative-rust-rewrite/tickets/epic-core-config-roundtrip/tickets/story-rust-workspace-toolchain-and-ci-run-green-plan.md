@@ -3,7 +3,7 @@ title: 'Rust workspace, toolchain and CI run green'
 type: 'chore'
 ticket: '1'
 created: '2026-11-05'
-status: 'built'
+status: done
 baseline_revision: 'afbadf83f4147b8b0226e39435d34e9dbaace0a8'
 route: 'full'
 route_source: 'auto'
@@ -71,6 +71,8 @@ context: ['{project-root}/_bmad-output/initiative-rust-rewrite/architecture-rust
 - Given the app built in debug, when the user runs `cargo run -p ad-app`, then an empty window titled "AutoDrive Course Editor" appears. This is checked by the user.
 
 ## Implementation Notes
+
+- 2026-11-05: user confirmed that `cargo run -p ad-app` opens the empty "AutoDrive Course Editor" window.
 
 - Review patches were applied directly by the orchestrator; the implementer session had already ended.
 
