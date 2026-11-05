@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+
+[workspace.dependencies]
+eframe = "0.37.0"
+ad-core = { path = "crates/ad-core" }
+ad-io = { path = "crates/ad-io" }

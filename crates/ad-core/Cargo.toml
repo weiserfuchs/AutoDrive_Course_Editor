@@ -1,0 +1,11 @@
+[package]
+name = "ad-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

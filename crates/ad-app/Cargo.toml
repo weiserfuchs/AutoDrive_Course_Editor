@@ -1,0 +1,10 @@
+[package]
+name = "ad-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ad-core.workspace = true
+ad-io.workspace = true
+eframe.workspace = true
