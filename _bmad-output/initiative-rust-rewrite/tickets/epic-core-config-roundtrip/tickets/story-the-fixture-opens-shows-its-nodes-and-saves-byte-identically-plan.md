@@ -3,14 +3,14 @@ title: 'The fixture opens, shows its nodes and saves byte-identically'
 type: 'feature'
 ticket: '2'
 created: '2026-11-05'
-status: 'ready-for-dev'
-baseline_revision: ''
+status: 'built'
+baseline_revision: 'ccf8e09f3c842e44e58b958f1fb0c03e531ea934'
 route: 'full'
 route_source: 'auto'
 risk: 'high'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: ['{project-root}/_bmad-output/initiative-rust-rewrite/architecture-rust-rewrite/architecture-rust-rewrite.md']
 ---
@@ -117,6 +117,19 @@ context: ['{project-root}/_bmad-output/initiative-rust-rewrite/architecture-rust
 ## Plan Change Log
 
 ## Review Triage Log
+
+| # | Finding | Verdict | Route | Evidence |
+|---|---------|---------|-------|----------|
+| 1 | `save` panics when `<mapmarker>` precedes `<waypoints>` | medium | patch | `load` accepts either order; `save` slices `orig[waypoints.end..mm.start]`, out of range when mapmarker is first. Violates the "never panics on input" rule (AD-12). |
+| 2 | `<AutoDrive/>` reports "unexpected root <AutoDrive>, expected <AutoDrive>" | low | reject | The message is real but confusing. Nobody meets it in everyday use, and the fix adds a branch. |
+| 3 | Duplicate or non-sequential `<id>` values merge silently or are renumbered | low | reject | Only malformed or hand-edited files reach this; game files are 1..N. The fix adds validation guards. |
+| 4 | A missing `<flags>` is generated on save | false | reject | AD-6 mandates generating a missing `<flags>` with zeros. The byte-identity rule targets the fixture, which has `<flags>`. |
+| 5 | `&quot;`/`&apos;`/`&#NN;` and a raw `>` are not written back as-is | low | reject | Matches the plan's escape set. The fixture uses only `&amp;`. Fixing it means preserving raw text, which adds complexity. |
+| 6 | NaN/inf are accepted, and >3 decimals become 3 | low | reject | `{:.3}` is the specified game format. NaN input is unlikely and needs a new guard. |
+| 7 | A marker id like `2.7` maps to node 2 | low | reject | The game writes `N.000000`. Rejecting fractions adds a guard. |
+| 8 | Inserting a missing `<mapmarker>` when markers exist is untested | low | reject | No caller can add markers in this story; that path is reachable only from story 3+. |
+| 9 | Save always opens a Save-As dialog | false | reject | The plan requires rfd dialogs for Save. The dialog is prefilled with the opened path, so a confirm overwrites in place. |
+| 10 | Bidirectional edges are drawn twice, with no culling | low | reject | Cosmetic for the tracer; the real map view is epic 2. |
 
 ## Design Notes
 

@@ -8,5 +8,8 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 eframe = "0.37.0"
+quick-xml = "0.42.0"
+thiserror = "2.0.21"
+rfd = "0.17.2"
 ad-core = { path = "crates/ad-core" }
 ad-io = { path = "crates/ad-io" }

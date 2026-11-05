@@ -6,6 +6,8 @@ rust-version.workspace = true
 
 [dependencies]
 ad-core.workspace = true
+quick-xml.workspace = true
+thiserror.workspace = true
 
 [lints.clippy]
 unwrap_used = "deny"
