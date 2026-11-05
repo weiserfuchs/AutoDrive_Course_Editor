@@ -3,7 +3,7 @@ title: 'Network model with stable ids, explicit connections and spatial queries'
 type: 'feature'
 ticket: '3'
 created: '2026-11-05'
-status: 'built'
+status: done
 baseline_revision: 'a36ed99178f3ddc32d31ce568ceb61ab85b62d5d'
 route: 'full'
 route_source: 'auto'
