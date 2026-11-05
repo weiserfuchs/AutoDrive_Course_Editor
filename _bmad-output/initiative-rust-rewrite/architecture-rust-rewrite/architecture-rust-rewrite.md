@@ -179,7 +179,7 @@ graph TD
 - **Prevents:** version branches scattered through the code, and two coexisting version notions.
 - **Rule:**
   - `GameVersion { FS19, FS22, FS25, Unknown }` is detected once at load from the config `<version>` major and stored on the `Document`.
-  - A config with a root `<markerID>` (older than 1.1.0.6) opens read-only. All mutating commands are disabled.
+  - A config with a root `<markerID>` (older than 1.1.0.6), or with an `Unknown` version, opens read-only with a notice. All mutating commands are disabled.
   - Only `ad-io` branches on the version:
     - the reset of flags 2 and 4 on FS22/25 load
     - the `vehicles.xml` element paths and id attribute (FS19 `FS19_AutoDrive/AutoDriveVehicleData` and `id`; FS22 `AutoDrive` and `id`; FS25 `AutoDrive` and `uniqueId`)

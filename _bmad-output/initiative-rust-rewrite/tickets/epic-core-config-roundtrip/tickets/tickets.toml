@@ -1,0 +1,108 @@
+# Stories of epic-core-config-roundtrip in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Rust workspace, toolchain and CI run green"
+description = "Creates the Cargo workspace with ad-core, ad-io and ad-app (an empty eframe window), rust-toolchain.toml, the GitHub Actions workflow and the AD-1 dependency check."
+verify = "cargo fmt --check, cargo clippy -D warnings, cargo test and the dependency check pass locally; `cargo run -p ad-app` opens an empty window."
+covers = ["R1"]
+after = []
+hitl = true
+risk = "low"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#stack", "architecture-rust-rewrite/architecture-rust-rewrite.md#structural-seed"]
+
+[[entry]]
+id = 2
+type = "story"
+title = "The fixture opens, shows its nodes and saves byte-identically"
+description = "Tracer: ad-io reads AutoDrive_config.xml into a minimal Network (nodes, order, outgoing/incoming, markers), keeps the original bytes and splices regenerated waypoints and mapmarker blocks on save; ad-app opens a file via dialog (synchronously for now), draws nodes as dots and connections as lines, and saves. It owns byte-identical output for the unedited case, including the game number format; the full Network is story 3."
+verify = "The golden test loads and saves the fixture into a temp dir and compares bytes equal; opening the fixture in the app shows the network and Save writes an identical file."
+covers = ["R1"]
+after = [1]
+hitl = false
+risk = "high"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-6--lossless-config-round-trip-by-byte-splicing"]
+
+[[entry]]
+id = 3
+type = "story"
+title = "Network model with stable ids, explicit connections and spatial queries"
+description = "Completes the minimal Network from story 2: monotonic NodeId, order, connect/disconnect/set_shape, derived connection kind, NodeFlag preserving any value, and the R-tree with nearest, rectangle, polygon, distance and edge-near-point queries."
+verify = "Unit tests cover every connection shape and derived kind (incl. crossed variants), idempotent operations, flag preservation and each spatial query against a brute-force check."
+covers = ["R2"]
+after = [2]
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-2--stable-node-identity-one-order-file-ids-only-at-the-file-boundary", "architecture-rust-rewrite/architecture-rust-rewrite.md#ad-3--adjacency-has-one-owner-and-explicit-operations", "architecture-rust-rewrite/architecture-rust-rewrite.md#ad-5--spatial-index-owned-by-the-network"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Edits run as undoable commands with saved state"
+description = "Adds Command, Transaction and History with EntryId, a cap (this story sets its default value), redo-tail discard and saved_at; commands cover add, delete, connect, disconnect, move and marker edit; delete records order positions and undo reinserts nodes under their original ids and positions."
+verify = "Unit tests: add/delete/connect/move/marker-edit commands undo and redo to identical networks, delete-undo restores order, capped eviction of the saved entry leaves the document dirty."
+covers = ["R4"]
+after = [3]
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-4--every-model-mutation-is-a-command-through-one-history"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Edited documents save in the game's format and reload identically"
+description = "Owns save output after edits (story 2 owns the unedited case): renumbers file ids through SaveIdMap, writes coordinates with 3 decimals and marker ids as N.000000, generates a missing flags element, inserts a missing mapmarker block, and writes via temp file plus rename."
+verify = "The edited round-trip test (delete, add, connect, marker change) saves to a temp dir and reloads to an equal model; untouched elements stay byte-identical."
+covers = ["R2"]
+after = [4]
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-2--stable-node-identity-one-order-file-ids-only-at-the-file-boundary", "architecture-rust-rewrite/architecture-rust-rewrite.md#ad-6--lossless-config-round-trip-by-byte-splicing", "architecture-rust-rewrite/architecture-rust-rewrite.md#ad-16--save-autosave-and-backups"]
+hitl = false
+risk = "high"
+
+[[entry]]
+id = 6
+type = "story"
+title = "FS19, FS22 and legacy configs load with their version rules"
+description = "Detects GameVersion from the config version major (incl. Unknown), resets flags 2 and 4 on FS22/FS25 load, keeps them on FS19, and opens configs with a root markerID or an Unknown version read-only so all commands are refused."
+verify = "Unit tests with synthetic FS19, FS22, FS25, unknown-version and legacy configs check detection, flag handling, save output and command refusal in read-only mode."
+covers = ["R3"]
+after = [5]
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-11--game-version-handling-lives-in-ad-io"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Loading and saving run in the background and never corrupt the open document"
+description = "Adds the ad-app job runner with epochs and replace_document, replacing story 2's synchronous open and save; load and save run off the UI thread, a malformed file shows an error naming file and element while the current document stays untouched, and a save sets saved_at only for its captured entry."
+verify = "Tests: a malformed config returns a typed error and leaves the document unchanged; a stale-epoch result is dropped; a save that finishes after a further edit leaves the document dirty. Manually, opening a broken file shows the error dialog."
+covers = ["R1", "R4"]
+after = [5]
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-9--threading-ui-thread-owns-the-document", "architecture-rust-rewrite/architecture-rust-rewrite.md#ad-12--errors-are-values-bad-input-never-panics", "architecture-rust-rewrite/architecture-rust-rewrite.md#ad-16--save-autosave-and-backups", "architecture-rust-rewrite/architecture-rust-rewrite.md#ad-18--document-replacement-and-epochs"]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Settings file, logging and crash reporting exist"
+description = "Adds, in modules separate from the job runner, the Settings struct persisted as TOML in the OS config dir (global options and per-map entries keyed by map name), a rolling tracing log file and a panic hook that logs and shows a dialog."
+verify = "A settings round-trip test writes and reads TOML in a temp dir; running the app creates the log file; running a debug build with the environment variable AD_DEBUG_PANIC=1 panics at startup and the panic is logged and shown."
+covers = []
+after = [7]
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-12--errors-are-values-bad-input-never-panics"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 9
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred; scope is set at its start and limited to cleanup."
+verify = "CI is green and the golden and edited round-trip tests still pass."
+covers = []
+after = [2, 3, 4, 5, 6, 7, 8]
+hitl = false
+risk = "low"
