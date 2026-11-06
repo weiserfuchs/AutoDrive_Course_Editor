@@ -1,0 +1,105 @@
+# Stories of epic-map-view in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Network model split into spatial and marker modules"
+description = "Opening refactor (retro S1): moves the R-trees and spatial queries, and the marker list and its operations, out of network.rs into their own modules, with no change in behaviour or public API."
+verify = "cargo test passes unchanged, including both golden tests; network.rs no longer holds the R-tree or marker code."
+covers = []
+after = ["epic-core-config-roundtrip"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 2
+type = "story"
+title = "The fixture's network pans and zooms about the cursor within the frame budget"
+description = "Tracer and rendering spike (AD-8): ad-io reads the map name from the config's MapName (path and extension stripped, AD-14), MapGeometry converts world to map pixel using that map's scale from Settings, ViewTransform converts map pixel to screen and zooms about the cursor, and the view draws only nodes and edges from an R-tree viewport query (an edge when either end is in view) into reused buffers, with level-of-detail limits as named constants. Plain dots and lines; the Java look is story 4, hit-testing story 9, and stories 4 and 7 build on its LOD module and frame-time test. A headless frame-time test builds and tessellates frames of the fixture at minimum and maximum zoom."
+verify = "The headless frame-time test in release reports under 16 ms at minimum and maximum zoom; the user pans and zooms the fixture and confirms it stays smooth."
+covers = ["R1", "R3"]
+after = [1]
+hitl = true
+risk = "high"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-7--one-implementation-per-coordinate-and-height-conversion", "architecture-rust-rewrite/architecture-rust-rewrite.md#ad-8--single-threaded-immediate-mode-rendering"]
+
+[[entry]]
+id = 3
+type = "story"
+title = "The map image is found beside the config and drawn under the network"
+description = "Adds MapContext to the Document (AD-14): the map name from the config's MapName, the local image lookup (exe dir, then config dir), PNG load in the background load job, scaling to 2048x2048 with a notice, the Blank fallback, and one texture upload after which the CPU copy is dropped. It adds the image crate and the PNG load in ad-io and the attach path in the load job, which story 6 reuses. The image is drawn under the network and aligned through MapGeometry."
+verify = "Unit tests cover the map name, the lookup order and scaling with generated images; opening the fixture shows NF_Marsch_4fach with its roads under the network's connections."
+covers = ["R1", "R2"]
+after = [2]
+hitl = true
+risk = "medium"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-14--mapcontext-is-the-single-owner-of-map-level-data"]
+
+[[entry]]
+id = 4
+type = "story"
+title = "Nodes and connections draw in the Java editor's look"
+description = "Ports the Java rendering: connection colours by kind and by subprio start node, lines shortened by half a node with arrowheads, regular and subprio node sprites, hidden-node transparency, node size from the per-map setting scaled by zoom, and the Java size thresholds for skipping nodes, arrows and short connections, kept in story 2's LOD-constants module. Node size is a new MapSettings field (default 2)."
+verify = "Unit tests map each connection kind and flag to its colour and check the skip thresholds; the fixture shows coloured, directed connections that match the Java editor."
+covers = ["R1"]
+after = [3]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Markers, parking and warning icons, marker names and the grid draw"
+description = "Rasterises the SVG icons from src/main/resources/editor/nodes once, draws marker (25 px), parking and warning (20 px) icons unscaled at their node with the marker name, warns on negative height, and draws the grid above zoom 2 with the per-map grid size, a new MapSettings field (default 2x2)."
+verify = "Unit tests choose the right icons per node; the fixture shows its 223 markers with names, parking icons and the grid when zoomed in."
+covers = ["R1"]
+after = [4]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 9
+type = "story"
+title = "The view finds the node or connection under the cursor"
+description = "Hit-testing for the tools epic: through ViewTransform and the spatial queries (AD-5), the view finds the nearest node, and the nearest connection, within a screen-pixel radius of the cursor; the hovered node draws last with a highlight and a tooltip, as in Java. Adds the overlay hook that tools draw through after the network (AD-10)."
+verify = "Unit tests find the right node and connection at several zoom levels, including none outside the radius; hovering a node on the fixture highlights it and shows its tooltip."
+covers = ["R1"]
+after = [5]
+hitl = true
+risk = "medium"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-5--spatial-index-owned-by-the-network", "architecture-rust-rewrite/architecture-rust-rewrite.md#ad-10--tools-are-stateful-controllers-that-emit-commands"]
+
+[[entry]]
+id = 6
+type = "story"
+title = "Height for new nodes comes from the heightmap"
+description = "Builds on story 3's MapContext, PNG load and load-job attach path. Adds the heightmap lookup (terrain.heightmap.png beside the config, then <name>_HeightMap.png), loading in the background load job into MapContext, height_map_scale calibrated once at attach as in Java (at least 1, guarded), and ad-core's sample_height(map_context, x, z) -> Option<f64> (AD-7)."
+verify = "Unit tests with generated 8-bit RGB and 16-bit grey heightmaps check sampling, the scale calibration, edge pixels and None without a heightmap; an #[ignore] test, run by hand because the fixture's heightmap is gitignored, checks that sampled heights at the fixture's nodes match their y values closely."
+covers = ["R2"]
+after = [3]
+hitl = false
+risk = "medium"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-7--one-implementation-per-coordinate-and-height-conversion"]
+notes = ["A 16-bit grey heightmap is read directly as value/256 (epic Decision 2026-11-06)."]
+
+[[entry]]
+id = 7
+type = "story"
+title = "The complete view meets the frame budget on the fixture"
+description = "Extends story 2's headless frame-time test to the full view (map image, nodes, connections, icons, names, grid) at minimum and maximum zoom and while panning, and fixes what exceeds the budget."
+verify = "The headless frame-time test in release reports under 16 ms for every case; the user pans and zooms on the fixture and confirms it stays smooth."
+covers = ["R3"]
+after = [5]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred; scope is set at its start and limited to cleanup."
+verify = "CI is green and the golden, round-trip and frame-time tests still pass."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 9]
+hitl = false
+risk = "low"
