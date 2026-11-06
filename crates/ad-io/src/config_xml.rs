@@ -113,6 +113,7 @@ pub struct LoadedConfig {
     child_order: Vec<String>,
     game_version: GameVersion,
     read_only: Option<ReadOnlyReason>,
+    flags_reset: bool,
     pub network: Network,
 }
 
@@ -124,6 +125,12 @@ impl LoadedConfig {
     /// `Some` when the config may be viewed but not edited or saved.
     pub fn read_only(&self) -> Option<&ReadOnlyReason> {
         self.read_only.as_ref()
+    }
+
+    /// True when the FS22/FS25 load reset at least one flag 2 or 4 to 0, so a save
+    /// writes different flags than the file holds.
+    pub fn flags_reset(&self) -> bool {
+        self.flags_reset
     }
 }
 
@@ -252,12 +259,13 @@ fn parse_adjacency(
 const WAYPOINT_ELEMENTS: [&str; 7] = ["id", "x", "y", "z", "out", "incoming", "flags"];
 
 /// A read-only config is never saved, so unknown `<waypoints>` children are ignored.
+/// Also returns whether a flag was reset (FS22/FS25 spline flags 2 and 4).
 fn build_network(
     waypoints: &Elem,
     mapmarker: Option<&Elem>,
     version: GameVersion,
     read_only: bool,
-) -> Result<Network, ConfigError> {
+) -> Result<(Network, bool), ConfigError> {
     for c in &waypoints.children {
         if !read_only && !WAYPOINT_ELEMENTS.contains(&c.name.as_str()) {
             return Err(ConfigError::UnexpectedElement(
@@ -284,6 +292,12 @@ fn build_network(
         Err(_) => vec![0; n],
     };
 
+    // FS22/FS25 keep spline flags 2 and 4, which the editor treats as regular.
+    let resets = |f: u8| {
+        !read_only && matches!(version, GameVersion::FS22 | GameVersion::FS25) && matches!(f, 2 | 4)
+    };
+    let flags_reset = flags.iter().any(|&f| resets(f));
+
     let mut by_file_id = HashMap::with_capacity(n);
     for (i, file_id) in ids.iter().enumerate() {
         by_file_id.insert(*file_id, i);
@@ -298,11 +312,7 @@ fn build_network(
             x: xs[i],
             y: ys[i],
             z: zs[i],
-            flag: NodeFlag(match (version, flags[i]) {
-                // FS22/FS25 keep spline flags 2 and 4, which the editor treats as regular.
-                (GameVersion::FS22 | GameVersion::FS25, 2 | 4) if !read_only => 0,
-                (_, f) => f,
-            }),
+            flag: NodeFlag(if resets(flags[i]) { 0 } else { flags[i] }),
             outgoing,
             incoming,
         })
@@ -331,7 +341,7 @@ fn build_network(
             group: require(entry, "group")?.to_owned(),
         });
     }
-    Ok(network)
+    Ok((network, flags_reset))
 }
 
 /// Parses a config and remembers the original bytes.
@@ -404,7 +414,7 @@ pub fn load(bytes: &[u8]) -> Result<LoadedConfig, ConfigError> {
     } else {
         None
     };
-    let network = build_network(
+    let (network, flags_reset) = build_network(
         &wp_elem,
         mapmarker.as_ref().map(|(_, e)| e),
         game_version,
@@ -449,6 +459,7 @@ pub fn load(bytes: &[u8]) -> Result<LoadedConfig, ConfigError> {
         child_order,
         game_version,
         read_only,
+        flags_reset,
         network,
     })
 }
@@ -727,6 +738,7 @@ mod tests {
         assert_eq!(cfg.game_version(), GameVersion::FS19);
         assert!(cfg.read_only().is_none());
         assert_eq!(flags_of(&cfg), [0, 2, 4, 1]);
+        assert!(!cfg.flags_reset());
     }
 
     #[test]
@@ -740,8 +752,16 @@ mod tests {
             assert_eq!(cfg.game_version(), expected);
             assert!(cfg.read_only().is_none());
             assert_eq!(flags_of(&cfg), [0, 0, 0, 1]);
+            assert!(cfg.flags_reset());
             assert!(saved_text(&cfg).contains("<flags>0,0,0,1</flags>"));
         }
+        let plain = load(&config(
+            "
+", false, "",
+        ))
+        .expect("loads");
+        assert_eq!(plain.game_version(), GameVersion::FS25);
+        assert!(!plain.flags_reset());
     }
 
     #[test]
@@ -760,6 +780,7 @@ mod tests {
                 Some(&ReadOnlyReason::UnknownVersion(text.to_owned()))
             );
             assert_eq!(flags_of(&cfg), [0, 2, 4, 1]);
+            assert!(!cfg.flags_reset());
             assert!(matches!(
                 save(&cfg),
                 Err(ConfigError::ReadOnly(ReadOnlyReason::UnknownVersion(_)))
@@ -777,6 +798,7 @@ mod tests {
             assert_eq!(cfg.read_only(), Some(&ReadOnlyReason::Legacy), "{tag}");
             assert_eq!(cfg.network.len(), 4);
             assert_eq!(flags_of(&cfg), [0, 2, 4, 1]);
+            assert!(!cfg.flags_reset());
             assert!(matches!(
                 save(&cfg),
                 Err(ConfigError::ReadOnly(ReadOnlyReason::Legacy))

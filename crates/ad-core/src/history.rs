@@ -164,6 +164,11 @@ impl History {
         self.saved = Some(self.current());
     }
 
+    /// Marks the saved state as lost, so the document is dirty until the next save.
+    pub fn mark_unsaved(&mut self) {
+        self.saved = None;
+    }
+
     /// Captures the current position, for a save that finishes later.
     pub fn save_point(&self) -> SavePoint {
         SavePoint {
@@ -394,6 +399,20 @@ mod tests {
         let mut n = Network::new();
         let mut h = History::default();
         h.apply(&mut n, add(1.0)).expect("a");
+        let point = h.save_point();
+        h.mark_saved_at(point);
+        assert!(!h.is_dirty());
+    }
+
+    #[test]
+    fn unsaved_base_is_dirty_until_saved() {
+        let mut n = Network::new();
+        let mut h = History::default();
+        h.mark_unsaved();
+        assert!(h.is_dirty() && !h.can_undo());
+        h.apply(&mut n, add(1.0)).expect("a");
+        assert!(h.undo(&mut n));
+        assert!(h.is_dirty());
         let point = h.save_point();
         h.mark_saved_at(point);
         assert!(!h.is_dirty());
