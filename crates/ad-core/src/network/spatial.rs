@@ -3,7 +3,7 @@
 use rstar::AABB;
 use rstar::primitives::{GeomWithData, Line};
 
-use super::{Network, Node, NodeId};
+use super::{ConnectionKind, Network, Node, NodeFlag, NodeId, look_of};
 
 /// One indexed edge: its node ids and its endpoints as (x, z).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -12,13 +12,50 @@ pub struct EdgeSegment {
     pub to: NodeId,
     pub a: [f64; 2],
     pub b: [f64; 2],
+    pub look: LinkLook,
+}
+
+/// What drawing needs to know about a link: its kind and the flags of both ends. Cached in
+/// the edge index so the view does no node lookups per edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkLook {
+    pub kind: ConnectionKind,
+    pub from_flag: NodeFlag,
+    pub to_flag: NodeFlag,
+}
+
+/// Payload of an edge-index entry. Equality is by ids only, so an entry is found and
+/// removed without knowing its current look.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EdgeData {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub look: LinkLook,
+}
+
+impl PartialEq for EdgeData {
+    fn eq(&self, other: &Self) -> bool {
+        self.from == other.from && self.to == other.to
+    }
 }
 
 pub(super) type NodeEntry = GeomWithData<[f64; 2], NodeId>;
-pub(super) type EdgeEntry = GeomWithData<Line<[f64; 2]>, (NodeId, NodeId)>;
+pub(super) type EdgeEntry = GeomWithData<Line<[f64; 2]>, EdgeData>;
 
-pub(super) fn edge_entry(from: &Node, to: &Node, ids: (NodeId, NodeId)) -> EdgeEntry {
-    GeomWithData::new(Line::new([from.x, from.z], [to.x, to.z]), ids)
+pub(super) fn edge_entry(
+    from: &Node,
+    to: &Node,
+    ids: (NodeId, NodeId),
+    look: LinkLook,
+) -> EdgeEntry {
+    GeomWithData::new(
+        Line::new([from.x, from.z], [to.x, to.z]),
+        EdgeData {
+            from: ids.0,
+            to: ids.1,
+            look,
+        },
+    )
 }
 
 /// Even-odd ray casting.
@@ -39,15 +76,42 @@ impl Network {
     /// Removes one edge-index entry for `a -> b` when both nodes exist.
     pub(super) fn drop_edge(&mut self, a: NodeId, b: NodeId) {
         if let (Some(from), Some(to)) = (self.nodes.get(&a), self.nodes.get(&b)) {
-            let entry = edge_entry(from, to, (a, b));
+            // The look does not take part in equality.
+            let look = LinkLook {
+                kind: ConnectionKind::None,
+                from_flag: from.flag,
+                to_flag: to.flag,
+            };
+            let entry = edge_entry(from, to, (a, b), look);
             self.edge_index.remove(&entry);
         }
     }
 
     /// Inserts an edge-index entry for `a -> b` when both nodes exist.
     pub(super) fn put_edge(&mut self, a: NodeId, b: NodeId) {
-        if let (Some(from), Some(to)) = (self.nodes.get(&a), self.nodes.get(&b)) {
-            self.edge_index.insert(edge_entry(from, to, (a, b)));
+        if let (Some(from), Some(to), Some(look)) =
+            (self.nodes.get(&a), self.nodes.get(&b), self.link_look(a, b))
+        {
+            self.edge_index.insert(edge_entry(from, to, (a, b), look));
+        }
+    }
+
+    /// Recomputes the cached look of every edge entry that touches `id`. Call after any
+    /// change to the node's flag or lists, once the edge entries themselves are in place.
+    pub(super) fn refresh_looks(&mut self, id: NodeId) {
+        let Some(node) = self.nodes.get(&id) else {
+            return;
+        };
+        let point = [node.x, node.z];
+        for e in self
+            .edge_index
+            .locate_in_envelope_intersecting_mut(AABB::from_point(point))
+        {
+            if (e.data.from == id || e.data.to == id)
+                && let Some(look) = look_of(&self.nodes, e.data.from, e.data.to)
+            {
+                e.data.look = look;
+            }
         }
     }
 
@@ -100,10 +164,11 @@ impl Network {
             self.edge_index
                 .locate_in_envelope_intersecting(aabb)
                 .map(|e| EdgeSegment {
-                    from: e.data.0,
-                    to: e.data.1,
+                    from: e.data.from,
+                    to: e.data.to,
                     a: e.geom().from,
                     b: e.geom().to,
+                    look: e.data.look,
                 }),
         );
     }
@@ -147,7 +212,7 @@ impl Network {
         let mut edges: Vec<(NodeId, NodeId)> = self
             .edge_index
             .locate_within_distance([x, z], distance * distance)
-            .map(|e| e.data)
+            .map(|e| (e.data.from, e.data.to))
             .collect();
         edges.sort();
         edges
@@ -189,11 +254,21 @@ mod tests {
         let d = n.add_node(100.0, 0.0, 100.0, NodeFlag::REGULAR);
         n.connect(a, b, ConnectionShape::OneWay).expect("ok");
         n.connect(c, d, ConnectionShape::OneWay).expect("ok");
+        let regular = LinkLook {
+            kind: ConnectionKind::Regular,
+            from_flag: NodeFlag::REGULAR,
+            to_flag: NodeFlag::REGULAR,
+        };
         let stale = EdgeSegment {
             from: d,
             to: d,
             a: [0.0; 2],
             b: [0.0; 2],
+            look: LinkLook {
+                kind: ConnectionKind::None,
+                from_flag: NodeFlag::REGULAR,
+                to_flag: NodeFlag::REGULAR,
+            },
         };
         let (mut nodes, mut edges) = (vec![d], vec![stale]);
         n.nodes_in_rect_into(0.0, 0.0, 10.0, 10.0, &mut nodes);
@@ -208,12 +283,14 @@ mod tests {
                     to: b,
                     a: [-50.0, 5.0],
                     b: [50.0, 5.0],
+                    look: regular,
                 },
                 EdgeSegment {
                     from: c,
                     to: d,
                     a: [5.0, 5.0],
                     b: [100.0, 100.0],
+                    look: regular,
                 },
             ]
         );
@@ -445,5 +522,83 @@ mod tests {
             .collect();
         let reloaded = Network::from_loaded(loaded).expect("ok");
         check_queries(&reloaded, &mut rng);
+    }
+
+    /// Every indexed edge carries `link_look` of its ends, and the entries are exactly the
+    /// adjacency.
+    fn check_looks(n: &Network) {
+        let mut want = Vec::new();
+        for id in n.order() {
+            for t in n
+                .node(*id)
+                .map(|x| x.outgoing().to_vec())
+                .unwrap_or_default()
+            {
+                want.push((*id, t));
+            }
+        }
+        want.sort();
+        let mut got = Vec::new();
+        for e in n.edge_index.iter() {
+            assert_eq!(Some(e.data.look), n.link_look(e.data.from, e.data.to));
+            got.push((e.data.from, e.data.to));
+        }
+        got.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn cached_looks_follow_every_mutation() {
+        let mut rng = Lcg(99);
+        let mut n = Network::new();
+        let ids: Vec<NodeId> = (0..40)
+            .map(|_| n.add_node(rng.coord(), 0.0, rng.coord(), NodeFlag(rng.below(3) as u8)))
+            .collect();
+        let pick = |rng: &mut Lcg| ids[rng.below(ids.len() as u64) as usize];
+        let shape = |rng: &mut Lcg| match rng.below(3) {
+            0 => ConnectionShape::OneWay,
+            1 => ConnectionShape::Dual,
+            _ => ConnectionShape::Reverse,
+        };
+        for _ in 0..1500 {
+            let (a, b) = (pick(&mut rng), pick(&mut rng));
+            match rng.below(8) {
+                0 => {
+                    let sh = shape(&mut rng);
+                    let _ = n.connect(a, b, sh);
+                }
+                1 => {
+                    let _ = n.disconnect(a, b);
+                }
+                2 => {
+                    let sh = shape(&mut rng);
+                    let _ = n.set_shape(a, b, sh);
+                }
+                3 => {
+                    let _ = n.set_flag(a, NodeFlag(rng.below(3) as u8));
+                }
+                4 => {
+                    let _ = n.move_node(a, rng.coord(), 0.0, rng.coord());
+                }
+                5 => {
+                    if let Ok(removed) = n.remove_node(a) {
+                        check_looks(&n);
+                        if rng.below(2) == 0 {
+                            n.reinsert(removed);
+                        }
+                    }
+                }
+                6 => {
+                    let sh = shape(&mut rng);
+                    if let Ok(delta) = n.set_shape(a, b, sh) {
+                        n.revert_links(&delta);
+                    }
+                }
+                _ => {
+                    let _ = n.connect(a, b, ConnectionShape::OneWay);
+                }
+            }
+            check_looks(&n);
+        }
     }
 }

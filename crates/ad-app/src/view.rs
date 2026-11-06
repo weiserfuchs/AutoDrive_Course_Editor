@@ -216,10 +216,8 @@ impl MapView {
             let Some((from, to)) = look::line_ends(start, end, ns) else {
                 continue;
             };
-            let Some((kind, fa, fb)) = net.link_look(e.from, e.to) else {
-                continue;
-            };
-            let colour = look::connection_colour(kind, fa.0, fb.0);
+            let (kind, look) = (e.look.kind, e.look);
+            let colour = look::connection_colour(kind, look.from_flag.0, look.to_flag.0);
             // The normal comes from the full line; shortening can cross the ends on short lines.
             let len = (end.0 - start.0).hypot(end.1 - start.1);
             let nx = (-(end.1 - start.1) / len) as f32 * half_width;

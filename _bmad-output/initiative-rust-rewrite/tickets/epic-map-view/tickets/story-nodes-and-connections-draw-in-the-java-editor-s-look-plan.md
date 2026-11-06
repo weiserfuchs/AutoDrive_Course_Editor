@@ -101,8 +101,8 @@ context: ['_bmad-output/initiative-rust-rewrite/tickets/epic-map-view/epic-map-v
 ## Implementation Notes
 
 - `look.rs` holds the pure look functions; `lod.rs` keeps the thresholds and the arrow constants. `MapView::show` takes `node_size` from `MapContext`.
-- Colour lookup: `Network::link_look(a, b)` (kind plus both flags, two node lookups) feeds the mesh; `connection_kind` now wraps it.
-- Performance decision: the first version (kind via `connection_kind` plus two `node` lookups) put min zoom at 17-23 ms (baseline 9.4 ms). Fixed inside `ad-core` without new dependencies: `link_look` halves the lookups and the node map uses a one-multiply `IdHasher` instead of SipHash (ids are our own counters).
+- Colour lookup: the look (kind plus both flags) is cached in each edge-index entry and returned by `edges_in_rect_into`; `refresh_looks(node)` keeps it current after every mutation, and `look_of` is the single computation.
+- Performance decision: a per-edge `link_look` in the view put min zoom at 13-23 ms (master 6-8). Fixed in `ad-core` without new dependencies: cached look in the edge entries (equality by ids only), plus a one-multiply `IdHasher` for the node map. Min zoom now 7.1-8.6 ms median in quiet runs (one noisy run 11.8). A randomised test checks the cache after every mutation.
 - Frame time, release, noisy machine (median ms, several runs): min zoom centre 10.5-15.5 (baseline 9.4); mid zoom dense 2.2-4.2; max zoom centre 0.06-0.13; max zoom dense 0.11-0.31. Min zoom is borderline on a loaded machine and needs a re-run on a quiet one.
 - Not checked: the hitl comparison with the Java editor's look.
 
