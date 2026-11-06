@@ -5,8 +5,14 @@ use eframe::egui;
 use ad_core::geometry::{MAP_PIXELS, MapGeometry};
 use ad_core::network::{ConnectionKind, EdgeSegment, Network, NodeId};
 
+use crate::icons::{self, Icons};
 use crate::lod::{MAX_ZOOM, MIN_NODE_PX, WHEEL_POINTS_PER_STEP, ZOOM_STEP};
-use crate::look;
+use crate::{look, overlay};
+
+/// Screen px an icon or name reaches from its anchor; the cull rectangle grows by this.
+const OVERLAY_PAD_PX: f64 = 60.0;
+/// Marker name size in egui points.
+const NAME_FONT_SIZE: f32 = 12.0;
 
 /// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
 /// centre is in map px. The panel is the screen rectangle the map is shown in.
@@ -118,11 +124,32 @@ fn image_rect(t: &ViewTransform) -> egui::Rect {
 }
 
 /// Draws the network on the map. Owns the query buffers reused across frames.
-#[derive(Default)]
 pub struct MapView {
     transform: Option<ViewTransform>,
     nodes: Vec<NodeId>,
     edges: Vec<EdgeSegment>,
+    /// Loaded on the first frame, once per app run.
+    icons: Option<Icons>,
+    pub show_grid: bool,
+    pub show_marker_icons: bool,
+    pub show_marker_names: bool,
+    /// Grid spacing in world units, from the map's settings.
+    pub grid: (f64, f64),
+}
+
+impl Default for MapView {
+    fn default() -> Self {
+        Self {
+            transform: None,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            icons: None,
+            show_grid: false,
+            show_marker_icons: true,
+            show_marker_names: true,
+            grid: (2.0, 2.0),
+        }
+    }
 }
 
 impl MapView {
@@ -176,6 +203,9 @@ impl MapView {
             }
         }
         let t = *transform;
+        if self.icons.is_none() {
+            self.icons = Some(Icons::load(ui.ctx()));
+        }
         self.paint(&painter, net, geometry, node_size, map_texture, &t);
     }
 
@@ -199,6 +229,25 @@ impl MapView {
             let (mx, my) = geometry.to_map(x, z);
             t.map_to_screen(mx, my)
         };
+
+        if overlay::grid_visible(self.show_grid, t.zoom) {
+            let [r, g, b] = overlay::GRID_RGB;
+            let colour = egui::Color32::from_rgb(r, g, b);
+            let mut mesh = egui::Mesh::default();
+            let (top, bottom) = (to_screen(x0, z0).1 as f32, to_screen(x0, z1).1 as f32);
+            let (left, right) = (to_screen(x0, z0).0 as f32, to_screen(x1, z0).0 as f32);
+            for x in overlay::grid_lines(self.grid.0, x0, x1) {
+                let sx = to_screen(x, z0).0 as f32;
+                let (a, b) = (egui::pos2(sx - 0.5, top), egui::pos2(sx + 0.5, bottom));
+                mesh.add_colored_rect(egui::Rect::from_min_max(a, b), colour);
+            }
+            for z in overlay::grid_lines(self.grid.1, z0, z1) {
+                let sy = to_screen(x0, z).1 as f32;
+                let (a, b) = (egui::pos2(left, sy - 0.5), egui::pos2(right, sy + 0.5));
+                mesh.add_colored_rect(egui::Rect::from_min_max(a, b), colour);
+            }
+            painter.add(egui::Shape::mesh(mesh));
+        }
 
         let ns = look::node_px(node_size, t.zoom);
 
@@ -246,11 +295,13 @@ impl MapView {
         }
         painter.add(egui::Shape::mesh(mesh));
 
+        // Widen by the largest overlay extent (dots, icons) so those just outside the
+        // view still show.
+        let radius = ns as f32 / 2.0;
+        let pad_px = f64::from(radius).max(OVERLAY_PAD_PX);
+        let pad = pad_px / t.zoom * geometry.scale;
+        net.nodes_in_rect_into(x0 - pad, z0 - pad, x1 + pad, z1 + pad, &mut self.nodes);
         if f64::from(ns) >= MIN_NODE_PX {
-            let radius = ns as f32 / 2.0;
-            // Widen by the dot radius so dots just outside the view still show their edge.
-            let pad = f64::from(radius) / t.zoom * geometry.scale;
-            net.nodes_in_rect_into(x0 - pad, z0 - pad, x1 + pad, z1 + pad, &mut self.nodes);
             for &id in &self.nodes {
                 if let Some(n) = net.node(id) {
                     let (sx, sy) = to_screen(n.x, n.z);
@@ -260,6 +311,70 @@ impl MapView {
                         look::node_colour(n.flag.0),
                     );
                 }
+            }
+        }
+
+        // One mesh per icon texture: hundreds of single-image shapes cost far more to tessellate.
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        let add_icon = |mesh: &mut egui::Mesh, centre: (f32, f32), px: u32| {
+            let rect = egui::Rect::from_center_size(
+                egui::pos2(centre.0, centre.1),
+                egui::Vec2::splat(px as f32),
+            );
+            mesh.add_rect_with_uv(rect, uv, egui::Color32::WHITE);
+        };
+        if let Some(tex) = self.icons.as_ref().and_then(|i| i.warning_y.as_ref()) {
+            let mut mesh = egui::Mesh::with_texture(tex.id());
+            for &id in &self.nodes {
+                if let Some(n) = net.node(id)
+                    && overlay::has_height_warning(n.y)
+                {
+                    let (sx, sy) = to_screen(n.x, n.z);
+                    add_icon(&mut mesh, (sx as f32, sy as f32), icons::SMALL_PX);
+                }
+            }
+            if !mesh.is_empty() {
+                painter.add(egui::Shape::mesh(mesh));
+            }
+        }
+        if self.show_marker_icons || self.show_marker_names {
+            let marker_tex = self
+                .icons
+                .as_ref()
+                .and_then(|i| i.marker.as_ref())
+                .filter(|_| self.show_marker_icons);
+            let mut icon_mesh = marker_tex.map(|t| egui::Mesh::with_texture(t.id()));
+            let mut names = Vec::new();
+            let pad = OVERLAY_PAD_PX / t.zoom * geometry.scale;
+            let (wx0, wz0, wx1, wz1) = (x0 - pad, z0 - pad, x1 + pad, z1 + pad);
+            for m in net.markers() {
+                let Some(n) = net.node(m.node) else {
+                    continue;
+                };
+                if n.x < wx0 || n.x > wx1 || n.z < wz0 || n.z > wz1 {
+                    continue;
+                }
+                let (ax, az) = overlay::marker_anchor(n.x, n.z);
+                let anchor = to_screen(ax, az);
+                if let Some(mesh) = &mut icon_mesh {
+                    add_icon(mesh, overlay::marker_icon_centre(anchor), icons::MARKER_PX);
+                }
+                if self.show_marker_names {
+                    names.push((&m.name, overlay::name_centre(anchor)));
+                }
+            }
+            if let Some(mesh) = icon_mesh.filter(|m| !m.is_empty()) {
+                painter.add(egui::Shape::mesh(mesh));
+            }
+            let font = egui::FontId::proportional(NAME_FONT_SIZE);
+            for (name, (cx, cy)) in names {
+                painter.text(
+                    egui::pos2(cx, cy),
+                    egui::Align2::CENTER_CENTER,
+                    name,
+                    font.clone(),
+                    egui::Color32::WHITE,
+                );
             }
         }
     }
@@ -535,6 +650,138 @@ mod tests {
         assert_eq!(counts(1.0), (0, 0));
     }
 
+    /// Painted (icon rects, name texts with their centres), in draw order.
+    fn overlay_shapes(out: &egui::FullOutput) -> (Vec<egui::Rect>, Vec<(String, egui::Pos2)>) {
+        let (mut icons, mut texts) = (Vec::new(), Vec::new());
+        for s in &out.shapes {
+            match &s.shape {
+                egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default() => {
+                    for quad in m.vertices.chunks(4) {
+                        let mut rect = egui::Rect::NOTHING;
+                        for v in quad {
+                            rect.extend_with(v.pos);
+                        }
+                        icons.push(rect);
+                    }
+                }
+                egui::Shape::Text(t) => {
+                    texts.push((t.galley.text().to_owned(), t.pos + t.galley.size() / 2.0));
+                }
+                _ => {}
+            }
+        }
+        (icons, texts)
+    }
+
+    /// A view at zoom `zoom`, centred on the map; the first frame creates the transform.
+    fn view_at(ctx: &egui::Context, net: &Network, g: MapGeometry, zoom: f64) -> MapView {
+        let mut view = MapView::default();
+        let _ = frame(ctx, &mut view, net, g, egui::vec2(1024.0, 1024.0), None);
+        view.transform.as_mut().expect("set").zoom = zoom;
+        view
+    }
+
+    #[test]
+    fn height_warning_icon() {
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        let size = egui::vec2(1024.0, 1024.0);
+        for (y, shown) in [(-1.0, 1), (-1.0005, 0), (0.0, 0)] {
+            let mut net = Network::new();
+            net.add_node(10.0, y, 20.0, NodeFlag::REGULAR);
+            let mut view = view_at(&ctx, &net, g, 1.0);
+            let out = frame(&ctx, &mut view, &net, g, size, None);
+            let (icons, texts) = overlay_shapes(&out);
+            assert_eq!((icons.len(), texts.len()), (shown, 0), "y = {y}");
+            if shown == 1 {
+                let t = view.transform.expect("set");
+                let (mx, my) = g.to_map(10.0, 20.0);
+                let (sx, sy) = t.map_to_screen(mx, my);
+                let c = icons[0].center();
+                assert!((c.x - sx as f32).abs() < 1e-3 && (c.y - sy as f32).abs() < 1e-3);
+                assert_eq!(icons[0].size(), egui::vec2(20.0, 20.0));
+            }
+        }
+    }
+
+    #[test]
+    fn marker_icon_and_name_placement_and_toggles() {
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        let size = egui::vec2(1024.0, 1024.0);
+        let mut net = Network::new();
+        let id = net.add_node(100.0, 5.0, 200.0, NodeFlag::REGULAR);
+        net.set_marker(id, "Hof".to_owned(), "All".to_owned())
+            .expect("marker");
+        let far = net.add_node(-1000.0, 5.0, -1000.0, NodeFlag::REGULAR);
+        net.set_marker(far, "Weit".to_owned(), "All".to_owned())
+            .expect("marker");
+        let mut view = view_at(&ctx, &net, g, 1.0);
+        view.transform.as_mut().expect("set").center = (1124.0, 1224.0);
+        let t = view.transform.expect("set");
+        let (mx, my) = g.to_map(100.0, 199.0);
+        let (ax, ay) = t.map_to_screen(mx, my);
+        let (ax, ay) = (ax as f32, ay as f32);
+
+        let out = frame(&ctx, &mut view, &net, g, size, None);
+        let (icons, texts) = overlay_shapes(&out);
+        // The far marker is outside the view.
+        assert_eq!((icons.len(), texts.len()), (1, 1));
+        assert_eq!(icons[0].size(), egui::vec2(25.0, 25.0));
+        assert!((icons[0].center().x - ax).abs() < 1e-3);
+        assert!((icons[0].center().y - (ay - 20.0)).abs() < 1e-3);
+        assert_eq!(texts[0].0, "Hof");
+        assert!((texts[0].1.x - ax).abs() < 1.0 && (texts[0].1.y - (ay - 3.0)).abs() < 1.0);
+
+        view.show_marker_names = false;
+        let (icons, texts) = overlay_shapes(&frame(&ctx, &mut view, &net, g, size, None));
+        assert_eq!((icons.len(), texts.len()), (1, 0));
+        view.show_marker_names = true;
+        view.show_marker_icons = false;
+        let (icons, texts) = overlay_shapes(&frame(&ctx, &mut view, &net, g, size, None));
+        assert_eq!((icons.len(), texts.len()), (0, 1));
+    }
+
+    /// Vertices of the meshes painted in the grid colour.
+    fn grid_vertices(out: &egui::FullOutput) -> usize {
+        let [r, g, b] = overlay::GRID_RGB;
+        let grid = egui::Color32::from_rgb(r, g, b);
+        out.shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(m) if m.vertices.iter().all(|v| v.color == grid) => {
+                    Some(m.vertices.len())
+                }
+                _ => None,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn grid_needs_toggle_and_zoom() {
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        let size = egui::vec2(1024.0, 1024.0);
+        let net = Network::new();
+        let mut view = view_at(&ctx, &net, g, 3.0);
+        assert_eq!(
+            grid_vertices(&frame(&ctx, &mut view, &net, g, size, None)),
+            0
+        );
+        view.show_grid = true;
+        // 1024 px at zoom 3 show about 341 world units: 170 or 171 lines per axis.
+        let n = grid_vertices(&frame(&ctx, &mut view, &net, g, size, None));
+        assert!((4 * 2 * 170..=4 * 2 * 172).contains(&n), "{n}");
+        view.grid = (4.0, 4.0);
+        let n4 = grid_vertices(&frame(&ctx, &mut view, &net, g, size, None));
+        assert!(n4 * 2 <= n + 16 && n4 * 2 + 16 >= n, "{n4} vs {n}");
+        view.transform.as_mut().expect("set").zoom = 2.0;
+        assert_eq!(
+            grid_vertices(&frame(&ctx, &mut view, &net, g, size, None)),
+            0
+        );
+    }
+
     /// Release timing of the view path on the fixture. Run by hand:
     /// `cargo test -p ad-app --release -- --ignored frame_time --nocapture`
     #[test]
@@ -576,8 +823,11 @@ mod tests {
         let dense = geometry.to_map(dense_world.0, dense_world.1);
         println!("{} nodes; densest cell {best} nodes", net.order().len());
 
-        let run = |name: &str, steps: f64, at: (f64, f64)| {
-            let mut view = MapView::default();
+        let run = |name: &str, steps: f64, at: (f64, f64), grid: bool| {
+            let mut view = MapView {
+                show_grid: grid,
+                ..MapView::default()
+            };
             // The first frame creates the transform at minimum zoom.
             let _ = frame(&ctx, &mut view, net, geometry, size, Some(texture));
             let t = view.transform.as_mut().expect("set");
@@ -599,9 +849,11 @@ mod tests {
                 times[times.len() - 1]
             );
         };
-        run("min zoom, centre", -100.0, (1024.0, 1024.0));
-        run("mid zoom, dense", 6.0, dense);
-        run("max zoom, centre", 100.0, (1024.0, 1024.0));
-        run("max zoom, dense", 100.0, dense);
+        run("min zoom, centre", -100.0, (1024.0, 1024.0), false);
+        run("mid zoom, dense", 6.0, dense, false);
+        run("max zoom, centre", 100.0, (1024.0, 1024.0), false);
+        run("max zoom, dense", 100.0, dense, false);
+        run("max zoom, dense, grid", 100.0, dense, true);
+        run("mid zoom, dense, grid", 6.0, dense, true);
     }
 }

@@ -110,6 +110,7 @@ pub fn replace_document(
         config.map_name().map(str::to_owned),
         map_settings.scale,
         map_settings.node_size,
+        (map_settings.grid_x, map_settings.grid_y),
     );
     *epoch_counter += 1;
     *doc = Some(Document::new(
@@ -514,6 +515,8 @@ mod tests {
             ad_io::settings::MapSettings {
                 scale: 2,
                 node_size: 3.0,
+                grid_x: 4.0,
+                grid_y: 0.0,
             },
         );
         let config = config_xml::load(text.as_bytes()).expect("config loads");
@@ -526,10 +529,12 @@ mod tests {
         let d = doc.expect("doc");
         assert_eq!(d.map.geometry.scale, 2.0);
         assert_eq!(d.map.node_size, 3.0);
+        assert_eq!(d.map.grid, (4.0, 0.1));
         assert_eq!(d.map.name.as_deref(), Some("Marsch"));
         assert!(d.map_image.is_some() && d.notice.is_none());
         // A missing name uses scale 1.
         let plain = open(&inline_text("1.000,2.500")).map;
         assert_eq!((plain.geometry.scale, plain.node_size), (1.0, 2.0));
+        assert_eq!(plain.grid, (2.0, 2.0));
     }
 }

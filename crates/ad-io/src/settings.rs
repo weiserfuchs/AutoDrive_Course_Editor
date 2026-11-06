@@ -36,12 +36,15 @@ pub struct Settings {
 #[serde(default)]
 pub struct GlobalSettings {
     pub history_cap: usize,
+    /// Whether the grid starts switched on (Java `bShowGrid`).
+    pub show_grid: bool,
 }
 
 impl Default for GlobalSettings {
     fn default() -> Self {
         Self {
             history_cap: DEFAULT_CAP,
+            show_grid: false,
         }
     }
 }
@@ -52,6 +55,10 @@ pub struct MapSettings {
     pub scale: u32,
     /// Node size in map-view units (Java `nodeSize`); the on-screen diameter follows zoom.
     pub node_size: f64,
+    /// Grid spacing in world units (Java `gridSpacingX`).
+    pub grid_x: f64,
+    /// Grid spacing in world units (Java `gridSpacingY`).
+    pub grid_y: f64,
 }
 
 impl Default for MapSettings {
@@ -59,6 +66,8 @@ impl Default for MapSettings {
         Self {
             scale: 1,
             node_size: 2.0,
+            grid_x: 2.0,
+            grid_y: 2.0,
         }
     }
 }
@@ -124,6 +133,8 @@ mod tests {
             MapSettings {
                 scale: 4,
                 node_size: 3.0,
+                grid_x: 5.0,
+                grid_y: 0.5,
             },
         );
         let path = dir.join("settings.toml");
@@ -153,10 +164,13 @@ mod tests {
             s.maps.get("X"),
             Some(&MapSettings {
                 scale: 1,
-                node_size: 2.0
+                node_size: 2.0,
+                grid_x: 2.0,
+                grid_y: 2.0,
             })
         );
         assert_eq!(s.global.history_cap, 500);
+        assert!(!s.global.show_grid);
         // A file from before `node_size` existed stays valid.
         std::fs::write(
             &path,
@@ -167,6 +181,19 @@ scale = 3
         .expect("write");
         let s = load(&path).expect("load");
         assert_eq!((s.maps["Y"].scale, s.maps["Y"].node_size), (3, 2.0));
+        assert_eq!((s.maps["Y"].grid_x, s.maps["Y"].grid_y), (2.0, 2.0));
+        std::fs::write(
+            &path,
+            "[global]
+show_grid = true
+[maps.Y]
+grid_x = 4.0
+",
+        )
+        .expect("write");
+        let s = load(&path).expect("load");
+        assert!(s.global.show_grid);
+        assert_eq!((s.maps["Y"].grid_x, s.maps["Y"].grid_y), (4.0, 2.0));
         std::fs::write(
             &path,
             "[maps.Y]
