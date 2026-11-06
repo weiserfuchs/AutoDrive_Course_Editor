@@ -156,12 +156,14 @@ impl eframe::App for App {
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!self.loading, egui::Button::new("Open…"))
+                    .add_enabled(!self.loading && !self.saving, egui::Button::new("Open…"))
                     .clicked()
                 {
                     self.open(&ctx);
                 }
+                // Load and save never overlap: either could read or replace the same file.
                 let editable = !self.saving
+                    && !self.loading
                     && self
                         .doc
                         .as_ref()

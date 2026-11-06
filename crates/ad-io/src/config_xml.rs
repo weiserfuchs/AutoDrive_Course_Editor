@@ -623,35 +623,10 @@ pub fn save(cfg: &LoadedConfig) -> Result<Vec<u8>, ConfigError> {
 /// the target. On any error the target is untouched and the temp file is removed.
 pub fn save_to(cfg: &LoadedConfig, target: &Path) -> Result<(), ConfigError> {
     let bytes = save(cfg)?;
-    let io_err = |source| ConfigError::Io {
+    crate::atomic::write(target, &bytes).map_err(|source| ConfigError::Io {
         path: target.to_path_buf(),
         source,
-    };
-    let dir = match target.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let name = target.file_name().ok_or_else(|| {
-        io_err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path has no file name",
-        ))
-    })?;
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(name);
-    tmp_name.push(format!(".{}.tmp", std::process::id()));
-    let tmp = dir.join(tmp_name);
-    let result = std::fs::File::create(&tmp)
-        .and_then(|mut file| {
-            std::io::Write::write_all(&mut file, &bytes)?;
-            file.sync_all()
-        })
-        .and_then(|()| std::fs::rename(&tmp, target));
-    if let Err(source) = result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(io_err(source));
-    }
-    Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -87,32 +87,14 @@ pub fn save(settings: &Settings, path: &Path) -> Result<(), SettingsError> {
         path: path.to_path_buf(),
         source,
     };
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let name = path.file_name().ok_or_else(|| {
-        io_err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path has no file name",
-        ))
-    })?;
-    std::fs::create_dir_all(dir).map_err(io_err)?;
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(name);
-    tmp_name.push(format!(".{}.tmp", std::process::id()));
-    let tmp = dir.join(tmp_name);
-    let result = std::fs::File::create(&tmp)
-        .and_then(|mut file| {
-            std::io::Write::write_all(&mut file, text.as_bytes())?;
-            file.sync_all()
-        })
-        .and_then(|()| std::fs::rename(&tmp, path));
-    if let Err(source) = result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(io_err(source));
+    // Without a file name `atomic::write` fails; create nothing on disk in that case.
+    if let Some(dir) = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty() && path.file_name().is_some())
+    {
+        std::fs::create_dir_all(dir).map_err(io_err)?;
     }
-    Ok(())
+    crate::atomic::write(path, text.as_bytes()).map_err(io_err)
 }
 
 #[cfg(test)]
