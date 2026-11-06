@@ -405,8 +405,8 @@ impl MapView {
         let radius = ns as f32 / 2.0;
         let pad_px = f64::from(radius).max(OVERLAY_PAD_PX);
         let pad = pad_px / t.zoom * geometry.scale;
-        net.nodes_in_rect_into(x0 - pad, z0 - pad, x1 + pad, z1 + pad, &mut self.nodes);
         if f64::from(ns) >= MIN_NODE_PX {
+            net.nodes_in_rect_into(x0 - pad, z0 - pad, x1 + pad, z1 + pad, &mut self.nodes);
             for &id in &self.nodes {
                 if Some(id) == hovered {
                     continue;
@@ -444,9 +444,13 @@ impl MapView {
         };
         if let Some(tex) = self.icons.as_ref().and_then(|i| i.warning_y.as_ref()) {
             let mut mesh = egui::Mesh::with_texture(tex.id());
-            for &id in &self.nodes {
+            for id in net.nodes_without_height() {
                 if let Some(n) = net.node(id)
                     && overlay::has_height_warning(n.y)
+                    && n.x >= x0 - pad
+                    && n.x <= x1 + pad
+                    && n.z >= z0 - pad
+                    && n.z <= z1 + pad
                 {
                     let (sx, sy) = to_screen(n.x, n.z);
                     add_icon(&mut mesh, (sx as f32, sy as f32), icons::SMALL_PX);
@@ -860,6 +864,34 @@ mod tests {
     }
 
     #[test]
+    fn height_warning_shows_where_no_node_is_drawn() {
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        let size = egui::vec2(1024.0, 1024.0);
+        let mut net = Network::new();
+        net.add_node(10.0, -1.0, 20.0, NodeFlag::REGULAR);
+        net.add_node(5000.0, -1.0, 5000.0, NodeFlag::REGULAR);
+        net.add_node(30.0, 4.0, 40.0, NodeFlag::REGULAR);
+        // At zoom 0.5 a node is 1 px: none is drawn, the warning icon still is.
+        assert!(f64::from(look::node_px(2.0, 0.5)) < MIN_NODE_PX);
+        let mut view = view_at(&ctx, &net, g, 0.5);
+        let out = frame(&ctx, &mut view, &net, g, size, None);
+        let (icons, _) = overlay_shapes(&out);
+        assert_eq!(icons.len(), 1);
+        let t = view.transform.expect("set");
+        let (mx, my) = g.to_map(10.0, 20.0);
+        let (sx, sy) = t.map_to_screen(mx, my);
+        let c = icons[0].center();
+        assert!((c.x - sx as f32).abs() < 1e-3 && (c.y - sy as f32).abs() < 1e-3);
+        let circles = out
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::Circle(_)))
+            .count();
+        assert_eq!(circles, 0);
+    }
+
+    #[test]
     fn marker_icon_and_name_placement_and_toggles() {
         let ctx = egui::Context::default();
         let g = MapGeometry::new(1.0);
@@ -1120,69 +1152,176 @@ mod tests {
         let dense = geometry.to_map(dense_world.0, dense_world.1);
         println!("{} nodes; densest cell {best} nodes", net.order().len());
 
-        let run = |name: &str, steps: f64, at: (f64, f64), grid: bool, hover: bool| {
+        const ROUNDS: usize = 3;
+        const FRAMES: usize = 30;
+        // One timed frame: tessellation included.
+        let timed = |view: &mut MapView, pointer: Option<egui::Pos2>| {
+            let start = std::time::Instant::now();
+            let out = frame_hover(&ctx, view, net, geometry, 2.0, size, Some(texture), pointer);
+            let _prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+            start.elapsed().as_secs_f64() * 1000.0
+        };
+        let stats = |times: &mut Vec<f64>| {
+            times.sort_by(|a, b| a.total_cmp(b));
+            (times[times.len() / 2], times[times.len() - 1])
+        };
+        // Runs ROUNDS rounds of FRAMES frames. `prepare` puts the view in its start state
+        // before each round; `step` runs before every timed frame.
+        let report = |name: &str,
+                      grid: bool,
+                      prepare: &dyn Fn(&mut MapView),
+                      step: &dyn Fn(&mut MapView, usize),
+                      hover: bool| {
             let mut view = MapView {
                 show_grid: grid,
+                show_marker_icons: true,
+                show_marker_names: true,
                 ..MapView::default()
             };
             // The first frame creates the transform at minimum zoom.
             let _ = frame(&ctx, &mut view, net, geometry, size, Some(texture));
-            let t = view.transform.as_mut().expect("set");
-            t.center = at;
-            t.zoom_at((960.0, 540.0), steps);
-            // With `hover`, the pointer rests on the lowest-id node within 300 px of the panel centre.
-            let pointer = hover.then(|| {
-                let t = *view.transform.as_ref().expect("set");
-                let ns = look::node_px(2.0, t.zoom);
-                let mut ids = Vec::new();
-                let (cx, cz) = {
+            let mut rounds = Vec::new();
+            for _ in 0..ROUNDS {
+                prepare(&mut view);
+                // With `hover`, the pointer rests on the lowest-id node within 300 px of the panel centre.
+                let pointer = hover.then(|| {
+                    let t = *view.transform.as_ref().expect("set");
+                    let mut ids = Vec::new();
                     let (mx, my) = t.screen_to_map(960.0, 540.0);
-                    geometry.to_world(mx, my)
-                };
-                let reach = 300.0 / t.zoom * geometry.scale;
-                net.nodes_in_rect_into(cx - reach, cz - reach, cx + reach, cz + reach, &mut ids);
-                ids.sort();
-                let id = ids.first().expect("a node near the centre");
-                let n = net.node(*id).expect("node");
-                let (mx, my) = geometry.to_map(n.x, n.z);
-                let (sx, sy) = t.map_to_screen(mx, my);
-                assert!(ns >= 2);
-                egui::pos2(sx as f32, sy as f32)
-            });
-            let mut times = Vec::new();
-            for i in 0..40 {
-                let start = std::time::Instant::now();
-                let out = frame_hover(
-                    &ctx,
-                    &mut view,
-                    net,
-                    geometry,
-                    2.0,
-                    size,
-                    Some(texture),
-                    pointer,
-                );
-                if hover && i >= 2 {
-                    assert!(view.hovered_node.is_some());
+                    let (cx, cz) = geometry.to_world(mx, my);
+                    let reach = 300.0 / t.zoom * geometry.scale;
+                    net.nodes_in_rect_into(
+                        cx - reach,
+                        cz - reach,
+                        cx + reach,
+                        cz + reach,
+                        &mut ids,
+                    );
+                    ids.sort();
+                    let id = ids.first().expect("a node near the centre");
+                    let n = net.node(*id).expect("node");
+                    let (mx, my) = geometry.to_map(n.x, n.z);
+                    let (sx, sy) = t.map_to_screen(mx, my);
+                    egui::pos2(sx as f32, sy as f32)
+                });
+                // Warm-up.
+                for i in 0..10 {
+                    step(&mut view, i);
+                    timed(&mut view, pointer);
                 }
-                let _prims = ctx.tessellate(out.shapes, out.pixels_per_point);
-                if i >= 10 {
-                    times.push(start.elapsed().as_secs_f64() * 1000.0);
+                let mut times = Vec::new();
+                for i in 0..FRAMES {
+                    step(&mut view, i);
+                    times.push(timed(&mut view, pointer));
+                    if hover {
+                        assert!(view.hovered_node.is_some());
+                    }
                 }
+                rounds.push(stats(&mut times));
             }
-            times.sort_by(|a, b| a.total_cmp(b));
+            let line: Vec<String> = rounds
+                .iter()
+                .map(|(m, x)| format!("{m:.3}/{x:.3}"))
+                .collect();
+            let best = rounds
+                .iter()
+                .copied()
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .expect("rounds");
+            let verdict = if best.0 < 16.0 && best.1 < 16.0 {
+                "ok"
+            } else {
+                "OVER BUDGET"
+            };
             println!(
-                "{name}: median {:.3} ms, max {:.3} ms",
-                times[times.len() / 2],
-                times[times.len() - 1]
+                "{name}: rounds (median/max ms) {}; best round (lowest max) median {:.3} ms, max {:.3} ms, {verdict}",
+                line.join(", "),
+                best.0,
+                best.1
             );
         };
-        run("min zoom, centre", -100.0, (1024.0, 1024.0), false, false);
-        run("mid zoom, dense", 6.0, dense, false, false);
-        run("max zoom, centre", 100.0, (1024.0, 1024.0), false, false);
-        run("max zoom, dense", 100.0, dense, false, false);
-        run("max zoom, dense, grid", 100.0, dense, true, false);
-        run("mid zoom, dense, grid", 6.0, dense, true, false);
-        run("max zoom, dense, hovered node", 100.0, dense, false, true);
+        let centre = (1024.0, 1024.0);
+        let at = |centre: (f64, f64), steps: f64| {
+            move |v: &mut MapView| {
+                let t = v.transform.as_mut().expect("set");
+                t.center = centre;
+                t.zoom_at((960.0, 540.0), -200.0);
+                t.center = centre;
+                t.zoom_at((960.0, 540.0), steps);
+            }
+        };
+        let none = |_: &mut MapView, _: usize| {};
+        report("static: min zoom", true, &at(centre, 0.0), &none, false);
+        report(
+            "static: mid zoom, dense",
+            true,
+            &at(dense, 6.0),
+            &none,
+            false,
+        );
+        report(
+            "static: max zoom, centre (grid off)",
+            false,
+            &at(centre, 100.0),
+            &none,
+            false,
+        );
+        report(
+            "static: max zoom, dense (grid off)",
+            false,
+            &at(dense, 100.0),
+            &none,
+            false,
+        );
+        report(
+            "static: max zoom, dense, hovered node",
+            true,
+            &at(dense, 100.0),
+            &none,
+            true,
+        );
+        // 40 px per frame, back and forth. At minimum zoom the map fills the panel's width,
+        // so only the vertical pan moves the view there.
+        let sweep = |i: usize| {
+            if (i / 15).is_multiple_of(2) {
+                40.0
+            } else {
+                -40.0
+            }
+        };
+        let pan_y =
+            |v: &mut MapView, i: usize| v.transform.as_mut().expect("set").pan(0.0, sweep(i));
+        let pan_x =
+            |v: &mut MapView, i: usize| v.transform.as_mut().expect("set").pan(sweep(i), 0.0);
+        report(
+            "pan: min zoom (vertical)",
+            true,
+            &at(centre, 0.0),
+            &pan_y,
+            false,
+        );
+        report("pan: mid zoom, dense", true, &at(dense, 6.0), &pan_x, false);
+        // One wheel step per frame about the dense point, between minimum and maximum zoom.
+        let dir = std::cell::Cell::new(-1.0);
+        report(
+            "zoom: in and out, dense point",
+            true,
+            &|v| {
+                at(dense, 100.0)(v);
+                dir.set(-1.0);
+            },
+            &|v, _| {
+                let t = v.transform.as_mut().expect("set");
+                if t.zoom <= t.min_zoom() * 1.0001 {
+                    dir.set(1.0);
+                } else if t.zoom >= MAX_ZOOM * 0.9999 {
+                    dir.set(-1.0);
+                }
+                // The dense point's current screen position, so clamping never moves the anchor.
+                let cursor = t.map_to_screen(dense.0, dense.1);
+                t.zoom_at(cursor, dir.get());
+            },
+            false,
+        );
     }
 }

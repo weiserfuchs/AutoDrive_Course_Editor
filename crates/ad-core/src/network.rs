@@ -3,7 +3,7 @@
 //! Adjacency, positions and flags change only through `Network` methods, and every
 //! one of them keeps the spatial indexes in sync.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -188,6 +188,8 @@ pub struct Network {
     nodes: NodeMap,
     order: Vec<NodeId>,
     markers: Vec<Marker>,
+    /// Ids of nodes whose `y` is exactly -1 (no height; Java compares with `==`).
+    no_height: BTreeSet<NodeId>,
     next_id: u64,
     node_index: RTree<NodeEntry>,
     edge_index: RTree<EdgeEntry>,
@@ -238,10 +240,16 @@ impl Network {
                 }
             }
         }
+        let no_height = ids
+            .iter()
+            .filter(|id| nodes.get(id).is_some_and(|n| n.y == -1.0))
+            .copied()
+            .collect();
         Ok(Self {
             nodes,
             order: ids,
             markers: Vec::new(),
+            no_height,
             next_id: len as u64,
             node_index: RTree::bulk_load(points),
             edge_index: RTree::bulk_load(edges),
@@ -265,7 +273,15 @@ impl Network {
         );
         self.order.push(id);
         self.node_index.insert(GeomWithData::new([x, z], id));
+        if y == -1.0 {
+            self.no_height.insert(id);
+        }
         id
+    }
+
+    /// Ids of the nodes without height (`y == -1.0`), in id order.
+    pub fn nodes_without_height(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.no_height.iter().copied()
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
@@ -315,6 +331,11 @@ impl Network {
             node.x = x;
             node.y = y;
             node.z = z;
+        }
+        if y == -1.0 {
+            self.no_height.insert(id);
+        } else {
+            self.no_height.remove(&id);
         }
         self.node_index.insert(GeomWithData::new([x, z], id));
         for e in touching {
@@ -509,6 +530,7 @@ impl Network {
             None => return Err(NetworkError::UnknownNode(id)),
         };
         self.node_index.remove(&GeomWithData::new(point, id));
+        self.no_height.remove(&id);
         let order_pos = self.order.iter().position(|o| *o == id).unwrap_or(0);
         if order_pos < self.order.len() {
             self.order.remove(order_pos);
@@ -540,6 +562,9 @@ impl Network {
         } = removed;
         let point = [node.x, node.z];
         let own_out = node.outgoing.clone();
+        if node.y == -1.0 {
+            self.no_height.insert(id);
+        }
         self.nodes.insert(id, node);
         self.order.insert(order_pos.min(self.order.len()), id);
         self.node_index.insert(GeomWithData::new(point, id));
