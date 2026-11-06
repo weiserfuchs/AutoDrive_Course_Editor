@@ -136,7 +136,7 @@ impl MapView {
         ui: &mut egui::Ui,
         net: &Network,
         geometry: MapGeometry,
-        node_size: u32,
+        node_size: f64,
         map_texture: Option<egui::TextureId>,
     ) {
         let (response, painter) =
@@ -184,7 +184,7 @@ impl MapView {
         painter: &egui::Painter,
         net: &Network,
         geometry: MapGeometry,
-        node_size: u32,
+        node_size: f64,
         map_texture: Option<egui::TextureId>,
         t: &ViewTransform,
     ) {
@@ -200,7 +200,6 @@ impl MapView {
             t.map_to_screen(mx, my)
         };
 
-        let node_size = f64::from(node_size);
         let ns = look::node_px(node_size, t.zoom);
 
         // All connections and arrowheads go into one mesh with per-vertex colour: one shape
@@ -216,8 +215,7 @@ impl MapView {
             let Some((from, to)) = look::line_ends(start, end, ns) else {
                 continue;
             };
-            let (kind, look) = (e.look.kind, e.look);
-            let colour = look::connection_colour(kind, look.from_flag.0, look.to_flag.0);
+            let colour = look::connection_colour(e.look.kind, e.look.from_flag.0, e.look.to_flag.0);
             // The normal comes from the full line; shortening can cross the ends on short lines.
             let len = (end.0 - start.0).hypot(end.1 - start.1);
             let nx = (-(end.1 - start.1) / len) as f32 * half_width;
@@ -237,7 +235,7 @@ impl MapView {
             }
             mesh.add_triangle(i, i + 1, i + 2);
             mesh.add_triangle(i, i + 2, i + 3);
-            let dual = kind == ConnectionKind::Dual;
+            let dual = e.look.kind == ConnectionKind::Dual;
             if let Some(tri) = look::arrow(start, end, ns, node_size, t.zoom, dual) {
                 let i = mesh.vertices.len() as u32;
                 for p in tri {
@@ -344,7 +342,7 @@ mod tests {
         size: egui::Vec2,
         texture: Option<egui::TextureId>,
     ) -> egui::FullOutput {
-        frame_sized(ctx, view, net, geometry, 2, size, texture)
+        frame_sized(ctx, view, net, geometry, 2.0, size, texture)
     }
 
     fn frame_sized(
@@ -352,7 +350,7 @@ mod tests {
         view: &mut MapView,
         net: &Network,
         geometry: MapGeometry,
-        node_size: u32,
+        node_size: f64,
         size: egui::Vec2,
         texture: Option<egui::TextureId>,
     ) -> egui::FullOutput {
@@ -521,17 +519,20 @@ mod tests {
         assert!(node_colours.contains(&look::NODE_REGULAR));
         assert!(node_colours.contains(&look::NODE_SUBPRIO));
 
-        // A node size of 1 at this zoom gives nodes under 2 px: no circles, no arrowheads.
-        let mut small = MapView::default();
-        let _ = frame_sized(&ctx, &mut small, &net, g, 1, size, None);
-        small
-            .transform
-            .as_mut()
-            .expect("set")
-            .zoom_at((0.0, 0.0), 1.0);
-        let out = frame_sized(&ctx, &mut small, &net, g, 1, size, None);
-        let (_, arrows, circles) = count3(&out);
-        assert_eq!((arrows, circles), (0, 0));
+        // At zoom 3.28 node size 2 gives 3 px nodes (circles and arrowheads); size 1 gives
+        // 1 px (neither), so the size from the settings is what decides.
+        let counts = |node_size: f64| {
+            let mut v = MapView::default();
+            let _ = frame_sized(&ctx, &mut v, &net, g, node_size, size, None);
+            let t = v.transform.as_mut().expect("set");
+            t.zoom = 3.28;
+            t.center = (160.0, 160.0);
+            let (_, arrows, circles) =
+                count3(&frame_sized(&ctx, &mut v, &net, g, node_size, size, None));
+            (arrows, circles)
+        };
+        assert_eq!(counts(2.0), (3, 3));
+        assert_eq!(counts(1.0), (0, 0));
     }
 
     /// Release timing of the view path on the fixture. Run by hand:

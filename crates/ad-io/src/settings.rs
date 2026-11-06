@@ -51,14 +51,14 @@ impl Default for GlobalSettings {
 pub struct MapSettings {
     pub scale: u32,
     /// Node size in map-view units (Java `nodeSize`); the on-screen diameter follows zoom.
-    pub node_size: u32,
+    pub node_size: f64,
 }
 
 impl Default for MapSettings {
     fn default() -> Self {
         Self {
             scale: 1,
-            node_size: 2,
+            node_size: 2.0,
         }
     }
 }
@@ -123,7 +123,7 @@ mod tests {
             "Marsch".to_owned(),
             MapSettings {
                 scale: 4,
-                node_size: 3,
+                node_size: 3.0,
             },
         );
         let path = dir.join("settings.toml");
@@ -153,7 +153,7 @@ mod tests {
             s.maps.get("X"),
             Some(&MapSettings {
                 scale: 1,
-                node_size: 2
+                node_size: 2.0
             })
         );
         assert_eq!(s.global.history_cap, 500);
@@ -166,7 +166,7 @@ scale = 3
         )
         .expect("write");
         let s = load(&path).expect("load");
-        assert_eq!((s.maps["Y"].scale, s.maps["Y"].node_size), (3, 2));
+        assert_eq!((s.maps["Y"].scale, s.maps["Y"].node_size), (3, 2.0));
         std::fs::write(
             &path,
             "[maps.Y]
@@ -174,7 +174,16 @@ node_size = 3
 ",
         )
         .expect("write");
-        assert_eq!(load(&path).expect("load").maps["Y"].node_size, 3);
+        assert_eq!(load(&path).expect("load").maps["Y"].node_size, 3.0);
+        // Floats load too, as Java steps the size by 0.1.
+        std::fs::write(
+            &path,
+            "[maps.Y]
+node_size = 2.5
+",
+        )
+        .expect("write");
+        assert_eq!(load(&path).expect("load").maps["Y"].node_size, 2.5);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

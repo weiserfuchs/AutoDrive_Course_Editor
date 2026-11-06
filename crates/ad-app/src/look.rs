@@ -88,14 +88,16 @@ pub fn arrow(
     }
     let nsf = f64::from(ns);
     let line_length = dist - nsf;
+    // Java computes `diff` as an int: truncated toward zero, halved by integer division
+    // for dual links.
     let diff = if dual {
         if line_length <= 2.0 * nsf {
-            (2.0 * nsf - line_length) / 2.0
+            f64::from(((2.0 * nsf - line_length) as i32) / 2)
         } else {
             0.0
         }
     } else if line_length <= nsf {
-        nsf - line_length
+        f64::from((nsf - line_length) as i32)
     } else {
         0.0
     };
@@ -190,5 +192,15 @@ mod tests {
         let [_, l, _] = arrow((0.0, 0.0), (15.0, 0.0), 11, 2.0, 10.0, false).expect("arrow");
         let len = (l.0 - 15.0).hypot(l.1);
         assert!((len - (14.0 - 7.0 / 1.15)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn arrow_diff_truncates_like_java() {
+        // Non-dual: dist 15.6, line_length 4.6, diff (int)6.4 = 6.
+        let [_, l, _] = arrow((0.0, 0.0), (15.6, 0.0), 11, 2.0, 10.0, false).expect("arrow");
+        assert!(((l.0 - 15.6).hypot(l.1) - (14.0 - 6.0 / 1.15)).abs() < 1e-9);
+        // Dual: dist 25.6, line_length 14.6, diff (int)7.4 / 2 = 3.
+        let [_, l, _] = arrow((0.0, 0.0), (25.6, 0.0), 11, 2.0, 10.0, true).expect("arrow");
+        assert!(((l.0 - 25.6).hypot(l.1) - (14.0 - 3.0 / 1.15)).abs() < 1e-9);
     }
 }
