@@ -3,7 +3,7 @@ title: 'Settings file, logging and crash reporting exist'
 type: 'feature'
 ticket: '8'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: 'c3cdf50b363ba6a69523435a25553878abc28972'
 route: 'full'
 route_source: 'auto'
@@ -110,6 +110,8 @@ context: ['{project-root}/_bmad-output/initiative-rust-rewrite/architecture-rust
 - Given a debug build with `AD_DEBUG_PANIC=1`, when the app starts, then a message box shows the panic, and the log file contains it at error level.
 
 ## Implementation Notes
+
+- 2026-11-06: The agent ran the debug app once. It wrote `settings.toml` (cap 500) and `editor.log.2026-11-06` under `%APPDATA%\AutoDrive Course Editor`. The `AD_DEBUG_PANIC` message-box check was not run; it blocks on a dialog.
 
 ## Plan Change Log
 
