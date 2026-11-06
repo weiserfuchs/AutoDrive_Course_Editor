@@ -2,3 +2,4 @@
 //!
 //! Depends on `ad-core` and never on the UI.
 pub mod config_xml;
+pub mod settings;

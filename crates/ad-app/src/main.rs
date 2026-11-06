@@ -2,11 +2,13 @@
 
 mod document;
 mod jobs;
+mod startup;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use eframe::egui;
 
+use ad_io::settings::Settings;
 use document::Document;
 use jobs::JobResult;
 
@@ -19,10 +21,11 @@ struct App {
     loading: bool,
     saving: bool,
     error: Option<String>,
+    settings: Settings,
 }
 
-impl Default for App {
-    fn default() -> Self {
+impl App {
+    fn new(settings: Settings) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
             doc: None,
@@ -32,11 +35,10 @@ impl Default for App {
             loading: false,
             saving: false,
             error: None,
+            settings,
         }
     }
-}
 
-impl App {
     /// Applies finished jobs. Called once per frame on the UI thread.
     fn poll_jobs(&mut self) {
         while let Ok(result) = self.rx.try_recv() {
@@ -44,9 +46,12 @@ impl App {
                 JobResult::Loaded { .. } => self.loading = false,
                 JobResult::Saved { .. } => self.saving = false,
             }
-            if let Some(message) =
-                jobs::apply_result(&mut self.doc, &mut self.epoch_counter, result)
-            {
+            if let Some(message) = jobs::apply_result(
+                &mut self.doc,
+                &mut self.epoch_counter,
+                self.settings.global.history_cap,
+                result,
+            ) {
                 self.error = Some(message);
             }
         }
@@ -196,9 +201,11 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
+    let startup = startup::init();
+    let settings = startup.settings.clone();
     eframe::run_native(
         "AutoDrive Course Editor",
         eframe::NativeOptions::default(),
-        Box::new(|_cc| Ok(Box::new(App::default()))),
+        Box::new(move |_cc| Ok(Box::new(App::new(settings)))),
     )
 }

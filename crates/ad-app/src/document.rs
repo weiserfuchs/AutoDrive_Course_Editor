@@ -16,8 +16,8 @@ pub struct Document {
 
 impl Document {
     /// A clean document with a fresh history, gated read-only when the config requires it.
-    pub fn new(config: LoadedConfig, path: PathBuf, epoch: u64) -> Self {
-        let mut history = History::default();
+    pub fn new(config: LoadedConfig, path: PathBuf, epoch: u64, history_cap: usize) -> Self {
+        let mut history = History::new(history_cap);
         history.set_read_only(config.read_only().is_some());
         Self {
             config,

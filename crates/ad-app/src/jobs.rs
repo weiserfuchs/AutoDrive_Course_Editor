@@ -31,7 +31,12 @@ pub fn load_file(path: &Path) -> Result<LoadedConfig, String> {
 /// Runs `load_file` on a background thread, then calls `notify` (a repaint request).
 pub fn spawn_load(path: PathBuf, tx: Sender<JobResult>, notify: impl FnOnce() + Send + 'static) {
     thread::spawn(move || {
+        tracing::info!("loading {}", path.display());
         let result = load_file(&path).map(Box::new);
+        match &result {
+            Ok(_) => tracing::info!("loaded {}", path.display()),
+            Err(e) => tracing::warn!("{e}"),
+        }
         // The receiver is gone only when the app is closing.
         let _ = tx.send(JobResult::Loaded { path, result });
         notify();
@@ -48,8 +53,13 @@ pub fn spawn_save(
     notify: impl FnOnce() + Send + 'static,
 ) {
     thread::spawn(move || {
+        tracing::info!("saving {}", target.display());
         let result = config_xml::save_to(&snapshot, &target)
             .map_err(|e| format!("Cannot save {}: {e}", target.display()));
+        match &result {
+            Ok(()) => tracing::info!("saved {}", target.display()),
+            Err(e) => tracing::warn!("{e}"),
+        }
         let _ = tx.send(JobResult::Saved {
             epoch,
             point,
@@ -67,9 +77,10 @@ pub fn replace_document(
     epoch_counter: &mut u64,
     config: LoadedConfig,
     path: PathBuf,
+    history_cap: usize,
 ) {
     *epoch_counter += 1;
-    *doc = Some(Document::new(config, path, *epoch_counter));
+    *doc = Some(Document::new(config, path, *epoch_counter, history_cap));
 }
 
 /// Applies a finished job on the UI thread. Returns an error message to show, if any.
@@ -77,12 +88,13 @@ pub fn replace_document(
 pub fn apply_result(
     doc: &mut Option<Document>,
     epoch_counter: &mut u64,
+    history_cap: usize,
     result: JobResult,
 ) -> Option<String> {
     match result {
         JobResult::Loaded { path, result } => match result {
             Ok(config) => {
-                replace_document(doc, epoch_counter, *config, path);
+                replace_document(doc, epoch_counter, *config, path, history_cap);
                 None
             }
             Err(message) => Some(message),
@@ -150,7 +162,7 @@ mod tests {
             path: fixture_path(),
             result: Ok(Box::new(config())),
         };
-        assert_eq!(apply_result(doc, counter, result), None);
+        assert_eq!(apply_result(doc, counter, 500, result), None);
     }
 
     fn saved(doc: &Document, point: SavePoint, result: Result<(), String>) -> JobResult {
@@ -177,6 +189,21 @@ mod tests {
     }
 
     #[test]
+    fn history_cap_reaches_new_document() {
+        let (mut doc, mut counter) = (None, 0);
+        let result = JobResult::Loaded {
+            path: fixture_path(),
+            result: Ok(Box::new(config())),
+        };
+        assert_eq!(apply_result(&mut doc, &mut counter, 1, result), None);
+        let d = doc.as_mut().expect("doc");
+        d.apply(edit()).expect("edit");
+        d.apply(edit()).expect("edit");
+        assert!(d.history.undo(&mut d.config.network));
+        assert!(!d.history.can_undo());
+    }
+
+    #[test]
     fn load_fail_keeps_document() {
         let (mut doc, mut counter) = (None, 0);
         loaded(&mut doc, &mut counter);
@@ -195,7 +222,10 @@ mod tests {
             path: broken,
             result: Err(message.clone()),
         };
-        assert_eq!(apply_result(&mut doc, &mut counter, result), Some(message));
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, 500, result),
+            Some(message)
+        );
         let d = doc.as_mut().expect("doc");
         assert_eq!((d.epoch, counter, d.is_dirty()), (1, 1, false));
         assert_eq!(d.path, fixture_path());
@@ -210,7 +240,7 @@ mod tests {
         d.apply(edit()).expect("edit");
         let point = d.history.save_point();
         let result = saved(d, point, Ok(()));
-        assert_eq!(apply_result(&mut doc, &mut counter, result), None);
+        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
         let d = doc.as_ref().expect("doc");
         assert!(!d.is_dirty());
         assert_eq!(d.path, PathBuf::from("target.xml"));
@@ -225,7 +255,7 @@ mod tests {
         let point = d.history.save_point();
         let result = saved(d, point, Ok(()));
         d.apply(edit()).expect("edit");
-        assert_eq!(apply_result(&mut doc, &mut counter, result), None);
+        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
         assert!(doc.as_ref().expect("doc").is_dirty());
     }
 
@@ -240,7 +270,7 @@ mod tests {
         loaded(&mut doc, &mut counter);
         let d = doc.as_mut().expect("doc");
         d.apply(edit()).expect("edit");
-        assert_eq!(apply_result(&mut doc, &mut counter, result), None);
+        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
         let d = doc.as_ref().expect("doc");
         assert!(d.is_dirty());
         assert_eq!(d.path, fixture_path());
@@ -255,7 +285,7 @@ mod tests {
         let point = d.history.save_point();
         let result = saved(d, point, Err("disk full".to_owned()));
         assert_eq!(
-            apply_result(&mut doc, &mut counter, result),
+            apply_result(&mut doc, &mut counter, 500, result),
             Some("disk full".to_owned())
         );
         let d = doc.as_ref().expect("doc");
@@ -273,7 +303,7 @@ mod tests {
         d.apply(edit()).expect("edit");
         d.apply(edit()).expect("edit");
         let result = saved(d, point, Ok(()));
-        assert_eq!(apply_result(&mut doc, &mut counter, result), None);
+        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
         assert!(doc.as_ref().expect("doc").is_dirty());
     }
 
@@ -289,7 +319,7 @@ mod tests {
             .expect("job finished");
         let (mut doc, mut counter) = (None, 0);
         let result = rx.try_recv().expect("result queued before notify");
-        assert_eq!(apply_result(&mut doc, &mut counter, result), None);
+        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
         assert!(doc.is_some_and(|d| !d.config.network.is_empty()));
     }
 }
