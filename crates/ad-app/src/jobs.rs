@@ -174,25 +174,67 @@ mod tests {
         }
     }
 
-    #[test]
-    fn read_only_config_gets_a_gated_history() {
-        let legacy =
-            inline_text("1.000,2.500").replace("<version>3</version>", "<markerID>1</markerID>");
-        let config = config_xml::load(legacy.as_bytes()).expect("legacy loads");
-        assert_eq!(
-            config.read_only(),
-            Some(&config_xml::ReadOnlyReason::Legacy)
-        );
+    /// Loads `text` through `apply_result` into a fresh document.
+    fn open(text: &str) -> Document {
+        let config = config_xml::load(text.as_bytes()).expect("config loads");
         let (mut doc, mut counter) = (None, 0);
         let result = JobResult::Loaded {
             path: fixture_path(),
             result: Ok(Box::new(config)),
         };
         assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
-        let d = doc.as_mut().expect("doc");
-        assert!(d.history.is_read_only());
-        assert_eq!(d.apply(edit()), Err(NetworkError::ReadOnly));
-        assert!(!d.history.can_undo() && !d.is_dirty());
+        doc.expect("doc")
+    }
+
+    #[test]
+    fn read_only_config_gets_a_gated_history() {
+        let spline = inline_text("1.000,2.500").replace("<flags>0,1</flags>", "<flags>2,4</flags>");
+        let cases = [
+            (
+                spline.replace("<version>3</version>", "<markerID>1</markerID>"),
+                config_xml::ReadOnlyReason::Legacy,
+            ),
+            (
+                spline.replace("<version>3</version>", "<version>9</version>"),
+                config_xml::ReadOnlyReason::UnknownVersion("9".to_owned()),
+            ),
+        ];
+        for (text, reason) in cases {
+            let mut d = open(&text);
+            assert_eq!(d.config.read_only(), Some(&reason));
+            assert!(d.history.is_read_only());
+            assert_eq!(d.apply(edit()), Err(NetworkError::ReadOnly));
+            assert!(!d.history.can_undo() && !d.is_dirty(), "{reason}");
+        }
+    }
+
+    #[test]
+    fn flag_reset_on_load_starts_dirty() {
+        let fs25 = inline_text("1.000,2.500");
+        for flags in ["<flags>2,1</flags>", "<flags>0,4</flags>"] {
+            let mut d = open(&fs25.replace("<flags>0,1</flags>", flags));
+            assert!(d.is_dirty(), "{flags}");
+            assert!(!d.history.can_undo());
+            assert!(!d.history.undo(&mut d.config.network));
+            assert!(d.is_dirty());
+        }
+        assert!(!open(&fs25).is_dirty());
+        let fs19 = fs25
+            .replace("<version>3</version>", "<version>1.1.0.8</version>")
+            .replace("<flags>0,1</flags>", "<flags>2,1</flags>");
+        assert!(!open(&fs19).is_dirty());
+    }
+
+    #[test]
+    fn save_of_reset_document_makes_it_clean() {
+        let text = inline_text("1.000,2.500").replace("<flags>0,1</flags>", "<flags>2,1</flags>");
+        let mut doc = Some(open(&text));
+        let mut counter = 1;
+        let d = doc.as_ref().expect("doc");
+        assert!(d.is_dirty());
+        let result = saved(d, d.history.save_point(), Ok(()));
+        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
+        assert!(!doc.expect("doc").is_dirty());
     }
 
     #[test]

@@ -15,10 +15,15 @@ pub struct Document {
 }
 
 impl Document {
-    /// A clean document with a fresh history, gated read-only when the config requires it.
+    /// A document with a fresh history, gated read-only when the config requires it.
+    /// It starts clean unless the load reset flags.
     pub fn new(config: LoadedConfig, path: PathBuf, epoch: u64, history_cap: usize) -> Self {
         let mut history = History::new(history_cap);
         history.set_read_only(config.read_only().is_some());
+        // The load already changed the flags, so a save writes different bytes (AD-11).
+        if config.flags_reset() {
+            history.mark_unsaved();
+        }
         Self {
             config,
             history,
