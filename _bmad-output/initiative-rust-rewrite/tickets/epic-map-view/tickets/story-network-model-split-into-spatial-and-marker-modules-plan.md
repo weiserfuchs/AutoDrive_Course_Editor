@@ -3,7 +3,7 @@ title: 'Network model split into spatial and marker modules'
 type: 'refactor'
 ticket: '1'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: '98a867894a541a00a050090adbbff06c912a393f'
 route: 'full'
 route_source: 'auto'
