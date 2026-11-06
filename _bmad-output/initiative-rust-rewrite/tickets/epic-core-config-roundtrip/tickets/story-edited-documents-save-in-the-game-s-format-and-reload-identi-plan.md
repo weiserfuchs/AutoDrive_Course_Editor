@@ -3,7 +3,7 @@ title: "Edited documents save in the game's format and reload identically"
 type: 'feature'
 ticket: '5'
 created: '2026-11-05'
-status: 'built'
+status: done
 baseline_revision: '29e753c44d29c6c0b7d31d21dd2c8b97426eedc4'
 route: 'full'
 route_source: 'auto'
@@ -94,6 +94,7 @@ context: ['{project-root}/_bmad-output/initiative-rust-rewrite/architecture-rust
   - The edited golden test applies `AddNode` in its own transaction and the remaining edits in a second one.
   - `Connect` needs the new node's id, which exists only after `AddNode` applies.
   - Same-transaction add-and-connect is left to the tools epic.
+- 2026-11-06: user confirmed that the app opens the fixture, and Save through `save_to` leaves it byte-identical (`git status` clean) with no temp file left.
 
 ## Plan Change Log
 
