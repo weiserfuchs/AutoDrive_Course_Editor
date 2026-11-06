@@ -1,18 +1,22 @@
 //! The map view: map pixel <-> screen transform, culling, painting and input.
 
+use std::borrow::Cow;
+
 use eframe::egui;
 
 use ad_core::geometry::{MAP_PIXELS, MapGeometry};
 use ad_core::network::{ConnectionKind, EdgeSegment, Network, NodeId};
 
 use crate::icons::{self, Icons};
-use crate::lod::{MAX_ZOOM, MIN_NODE_PX, WHEEL_POINTS_PER_STEP, ZOOM_STEP};
-use crate::{look, overlay};
+use crate::lod::{HOVER_RING_FACTOR, MAX_ZOOM, MIN_NODE_PX, WHEEL_POINTS_PER_STEP, ZOOM_STEP};
+use crate::{hover, look, overlay};
 
 /// Screen px an icon or name reaches from its anchor; the cull rectangle grows by this.
 const OVERLAY_PAD_PX: f64 = 60.0;
 /// Marker name size in egui points.
 const NAME_FONT_SIZE: f32 = 12.0;
+/// Padding around the text of an info box row, in px.
+const BOX_PAD_PX: f32 = 2.0;
 
 /// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
 /// centre is in map px. The panel is the screen rectangle the map is shown in.
@@ -133,6 +137,13 @@ pub struct MapView {
     pub show_grid: bool,
     pub show_marker_icons: bool,
     pub show_marker_names: bool,
+    /// Session toggle for the "Node ID" row of the info box.
+    pub show_node_id: bool,
+    /// The node under the pointer, recomputed every frame.
+    pub hovered_node: Option<NodeId>,
+    /// The connection under the pointer, recomputed every frame; the tools epic reads it.
+    #[allow(dead_code)]
+    pub hovered_edge: Option<(NodeId, NodeId)>,
     /// Grid spacing in world units, from the map's settings.
     pub grid: (f64, f64),
 }
@@ -147,6 +158,9 @@ impl Default for MapView {
             show_grid: false,
             show_marker_icons: true,
             show_marker_names: true,
+            show_node_id: false,
+            hovered_node: None,
+            hovered_edge: None,
             grid: (2.0, 2.0),
         }
     }
@@ -156,6 +170,13 @@ impl MapView {
     /// Forgets the view; the next frame starts at the minimum zoom, centred.
     pub fn reset(&mut self) {
         self.transform = None;
+        self.clear_hover();
+    }
+
+    /// Nothing is hovered, e.g. while there is no document.
+    pub fn clear_hover(&mut self) {
+        self.hovered_node = None;
+        self.hovered_edge = None;
     }
 
     pub fn show(
@@ -165,6 +186,7 @@ impl MapView {
         geometry: MapGeometry,
         node_size: f64,
         map_texture: Option<egui::TextureId>,
+        overlay_hook: impl FnOnce(&egui::Painter, &ViewTransform, MapGeometry),
     ) {
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
@@ -206,7 +228,81 @@ impl MapView {
         if self.icons.is_none() {
             self.icons = Some(Icons::load(ui.ctx()));
         }
+        let ns = look::node_px(node_size, t.zoom);
+        let cursor = response
+            .hover_pos()
+            .map(|p| (f64::from(p.x), f64::from(p.y)));
+        self.hovered_node =
+            cursor.and_then(|c| hover::node_at(net, geometry, &t, ns, c, &mut self.nodes));
+        self.hovered_edge = cursor.and_then(|c| hover::edge_at(net, geometry, &t, c));
         self.paint(&painter, net, geometry, node_size, map_texture, &t);
+        if let Some(id) = self.hovered_node {
+            self.paint_info_box(&painter, net, geometry, &t, ns, id, rect);
+        }
+        // Last, so tools draw on top of everything.
+        overlay_hook(&painter, &t, geometry);
+    }
+
+    /// The info box of the hovered node, beside it and inside the panel.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_info_box(
+        &self,
+        painter: &egui::Painter,
+        net: &Network,
+        geometry: MapGeometry,
+        t: &ViewTransform,
+        ns: i32,
+        id: NodeId,
+        panel: egui::Rect,
+    ) {
+        let Some(node) = net.node(id) else {
+            return;
+        };
+        // One lookup per frame, and only while the ID row is shown.
+        let file_id = if self.show_node_id {
+            net.order()
+                .iter()
+                .position(|&n| n == id)
+                .map_or(0, |i| i + 1)
+        } else {
+            0
+        };
+        let rows = hover::info_rows(node, file_id, self.show_node_id);
+        if rows.is_empty() {
+            return;
+        }
+        let font = egui::FontId::proportional(NAME_FONT_SIZE);
+        let galleys: Vec<_> = rows
+            .iter()
+            .map(|r| painter.layout_no_wrap(r.text.clone(), font.clone(), r.text_colour))
+            .collect();
+        let width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max) + 2.0 * BOX_PAD_PX;
+        let row_heights: Vec<f32> = galleys
+            .iter()
+            .map(|g| g.size().y + 2.0 * BOX_PAD_PX)
+            .collect();
+        let size = egui::vec2(width, row_heights.iter().sum());
+        let (mx, my) = geometry.to_map(node.x, node.z);
+        let (sx, sy) = t.map_to_screen(mx, my);
+        let anchor = egui::pos2(sx as f32 + ns as f32 / 2.0, sy as f32);
+        let boxed = hover::box_rect(anchor, size, panel);
+        let mut y = boxed.min.y;
+        for ((row, galley), height) in rows.iter().zip(galleys).zip(row_heights) {
+            let rect =
+                egui::Rect::from_min_size(egui::pos2(boxed.min.x, y), egui::vec2(width, height));
+            painter.rect_filled(rect, 0.0, row.background);
+            let text_x = if row.centred {
+                rect.center().x - galley.size().x / 2.0
+            } else {
+                rect.min.x + BOX_PAD_PX
+            };
+            painter.galley(
+                egui::pos2(text_x, rect.min.y + BOX_PAD_PX),
+                galley,
+                row.text_colour,
+            );
+            y += height;
+        }
     }
 
     fn paint(
@@ -258,6 +354,7 @@ impl MapView {
         }
 
         let ns = look::node_px(node_size, t.zoom);
+        let hovered = self.hovered_node;
 
         // All connections and arrowheads go into one mesh with per-vertex colour: one shape
         // instead of tens of thousands is what keeps the tessellation inside the frame budget.
@@ -311,6 +408,9 @@ impl MapView {
         net.nodes_in_rect_into(x0 - pad, z0 - pad, x1 + pad, z1 + pad, &mut self.nodes);
         if f64::from(ns) >= MIN_NODE_PX {
             for &id in &self.nodes {
+                if Some(id) == hovered {
+                    continue;
+                }
                 if let Some(n) = net.node(id) {
                     let (sx, sy) = to_screen(n.x, n.z);
                     painter.circle_filled(
@@ -319,6 +419,17 @@ impl MapView {
                         look::node_colour(n.flag.0),
                     );
                 }
+            }
+            // On top of all other nodes, with a white ring.
+            if let Some(n) = hovered.and_then(|id| net.node(id)) {
+                let (sx, sy) = to_screen(n.x, n.z);
+                let centre = egui::pos2(sx as f32, sy as f32);
+                painter.circle_filled(centre, radius, look::node_colour(n.flag.0));
+                painter.circle_stroke(
+                    centre,
+                    radius,
+                    egui::Stroke::new(HOVER_RING_FACTOR * ns as f32, egui::Color32::WHITE),
+                );
             }
         }
 
@@ -345,7 +456,7 @@ impl MapView {
                 painter.add(egui::Shape::mesh(mesh));
             }
         }
-        if self.show_marker_icons || self.show_marker_names {
+        if self.show_marker_icons || self.show_marker_names || hovered.is_some() {
             let marker_tex = self
                 .icons
                 .as_ref()
@@ -367,8 +478,12 @@ impl MapView {
                 if let Some(mesh) = &mut icon_mesh {
                     add_icon(mesh, overlay::marker_icon_centre(anchor), icons::MARKER_PX);
                 }
-                if self.show_marker_names {
-                    names.push((&m.name, overlay::name_centre(anchor)));
+                if Some(m.node) == hovered {
+                    // A hovered marker always shows its name, with its group.
+                    let text = Cow::Owned(format!("{} ( {} )", m.name, m.group));
+                    names.push((text, overlay::name_centre(anchor)));
+                } else if self.show_marker_names {
+                    names.push((Cow::Borrowed(m.name.as_str()), overlay::name_centre(anchor)));
                 }
             }
             if let Some(mesh) = icon_mesh.filter(|m| !m.is_empty()) {
@@ -477,14 +592,46 @@ mod tests {
         size: egui::Vec2,
         texture: Option<egui::TextureId>,
     ) -> egui::FullOutput {
+        frame_hover(ctx, view, net, geometry, node_size, size, texture, None)
+    }
+
+    /// One frame with the pointer at `pointer`. egui sees a widget as hovered one frame
+    /// after the pointer arrives, so hover tests run two frames.
+    #[allow(clippy::too_many_arguments)]
+    fn frame_hover(
+        ctx: &egui::Context,
+        view: &mut MapView,
+        net: &Network,
+        geometry: MapGeometry,
+        node_size: f64,
+        size: egui::Vec2,
+        texture: Option<egui::TextureId>,
+        pointer: Option<egui::Pos2>,
+    ) -> egui::FullOutput {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
             ..Default::default()
         };
-        let mut out = ctx.run_ui(input, |ui| view.show(ui, net, geometry, node_size, texture));
+        let mut out = ctx.run_ui(input, |ui| {
+            view.show(ui, net, geometry, node_size, texture, |_, _, _| {});
+        });
         // No renderer here, so there is nothing to upload.
         out.textures_delta.clear();
         out
+    }
+
+    /// Two frames with the pointer at `pointer`; returns the second.
+    fn hover_frame(
+        ctx: &egui::Context,
+        view: &mut MapView,
+        net: &Network,
+        pointer: Option<egui::Pos2>,
+    ) -> egui::FullOutput {
+        let size = egui::vec2(1024.0, 1024.0);
+        let g = MapGeometry::new(1.0);
+        let _ = frame_hover(ctx, view, net, g, 2.0, size, None, pointer);
+        frame_hover(ctx, view, net, g, 2.0, size, None, pointer)
     }
 
     /// Counts painted (connection quads, circles). Arrowheads are triangles in the mesh.
@@ -750,6 +897,148 @@ mod tests {
         assert_eq!((icons.len(), texts.len()), (0, 1));
     }
 
+    /// Two nodes on a view at zoom 10 (ns 11): `a` at the panel centre (512, 512), `b` 200 px right.
+    fn hover_net() -> (Network, NodeId, NodeId) {
+        let mut net = Network::new();
+        let a = net.add_node(0.0, -1.0, 0.0, NodeFlag::REGULAR);
+        let b = net.add_node(20.0, 5.0, 0.0, NodeFlag::SUB_PRIO);
+        (net, a, b)
+    }
+
+    #[test]
+    fn hovered_node_is_drawn_last_with_ring() {
+        let ctx = egui::Context::default();
+        let (net, a, _) = hover_net();
+        let mut view = view_at(&ctx, &net, MapGeometry::new(1.0), 10.0);
+        let out = hover_frame(&ctx, &mut view, &net, Some(egui::pos2(513.0, 512.0)));
+        assert_eq!(view.hovered_node, Some(a));
+        let circles: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Circle(c) => Some(*c),
+                _ => None,
+            })
+            .collect();
+        // The other node, then the hovered node on top, then its ring.
+        assert_eq!(circles.len(), 3);
+        assert_eq!(circles[0].fill, look::NODE_SUBPRIO);
+        assert_eq!(circles[1].fill, look::NODE_REGULAR);
+        assert_eq!(circles[2].stroke.color, egui::Color32::WHITE);
+        assert!((circles[2].stroke.width - 1.1).abs() < 1e-5);
+        assert_eq!(circles[2].radius, 5.5);
+    }
+
+    #[test]
+    fn no_pointer_means_nothing_hovered() {
+        let ctx = egui::Context::default();
+        let (net, _, _) = hover_net();
+        let mut view = view_at(&ctx, &net, MapGeometry::new(1.0), 10.0);
+        view.show_node_id = true;
+        for pointer in [None, Some(egui::pos2(5000.0, 5000.0))] {
+            let out = hover_frame(&ctx, &mut view, &net, pointer);
+            assert_eq!(view.hovered_node, None);
+            assert_eq!(view.hovered_edge, None);
+            assert_eq!(count(&out).1, 2, "no ring");
+            assert!(overlay_shapes(&out).1.is_empty(), "no box");
+        }
+        let empty = Network::new();
+        let _ = hover_frame(&ctx, &mut view, &empty, Some(egui::pos2(512.0, 512.0)));
+        assert_eq!(view.hovered_node, None);
+        assert_eq!(view.hovered_edge, None);
+        // Cleared state: a hovered node and edge are forgotten without a frame.
+        let (net, a, b) = hover_net();
+        let mut net = net;
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        let _ = hover_frame(&ctx, &mut view, &net, Some(egui::pos2(512.0, 512.0)));
+        assert_eq!(view.hovered_node, Some(a));
+        view.clear_hover();
+        assert_eq!((view.hovered_node, view.hovered_edge), (None, None));
+    }
+
+    #[test]
+    fn info_box_rows() {
+        let ctx = egui::Context::default();
+        let (net, _, b) = hover_net();
+        let mut view = view_at(&ctx, &net, MapGeometry::new(1.0), 10.0);
+        let on_a = Some(egui::pos2(512.0, 512.0));
+        // y = -1 with the toggle off: only the red row.
+        let texts = overlay_shapes(&hover_frame(&ctx, &mut view, &net, on_a)).1;
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].0, "Node Y is invalid ( -1 )");
+        view.show_node_id = true;
+        let texts = overlay_shapes(&hover_frame(&ctx, &mut view, &net, on_a)).1;
+        let strings: Vec<_> = texts.iter().map(|t| t.0.as_str()).collect();
+        assert_eq!(strings, ["Node ID 1", "Node Y is invalid ( -1 )"]);
+        // The box starts ns/2 right of the node.
+        assert!(texts[0].1.x > 512.0 + 5.5);
+        // y = 5, toggle off: no box at all.
+        view.show_node_id = false;
+        let on_b = Some(egui::pos2(712.0, 512.0));
+        let out = hover_frame(&ctx, &mut view, &net, on_b);
+        assert_eq!(view.hovered_node, Some(b));
+        assert!(overlay_shapes(&out).1.is_empty());
+        // The second node in the file is "Node ID 2".
+        view.show_node_id = true;
+        let texts = overlay_shapes(&hover_frame(&ctx, &mut view, &net, on_b)).1;
+        assert_eq!(texts[0].0, "Node ID 2");
+    }
+
+    #[test]
+    fn hovered_marker_shows_name_and_group_even_with_names_off() {
+        let ctx = egui::Context::default();
+        let (mut net, a, _) = hover_net();
+        net.set_marker(a, "Hof".to_owned(), "Farm".to_owned())
+            .expect("marker");
+        let mut view = view_at(&ctx, &net, MapGeometry::new(1.0), 10.0);
+        view.show_marker_names = false;
+        view.show_marker_icons = false;
+        let out = hover_frame(&ctx, &mut view, &net, None);
+        assert!(overlay_shapes(&out).1.is_empty());
+        let out = hover_frame(&ctx, &mut view, &net, Some(egui::pos2(512.0, 512.0)));
+        let texts = overlay_shapes(&out).1;
+        assert!(texts.iter().any(|t| t.0 == "Hof ( Farm )"), "{texts:?}");
+        // With names on, the hovered marker still has the group; no plain name beside it.
+        view.show_marker_names = true;
+        let texts = overlay_shapes(&hover_frame(
+            &ctx,
+            &mut view,
+            &net,
+            Some(egui::pos2(512.0, 512.0)),
+        ))
+        .1;
+        assert!(texts.iter().all(|t| t.0 != "Hof"));
+        assert!(texts.iter().any(|t| t.0 == "Hof ( Farm )"));
+    }
+
+    #[test]
+    fn overlay_hook_paints_last() {
+        let ctx = egui::Context::default();
+        let (net, _, _) = hover_net();
+        let mut view = view_at(&ctx, &net, MapGeometry::new(1.0), 10.0);
+        let marker = egui::Rect::from_min_size(egui::pos2(1.0, 2.0), egui::vec2(3.0, 4.0));
+        let mut seen = None;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 1024.0),
+            )),
+            events: vec![egui::Event::PointerMoved(egui::pos2(512.0, 512.0))],
+            ..Default::default()
+        };
+        let g = MapGeometry::new(1.0);
+        let mut out = ctx.run_ui(input, |ui| {
+            view.show(ui, &net, g, 2.0, None, |painter, t, geometry| {
+                seen = Some((t.zoom, geometry));
+                painter.rect_filled(marker, 0.0, egui::Color32::YELLOW);
+            });
+        });
+        out.textures_delta.clear();
+        assert_eq!(seen, Some((10.0, g)));
+        let last = out.shapes.last().expect("shapes");
+        assert!(matches!(&last.shape, egui::Shape::Rect(r) if r.rect == marker));
+    }
+
     /// Vertices of the meshes painted in the grid colour.
     fn grid_vertices(out: &egui::FullOutput) -> usize {
         let [r, g, b] = overlay::GRID_RGB;
@@ -831,7 +1120,7 @@ mod tests {
         let dense = geometry.to_map(dense_world.0, dense_world.1);
         println!("{} nodes; densest cell {best} nodes", net.order().len());
 
-        let run = |name: &str, steps: f64, at: (f64, f64), grid: bool| {
+        let run = |name: &str, steps: f64, at: (f64, f64), grid: bool, hover: bool| {
             let mut view = MapView {
                 show_grid: grid,
                 ..MapView::default()
@@ -841,10 +1130,41 @@ mod tests {
             let t = view.transform.as_mut().expect("set");
             t.center = at;
             t.zoom_at((960.0, 540.0), steps);
+            // With `hover`, the pointer rests on the lowest-id node within 300 px of the panel centre.
+            let pointer = hover.then(|| {
+                let t = *view.transform.as_ref().expect("set");
+                let ns = look::node_px(2.0, t.zoom);
+                let mut ids = Vec::new();
+                let (cx, cz) = {
+                    let (mx, my) = t.screen_to_map(960.0, 540.0);
+                    geometry.to_world(mx, my)
+                };
+                let reach = 300.0 / t.zoom * geometry.scale;
+                net.nodes_in_rect_into(cx - reach, cz - reach, cx + reach, cz + reach, &mut ids);
+                ids.sort();
+                let id = ids.first().expect("a node near the centre");
+                let n = net.node(*id).expect("node");
+                let (mx, my) = geometry.to_map(n.x, n.z);
+                let (sx, sy) = t.map_to_screen(mx, my);
+                assert!(ns >= 2);
+                egui::pos2(sx as f32, sy as f32)
+            });
             let mut times = Vec::new();
             for i in 0..40 {
                 let start = std::time::Instant::now();
-                let out = frame(&ctx, &mut view, net, geometry, size, Some(texture));
+                let out = frame_hover(
+                    &ctx,
+                    &mut view,
+                    net,
+                    geometry,
+                    2.0,
+                    size,
+                    Some(texture),
+                    pointer,
+                );
+                if hover && i >= 2 {
+                    assert!(view.hovered_node.is_some());
+                }
                 let _prims = ctx.tessellate(out.shapes, out.pixels_per_point);
                 if i >= 10 {
                     times.push(start.elapsed().as_secs_f64() * 1000.0);
@@ -857,11 +1177,12 @@ mod tests {
                 times[times.len() - 1]
             );
         };
-        run("min zoom, centre", -100.0, (1024.0, 1024.0), false);
-        run("mid zoom, dense", 6.0, dense, false);
-        run("max zoom, centre", 100.0, (1024.0, 1024.0), false);
-        run("max zoom, dense", 100.0, dense, false);
-        run("max zoom, dense, grid", 100.0, dense, true);
-        run("mid zoom, dense, grid", 6.0, dense, true);
+        run("min zoom, centre", -100.0, (1024.0, 1024.0), false, false);
+        run("mid zoom, dense", 6.0, dense, false, false);
+        run("max zoom, centre", 100.0, (1024.0, 1024.0), false, false);
+        run("max zoom, dense", 100.0, dense, false, false);
+        run("max zoom, dense, grid", 100.0, dense, true, false);
+        run("mid zoom, dense, grid", 6.0, dense, true, false);
+        run("max zoom, dense, hovered node", 100.0, dense, false, true);
     }
 }

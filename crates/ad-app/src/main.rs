@@ -1,6 +1,7 @@
 //! Shell layer: the eframe application.
 
 mod document;
+mod hover;
 mod icons;
 mod jobs;
 mod lod;
@@ -118,6 +119,7 @@ impl App {
 
     fn paint_network(&mut self, ui: &mut egui::Ui) {
         let Some(doc) = &mut self.doc else {
+            self.view.clear_hover();
             ui.allocate_space(ui.available_size());
             return;
         };
@@ -141,6 +143,8 @@ impl App {
             doc.map.geometry,
             doc.map.node_size,
             doc.map_texture.as_ref().map(egui::TextureHandle::id),
+            // Tools draw here, on top of the view.
+            |_, _, _| {},
         );
     }
 }
@@ -149,6 +153,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_jobs();
         let ctx = ui.ctx().clone();
+        if ctx.input(|i| i.key_pressed(egui::Key::F4)) {
+            self.view.show_node_id = !self.view.show_node_id;
+        }
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui
