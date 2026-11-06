@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use rstar::RTree;
 use rstar::primitives::GeomWithData;
@@ -14,8 +15,8 @@ mod markers;
 mod spatial;
 
 pub use markers::{Marker, MarkerDelta};
-pub use spatial::EdgeSegment;
 use spatial::{EdgeEntry, NodeEntry, edge_entry};
+pub use spatial::{EdgeSegment, LinkLook};
 
 /// Stable node identity. Monotonically increasing and never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -159,9 +160,32 @@ impl RemovedNode {
     }
 }
 
+type NodeMap = HashMap<NodeId, Node, BuildHasherDefault<IdHasher>>;
+
+/// Hasher for `NodeId` keys: one multiply. Ids are our own sequential counters, so the
+/// DoS resistance of SipHash buys nothing and the drawing path does two lookups per edge.
+#[derive(Debug, Default)]
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n.wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Network {
-    nodes: HashMap<NodeId, Node>,
+    nodes: NodeMap,
     order: Vec<NodeId>,
     markers: Vec<Marker>,
     next_id: u64,
@@ -187,7 +211,7 @@ impl Network {
                 })
                 .collect()
         };
-        let mut nodes = HashMap::with_capacity(len);
+        let mut nodes = HashMap::with_capacity_and_hasher(len, BuildHasherDefault::default());
         for (l, id) in loaded.iter().zip(&ids) {
             nodes.insert(
                 *id,
@@ -209,8 +233,8 @@ impl Network {
         for id in &ids {
             let Some(from) = nodes.get(id) else { continue };
             for to_id in &from.outgoing {
-                if let Some(to) = nodes.get(to_id) {
-                    edges.push(edge_entry(from, to, (*id, *to_id)));
+                if let (Some(to), Some(look)) = (nodes.get(to_id), look_of(&nodes, *id, *to_id)) {
+                    edges.push(edge_entry(from, to, (*id, *to_id), look));
                 }
             }
         }
@@ -280,7 +304,7 @@ impl Network {
         let old_point = [old.x, old.z];
         let touching: Vec<EdgeEntry> = self
             .edges_at(old_point)
-            .filter(|e| e.data.0 == id || e.data.1 == id)
+            .filter(|e| e.data.from == id || e.data.to == id)
             .cloned()
             .collect();
         for e in &touching {
@@ -294,9 +318,10 @@ impl Network {
         }
         self.node_index.insert(GeomWithData::new([x, z], id));
         for e in touching {
-            let (a, b) = e.data;
+            let (a, b) = (e.data.from, e.data.to);
             if let (Some(from), Some(to)) = (self.nodes.get(&a), self.nodes.get(&b)) {
-                self.edge_index.insert(edge_entry(from, to, (a, b)));
+                self.edge_index
+                    .insert(edge_entry(from, to, (a, b), e.data.look));
             }
         }
         Ok(())
@@ -307,6 +332,7 @@ impl Network {
             .get_mut(&id)
             .ok_or(NetworkError::UnknownNode(id))?
             .flag = flag;
+        self.refresh_looks(id);
         Ok(())
     }
 
@@ -349,6 +375,8 @@ impl Network {
         if added {
             self.put_edge(a, b);
         }
+        self.refresh_looks(a);
+        self.refresh_looks(b);
     }
 
     /// Removes every `value` from the list, highest index first, and records each removal.
@@ -377,6 +405,8 @@ impl Network {
                 self.drop_edge(node, value);
             }
         }
+        self.refresh_looks(node);
+        self.refresh_looks(value);
     }
 
     /// Undoes a delta exactly: records are replayed backwards.
@@ -398,6 +428,8 @@ impl Network {
                     LinkChange::Removed => self.put_edge(r.node, r.value),
                 }
             }
+            self.refresh_looks(r.node);
+            self.refresh_looks(r.value);
         }
     }
 
@@ -459,8 +491,8 @@ impl Network {
         // Sources of one-way (Reverse) links are not in the node's own lists.
         neighbours.extend(
             self.edges_at([node.x, node.z])
-                .filter(|e| e.data.1 == id && e.data.0 != id)
-                .map(|e| e.data.0),
+                .filter(|e| e.data.to == id && e.data.from != id)
+                .map(|e| e.data.from),
         );
         neighbours.sort();
         neighbours.dedup();
@@ -515,6 +547,7 @@ impl Network {
         for t in own_out {
             self.put_edge(id, t);
         }
+        self.refresh_looks(id);
         for (index, marker) in markers {
             self.markers.insert(index.min(self.markers.len()), marker);
         }
@@ -523,28 +556,43 @@ impl Network {
 
     /// The displayed kind of the link from `a` to `b` (Java `RoadMap.getConnection`).
     pub fn connection_kind(&self, a: NodeId, b: NodeId) -> ConnectionKind {
-        let (Some(na), Some(nb)) = (self.nodes.get(&a), self.nodes.get(&b)) else {
-            return ConnectionKind::None;
-        };
-        if !na.outgoing.contains(&b) {
-            return ConnectionKind::None;
-        }
-        let p = nb.incoming.contains(&a);
-        let q = nb.outgoing.contains(&a);
-        let r = na.incoming.contains(&b);
-        match (p, q, r) {
-            (true, true, false) => ConnectionKind::CrossedRegular,
-            (false, true, true) => ConnectionKind::CrossedReverse,
-            (true, true, true) => ConnectionKind::Dual,
-            (false, false, false) => ConnectionKind::Reverse,
-            (true, false, false) => match na.flag {
-                NodeFlag::SUB_PRIO => ConnectionKind::SubPrio,
-                NodeFlag::REGULAR => ConnectionKind::Regular,
-                _ => ConnectionKind::Unknown,
-            },
-            _ => ConnectionKind::Unknown,
-        }
+        self.link_look(a, b)
+            .map_or(ConnectionKind::None, |l| l.kind)
     }
+
+    /// Kind of the link `a -> b` with the flags of both ends, for drawing. `None` when a
+    /// node is missing or `a` has no link to `b`. The edge index caches this per edge.
+    pub fn link_look(&self, a: NodeId, b: NodeId) -> Option<LinkLook> {
+        look_of(&self.nodes, a, b)
+    }
+}
+
+/// The single place a link's look is computed.
+fn look_of(nodes: &NodeMap, a: NodeId, b: NodeId) -> Option<LinkLook> {
+    let (na, nb) = (nodes.get(&a)?, nodes.get(&b)?);
+    if !na.outgoing.contains(&b) {
+        return None;
+    }
+    let p = nb.incoming.contains(&a);
+    let q = nb.outgoing.contains(&a);
+    let r = na.incoming.contains(&b);
+    let kind = match (p, q, r) {
+        (true, true, false) => ConnectionKind::CrossedRegular,
+        (false, true, true) => ConnectionKind::CrossedReverse,
+        (true, true, true) => ConnectionKind::Dual,
+        (false, false, false) => ConnectionKind::Reverse,
+        (true, false, false) => match na.flag {
+            NodeFlag::SUB_PRIO => ConnectionKind::SubPrio,
+            NodeFlag::REGULAR => ConnectionKind::Regular,
+            _ => ConnectionKind::Unknown,
+        },
+        _ => ConnectionKind::Unknown,
+    };
+    Some(LinkLook {
+        kind,
+        from_flag: na.flag,
+        to_flag: nb.flag,
+    })
 }
 
 #[cfg(test)]

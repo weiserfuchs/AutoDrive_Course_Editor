@@ -101,14 +101,16 @@ pub fn replace_document(
     settings: &Settings,
 ) {
     let (config, image, notice) = loaded;
-    let scale = config
+    let map_settings = config
         .map_name()
         .and_then(|name| settings.maps.get(name))
-        .map_or_else(
-            || ad_io::settings::MapSettings::default().scale,
-            |m| m.scale,
-        );
-    let map = MapContext::new(config.map_name().map(str::to_owned), scale);
+        .cloned()
+        .unwrap_or_default();
+    let map = MapContext::new(
+        config.map_name().map(str::to_owned),
+        map_settings.scale,
+        map_settings.node_size,
+    );
     *epoch_counter += 1;
     *doc = Some(Document::new(
         config,
@@ -509,7 +511,10 @@ mod tests {
         let mut s = settings(500);
         s.maps.insert(
             "Marsch".to_owned(),
-            ad_io::settings::MapSettings { scale: 2 },
+            ad_io::settings::MapSettings {
+                scale: 2,
+                node_size: 3.0,
+            },
         );
         let config = config_xml::load(text.as_bytes()).expect("config loads");
         let (mut doc, mut counter) = (None, 0);
@@ -520,9 +525,11 @@ mod tests {
         assert_eq!(apply_result(&mut doc, &mut counter, &s, result), None);
         let d = doc.expect("doc");
         assert_eq!(d.map.geometry.scale, 2.0);
+        assert_eq!(d.map.node_size, 3.0);
         assert_eq!(d.map.name.as_deref(), Some("Marsch"));
         assert!(d.map_image.is_some() && d.notice.is_none());
         // A missing name uses scale 1.
-        assert_eq!(open(&inline_text("1.000,2.500")).map.geometry.scale, 1.0);
+        let plain = open(&inline_text("1.000,2.500")).map;
+        assert_eq!((plain.geometry.scale, plain.node_size), (1.0, 2.0));
     }
 }

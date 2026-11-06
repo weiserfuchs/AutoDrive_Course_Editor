@@ -3,6 +3,7 @@
 mod document;
 mod jobs;
 mod lod;
+mod look;
 mod startup;
 mod view;
 
@@ -133,6 +134,7 @@ impl App {
             ui,
             &doc.config.network,
             doc.map.geometry,
+            doc.map.node_size,
             doc.map_texture.as_ref().map(egui::TextureHandle::id),
         );
     }

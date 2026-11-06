@@ -50,11 +50,16 @@ impl Default for GlobalSettings {
 #[serde(default)]
 pub struct MapSettings {
     pub scale: u32,
+    /// Node size in map-view units (Java `nodeSize`); the on-screen diameter follows zoom.
+    pub node_size: f64,
 }
 
 impl Default for MapSettings {
     fn default() -> Self {
-        Self { scale: 1 }
+        Self {
+            scale: 1,
+            node_size: 2.0,
+        }
     }
 }
 
@@ -114,7 +119,13 @@ mod tests {
         let dir = scratch_dir("rt");
         let mut s = Settings::default();
         s.global.history_cap = 200;
-        s.maps.insert("Marsch".to_owned(), MapSettings { scale: 4 });
+        s.maps.insert(
+            "Marsch".to_owned(),
+            MapSettings {
+                scale: 4,
+                node_size: 3.0,
+            },
+        );
         let path = dir.join("settings.toml");
         save(&s, &path).expect("save");
         assert_eq!(load(&path).expect("load"), s);
@@ -138,8 +149,41 @@ mod tests {
         assert_eq!(load(&path).expect("load"), Settings::default());
         std::fs::write(&path, "[maps.X]\nunknown = 1\n[other]\na = 2\n").expect("write");
         let s = load(&path).expect("load");
-        assert_eq!(s.maps.get("X"), Some(&MapSettings { scale: 1 }));
+        assert_eq!(
+            s.maps.get("X"),
+            Some(&MapSettings {
+                scale: 1,
+                node_size: 2.0
+            })
+        );
         assert_eq!(s.global.history_cap, 500);
+        // A file from before `node_size` existed stays valid.
+        std::fs::write(
+            &path,
+            "[maps.Y]
+scale = 3
+",
+        )
+        .expect("write");
+        let s = load(&path).expect("load");
+        assert_eq!((s.maps["Y"].scale, s.maps["Y"].node_size), (3, 2.0));
+        std::fs::write(
+            &path,
+            "[maps.Y]
+node_size = 3
+",
+        )
+        .expect("write");
+        assert_eq!(load(&path).expect("load").maps["Y"].node_size, 3.0);
+        // Floats load too, as Java steps the size by 0.1.
+        std::fs::write(
+            &path,
+            "[maps.Y]
+node_size = 2.5
+",
+        )
+        .expect("write");
+        assert_eq!(load(&path).expect("load").maps["Y"].node_size, 2.5);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
