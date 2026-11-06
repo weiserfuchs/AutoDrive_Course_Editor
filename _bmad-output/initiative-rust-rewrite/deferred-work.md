@@ -53,3 +53,7 @@
 - source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-map-view/tickets/story-markers-parking-and-warning-icons-marker-names-and-the-grid-plan.md`
   summary: The height-warning check (y == -1) walks every visible node each frame, even at minimum zoom where no dots are drawn; keep the set of nodes without height in the Network (updated by add/move/remove) so the view looks up only those.
   evidence: view.rs queries all ~35,652 fixture nodes per frame at minimum zoom for this check; min-zoom median rose ~1-2 ms to about 9.4 ms on a quiet run, still under the 16 ms budget. Story 2.7 (complete-view budget) is the natural place.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-map-view/tickets/story-the-view-finds-the-node-or-connection-under-the-cursor-plan.md`
+  summary: Decide in epic-node-connection-tools whether `hovered_edge` should test the drawn segment (shortened by ns/2 at each end, skipped below MIN_EDGE_PX) instead of the full centre-to-centre segment, and whether a hovered node suppresses the edge hit.
+  evidence: hover.rs `edge_at` uses the edge index's full segment, so a cursor on a node also reports that node's connections, and connections too short to be drawn can be hit; nothing reads `hovered_edge` yet.

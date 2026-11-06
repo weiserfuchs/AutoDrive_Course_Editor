@@ -18,3 +18,7 @@ pub const ARROW_ANGLE_DEG: f64 = 20.0;
 pub const ARROW_LEN_FACTOR: f64 = 0.7;
 /// Divisor of the shrink applied to arrowheads on lines shorter than the nodes (Java 1.15).
 pub const ARROW_SHRINK_DIVISOR: f64 = 1.15;
+/// A connection is under the cursor when its segment is within this many screen px.
+pub const EDGE_HIT_PX: f64 = 4.0;
+/// Ring stroke of the hovered node, per node diameter (Java 0.1).
+pub const HOVER_RING_FACTOR: f32 = 0.1;
