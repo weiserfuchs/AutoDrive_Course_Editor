@@ -1,9 +1,12 @@
 //! Background load and save jobs, and how their results apply (AD-9, AD-16, AD-18).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread;
 
+use ad_core::geometry::MapGeometry;
+use ad_core::heightmap::{Heightmap, calibrate};
 use ad_core::history::SavePoint;
 use ad_core::map_context::MapContext;
 use ad_io::config_xml::{self, LoadedConfig};
@@ -12,8 +15,17 @@ use ad_io::settings::Settings;
 
 use crate::document::Document;
 
-/// A parsed config with its map image and the notice about the image, if any.
-pub type Loaded = (LoadedConfig, MapImage, Option<String>);
+/// A heightmap with its calibrated height scale.
+pub type CalibratedHeightmap = (Arc<Heightmap>, f64);
+
+/// A parsed config with its map image, the calibrated heightmap if one was found, and the
+/// notice about image and heightmap, if any.
+pub type Loaded = (
+    LoadedConfig,
+    MapImage,
+    Option<CalibratedHeightmap>,
+    Option<String>,
+);
 
 pub enum JobResult {
     Loaded {
@@ -28,9 +40,14 @@ pub enum JobResult {
     },
 }
 
-/// Reads and parses the file, then finds and loads the map image. The error message names the
-/// file and the config problem; image problems never fail the load (they become a notice).
-pub fn load_file(path: &Path, exe_dir: Option<&Path>) -> Result<Loaded, String> {
+/// Reads and parses the file, then finds and loads the map image and the heightmap. The error
+/// message names the file and the config problem; image and heightmap problems never fail the
+/// load (they become a notice).
+pub fn load_file(
+    path: &Path,
+    exe_dir: Option<&Path>,
+    settings: &Settings,
+) -> Result<Loaded, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
     let config =
         config_xml::load(&bytes).map_err(|e| format!("Cannot load {}: {e}", path.display()))?;
@@ -41,19 +58,58 @@ pub fn load_file(path: &Path, exe_dir: Option<&Path>) -> Result<Loaded, String> 
         Some(image_path) => map_image::load_map_image(&image_path),
         None => (map_image::blank(), None),
     };
-    Ok((config, image, notice))
+    let (heightmap, height_notice) = load_heightmap(&config, exe_dir, path.parent(), settings);
+    let notice = match (notice, height_notice) {
+        (Some(a), Some(b)) => Some(format!(
+            "{a}
+{b}"
+        )),
+        (a, b) => a.or(b),
+    };
+    Ok((config, image, heightmap, notice))
+}
+
+/// Finds and decodes the heightmap; a missing or broken one gives no heightmap and a notice.
+fn load_heightmap(
+    config: &LoadedConfig,
+    exe_dir: Option<&Path>,
+    config_dir: Option<&Path>,
+    settings: &Settings,
+) -> (Option<CalibratedHeightmap>, Option<String>) {
+    let name = config.map_name();
+    match map_image::find_heightmap(name, exe_dir, config_dir) {
+        Some(path) => match map_image::load_heightmap(&path) {
+            Ok(heightmap) => {
+                let scale = name
+                    .and_then(|n| settings.maps.get(n))
+                    .map_or(1, |m| m.scale);
+                let geometry = MapGeometry::new(f64::from(scale.max(1)));
+                let height_scale = calibrate(&heightmap, &config.network, geometry);
+                (Some((Arc::new(heightmap), height_scale)), None)
+            }
+            Err(message) => (None, Some(message)),
+        },
+        None => (
+            None,
+            Some(format!(
+                "No heightmap found for {}; new nodes will have no height",
+                name.unwrap_or("this map")
+            )),
+        ),
+    }
 }
 
 /// Runs `load_file` on a background thread, then calls `notify` (a repaint request).
 pub fn spawn_load(
     path: PathBuf,
     exe_dir: Option<PathBuf>,
+    settings: Settings,
     tx: Sender<JobResult>,
     notify: impl FnOnce() + Send + 'static,
 ) {
     thread::spawn(move || {
         tracing::info!("loading {}", path.display());
-        let result = load_file(&path, exe_dir.as_deref()).map(Box::new);
+        let result = load_file(&path, exe_dir.as_deref(), &settings).map(Box::new);
         match &result {
             Ok(_) => tracing::info!("loaded {}", path.display()),
             Err(e) => tracing::warn!("{e}"),
@@ -100,18 +156,22 @@ pub fn replace_document(
     path: PathBuf,
     settings: &Settings,
 ) {
-    let (config, image, notice) = loaded;
+    let (config, image, heightmap, notice) = loaded;
     let map_settings = config
         .map_name()
         .and_then(|name| settings.maps.get(name))
         .cloned()
         .unwrap_or_default();
-    let map = MapContext::new(
+    let mut map = MapContext::new(
         config.map_name().map(str::to_owned),
         map_settings.scale,
         map_settings.node_size,
         (map_settings.grid_x, map_settings.grid_y),
     );
+    if let Some((heightmap, height_map_scale)) = heightmap {
+        map.heightmap = Some(heightmap);
+        map.height_map_scale = height_map_scale;
+    }
     *epoch_counter += 1;
     *doc = Some(Document::new(
         config,
@@ -166,6 +226,7 @@ mod tests {
     use std::time::Duration;
 
     use ad_core::command::{AddNode, Command, Transaction};
+    use ad_core::heightmap::sample_height;
     use ad_core::history::History;
     use ad_core::network::{NetworkError, NodeFlag};
 
@@ -192,7 +253,7 @@ mod tests {
     }
 
     fn loaded_config(config: LoadedConfig) -> Loaded {
-        (config, map_image::blank(), None)
+        (config, map_image::blank(), None, None)
     }
 
     fn config() -> LoadedConfig {
@@ -330,13 +391,14 @@ mod tests {
     fn load_fail_keeps_document() {
         let (mut doc, mut counter) = (None, 0);
         loaded(&mut doc, &mut counter);
-        let missing = load_file(Path::new("missing.xml"), None).expect_err("missing file");
+        let missing =
+            load_file(Path::new("missing.xml"), None, &settings(500)).expect_err("missing file");
         assert!(missing.contains("missing.xml"));
         let dir = std::env::temp_dir().join("ad_app_jobs_broken");
         std::fs::create_dir_all(&dir).expect("dir");
         let broken = dir.join("broken.xml");
         std::fs::write(&broken, inline_text("abc,2.500")).expect("write");
-        let loaded_err = load_file(&broken, None);
+        let loaded_err = load_file(&broken, None, &settings(500));
         std::fs::remove_dir_all(&dir).expect("cleanup");
         let message = loaded_err.expect_err("invalid value");
         assert!(message.contains("broken.xml"), "{message}");
@@ -446,7 +508,7 @@ mod tests {
     fn load_through_channel() {
         let (tx, rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        spawn_load(fixture_path(), None, tx, move || {
+        spawn_load(fixture_path(), None, settings(500), tx, move || {
             let _ = done_tx.send(());
         });
         done_rx
@@ -482,9 +544,9 @@ mod tests {
             .expect("png");
         let config = dir.join("AutoDrive_config.xml");
         std::fs::write(&config, named(&inline_text("1.000,2.500"))).expect("write");
-        let loaded = load_file(&config, None);
+        let loaded = load_file(&config, None, &settings(500));
         std::fs::remove_dir_all(&dir).expect("cleanup");
-        let (_, image, notice) = loaded.expect("loads");
+        let (_, image, _, notice) = loaded.expect("loads");
         assert_ne!(image, map_image::blank());
         assert_eq!(&image.rgba[..4], &[1, 2, 3, 255]);
         assert!(notice.expect("notice").contains("Tiny.png"));
@@ -499,8 +561,14 @@ mod tests {
             inline_text("1.000,2.500"),
         ] {
             std::fs::write(&config, text).expect("write");
-            let (_, image, notice) = load_file(&config, None).expect("loads");
-            assert_eq!((image, notice), (map_image::blank(), None));
+            let (_, image, heightmap, notice) =
+                load_file(&config, None, &settings(500)).expect("loads");
+            assert_eq!((image, heightmap), (map_image::blank(), None));
+            assert!(
+                notice
+                    .expect("notice")
+                    .contains("new nodes will have no height")
+            );
         }
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -531,10 +599,96 @@ mod tests {
         assert_eq!(d.map.node_size, 3.0);
         assert_eq!(d.map.grid, (4.0, 0.1));
         assert_eq!(d.map.name.as_deref(), Some("Marsch"));
-        assert!(d.map_image.is_some() && d.notice.is_none());
+        assert!(d.map_image.is_some() && d.map.heightmap.is_none());
         // A missing name uses scale 1.
         let plain = open(&inline_text("1.000,2.500")).map;
         assert_eq!((plain.geometry.scale, plain.node_size), (1.0, 2.0));
         assert_eq!(plain.grid, (2.0, 2.0));
+    }
+
+    #[test]
+    fn heightmap_beside_the_config_reaches_the_map_context() {
+        let dir = temp_dir("heightmap");
+        image::ImageBuffer::<image::Luma<u16>, _>::from_pixel(4, 4, image::Luma([25600]))
+            .save(dir.join("terrain.heightmap.png"))
+            .expect("png");
+        let config = dir.join("AutoDrive_config.xml");
+        std::fs::write(&config, inline_text("1.000,2.500")).expect("write");
+        let loaded = load_file(&config, None, &settings(500));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        let loaded = loaded.expect("loads");
+        assert!(loaded.2.is_some() && loaded.3.is_none());
+        let (mut doc, mut counter) = (None, 0);
+        let result = JobResult::Loaded {
+            path: config,
+            result: Ok(Box::new(loaded)),
+        };
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &settings(500), result),
+            None
+        );
+        let d = doc.expect("doc");
+        assert_eq!(sample_height(&d.map, 1.0, -3.25), Some(100.0));
+        assert_eq!(d.map.height_map_scale, 1.0);
+    }
+
+    #[test]
+    fn broken_heightmap_gives_a_notice_not_an_error() {
+        let dir = temp_dir("heightmap_broken");
+        std::fs::write(dir.join("terrain.heightmap.png"), b"nope").expect("write");
+        let config = dir.join("AutoDrive_config.xml");
+        std::fs::write(&config, inline_text("1.000,2.500")).expect("write");
+        let loaded = load_file(&config, None, &settings(500));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        let (_, _, heightmap, notice) = loaded.expect("loads");
+        assert!(heightmap.is_none());
+        assert!(notice.expect("notice").contains("terrain.heightmap.png"));
+    }
+
+    /// Needs the gitignored `terrain.heightmap.png` beside the fixture.
+    /// Run: `cargo test -p ad-app -- --ignored heightmap --nocapture`.
+    #[test]
+    #[ignore = "needs the fixture's terrain.heightmap.png"]
+    fn fixture_heightmap_matches_node_heights() {
+        let path = fixture_path();
+        if !path.with_file_name("terrain.heightmap.png").is_file() {
+            println!("terrain.heightmap.png is missing beside the fixture; skipping");
+            return;
+        }
+        let mut s = settings(500);
+        s.maps.insert(
+            "NF_Marsch_4fach".to_owned(),
+            ad_io::settings::MapSettings {
+                scale: 2,
+                ..Default::default()
+            },
+        );
+        let loaded = load_file(&path, None, &s).expect("fixture loads");
+        assert!(loaded.2.is_some(), "heightmap found: {:?}", loaded.3);
+        let (mut doc, mut counter) = (None, 0);
+        let result = JobResult::Loaded {
+            path,
+            result: Ok(Box::new(loaded)),
+        };
+        assert_eq!(apply_result(&mut doc, &mut counter, &s, result), None);
+        let d = doc.expect("doc");
+        let net = &d.config.network;
+        let mut deviations: Vec<f64> = net
+            .order()
+            .iter()
+            .filter_map(|&id| net.node(id))
+            .filter(|n| n.y > 0.0)
+            .filter_map(|n| sample_height(&d.map, n.x, n.z).map(|h| (h - n.y).abs()))
+            .collect();
+        assert!(!deviations.is_empty(), "no node with y > 0 got a sample");
+        deviations.sort_by(f64::total_cmp);
+        let median = deviations[deviations.len() / 2];
+        let max = deviations.last().copied().unwrap_or(0.0);
+        println!(
+            "height_map_scale {}, nodes {}, median {median:.3}, max {max:.3}",
+            d.map.height_map_scale,
+            deviations.len()
+        );
+        assert!(median < 1.0, "median deviation {median}");
     }
 }

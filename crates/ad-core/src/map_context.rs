@@ -1,6 +1,9 @@
 //! Map-level data of an open document (AD-14). No I/O.
 
+use std::sync::Arc;
+
 use crate::geometry::MapGeometry;
+use crate::heightmap::Heightmap;
 
 /// Smallest node size; Java steps the size by 0.1.
 pub const MIN_NODE_SIZE: f64 = 0.1;
@@ -17,6 +20,10 @@ pub struct MapContext {
     pub node_size: f64,
     /// Grid spacing in world units along x and z, at least 0.1.
     pub grid: (f64, f64),
+    /// Terrain heights, if the map has a heightmap.
+    pub heightmap: Option<Arc<Heightmap>>,
+    /// Divisor for sampled heights (Java `heightMapScale`), at least 1.
+    pub height_map_scale: f64,
 }
 
 impl MapContext {
@@ -28,6 +35,8 @@ impl MapContext {
             geometry: MapGeometry::new(f64::from(scale.max(1))),
             node_size: node_size.max(MIN_NODE_SIZE),
             grid: (grid.0.max(MIN_GRID_SPACING), grid.1.max(MIN_GRID_SPACING)),
+            heightmap: None,
+            height_map_scale: 1.0,
         }
     }
 }

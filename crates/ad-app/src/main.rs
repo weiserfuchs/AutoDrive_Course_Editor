@@ -83,9 +83,15 @@ impl App {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
-        jobs::spawn_load(path, exe_dir, self.tx.clone(), move || {
-            ctx.request_repaint();
-        });
+        jobs::spawn_load(
+            path,
+            exe_dir,
+            self.settings.clone(),
+            self.tx.clone(),
+            move || {
+                ctx.request_repaint();
+            },
+        );
     }
 
     fn save(&mut self, ctx: &egui::Context) {
