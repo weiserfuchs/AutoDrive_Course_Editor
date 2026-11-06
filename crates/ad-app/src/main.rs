@@ -10,8 +10,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use eframe::egui;
 
-use ad_core::geometry::MapGeometry;
-use ad_io::settings::{MapSettings, Settings};
+use ad_io::settings::Settings;
 use document::Document;
 use jobs::JobResult;
 use view::MapView;
@@ -58,7 +57,7 @@ impl App {
             if let Some(message) = jobs::apply_result(
                 &mut self.doc,
                 &mut self.epoch_counter,
-                self.settings.global.history_cap,
+                &self.settings,
                 result,
             ) {
                 self.error = Some(message);
@@ -75,7 +74,12 @@ impl App {
         };
         self.loading = true;
         let ctx = ctx.clone();
-        jobs::spawn_load(path, self.tx.clone(), move || ctx.request_repaint());
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+        jobs::spawn_load(path, exe_dir, self.tx.clone(), move || {
+            ctx.request_repaint();
+        });
     }
 
     fn save(&mut self, ctx: &egui::Context) {
@@ -108,7 +112,7 @@ impl App {
     }
 
     fn paint_network(&mut self, ui: &mut egui::Ui) {
-        let Some(doc) = &self.doc else {
+        let Some(doc) = &mut self.doc else {
             ui.allocate_space(ui.available_size());
             return;
         };
@@ -116,16 +120,20 @@ impl App {
             self.view.reset();
             self.view_epoch = Some(doc.epoch);
         }
-        let scale = doc
-            .config
-            .map_name()
-            .and_then(|name| self.settings.maps.get(name))
-            .map_or_else(MapSettings::default, Clone::clone)
-            .scale;
+        // Upload once per document, then drop the CPU copy (AD-14).
+        if let Some(image) = doc.map_image.take() {
+            let color = egui::ColorImage::from_rgba_unmultiplied([2048, 2048], &image.rgba);
+            doc.map_texture = Some(ui.ctx().load_texture(
+                "map_image",
+                color,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
         self.view.show(
             ui,
             &doc.config.network,
-            MapGeometry::new(f64::from(scale.max(1))),
+            doc.map.geometry,
+            doc.map_texture.as_ref().map(egui::TextureHandle::id),
         );
     }
 }
@@ -163,6 +171,9 @@ impl eframe::App for App {
                 }
                 if let Some(reason) = self.doc.as_ref().and_then(|d| d.config.read_only()) {
                     ui.colored_label(ui.visuals().warn_fg_color, reason.to_string());
+                }
+                if let Some(notice) = self.doc.as_ref().and_then(|d| d.notice.as_deref()) {
+                    ui.colored_label(ui.visuals().warn_fg_color, notice);
                 }
             });
         });

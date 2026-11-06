@@ -5,4 +5,5 @@
 pub mod command;
 pub mod geometry;
 pub mod history;
+pub mod map_context;
 pub mod network;
