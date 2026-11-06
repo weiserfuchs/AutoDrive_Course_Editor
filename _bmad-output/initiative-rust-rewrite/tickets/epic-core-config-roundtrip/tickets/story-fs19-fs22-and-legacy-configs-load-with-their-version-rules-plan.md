@@ -3,7 +3,7 @@ title: 'FS19, FS22 and legacy configs load with their version rules'
 type: 'feature'
 ticket: '6'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: 'ac28086d324cd66cb00f3eecc34c674dd12fae15'
 route: 'full'
 route_source: 'auto'
@@ -105,6 +105,8 @@ context: ['{project-root}/_bmad-output/initiative-rust-rewrite/architecture-rust
 - Given the FS25 fixture, when it is loaded, then it is FS25, editable, and saves byte-identically.
 
 ## Implementation Notes
+
+- 2026-11-06: The user could not run the app. Instead the agent loaded a legacy copy of the fixture (`<version>` replaced by `<markerID>1</markerID>`) through `ad_io::config_xml::load`. It loaded read-only `Legacy` with 35,652 nodes and 223 markers, and `save` was refused. The app's label and the disabled Save read the same `read_only()`. The on-screen drawing was not checked.
 
 ## Plan Change Log
 
