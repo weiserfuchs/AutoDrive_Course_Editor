@@ -3,7 +3,7 @@ title: 'A config whose flags were reset on load opens with unsaved changes'
 type: 'feature'
 ticket: '10'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: '0b09627570c67d4cc579922704a1e5c9443b87da'
 route: 'oneshot'
 route_source: 'auto'
