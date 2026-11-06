@@ -1,9 +1,11 @@
 //! Shell layer: the eframe application.
 
 mod document;
+mod icons;
 mod jobs;
 mod lod;
 mod look;
+mod overlay;
 mod startup;
 mod view;
 
@@ -33,6 +35,8 @@ struct App {
 
 impl App {
     fn new(settings: Settings) -> Self {
+        let mut view = MapView::default();
+        view.show_grid = settings.global.show_grid;
         let (tx, rx) = mpsc::channel();
         Self {
             doc: None,
@@ -43,7 +47,7 @@ impl App {
             saving: false,
             error: None,
             settings,
-            view: MapView::default(),
+            view,
             view_epoch: None,
         }
     }
@@ -130,6 +134,7 @@ impl App {
                 egui::TextureOptions::LINEAR,
             ));
         }
+        self.view.grid = doc.map.grid;
         self.view.show(
             ui,
             &doc.config.network,
@@ -165,6 +170,7 @@ impl eframe::App for App {
                 {
                     self.save(&ctx);
                 }
+                ui.checkbox(&mut self.view.show_grid, "Grid");
                 if self.loading {
                     ui.label("Loading…");
                 }
