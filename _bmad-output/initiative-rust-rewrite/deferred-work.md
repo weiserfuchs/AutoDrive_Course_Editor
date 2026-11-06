@@ -49,3 +49,7 @@
 - source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/epic-core-config-roundtrip-retrospective.md`
   summary: (Retro P2) `ad-app` carries errors as `String`, there is no string table for UI text, and the command is `AddNode` where the conventions say `AddNodes`. For epic-settings-ui-shell or the tools epic.
   evidence: `jobs.rs` `JobResult`, `main.rs` `error`, `command.rs` `AddNode`.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-map-view/tickets/story-markers-parking-and-warning-icons-marker-names-and-the-grid-plan.md`
+  summary: The height-warning check (y == -1) walks every visible node each frame, even at minimum zoom where no dots are drawn; keep the set of nodes without height in the Network (updated by add/move/remove) so the view looks up only those.
+  evidence: view.rs queries all ~35,652 fixture nodes per frame at minimum zoom for this check; min-zoom median rose ~1-2 ms to about 9.4 ms on a quiet run, still under the 16 ms budget. Story 2.7 (complete-view budget) is the natural place.

@@ -3,14 +3,14 @@ title: 'Markers, parking and warning icons, marker names and the grid draw'
 type: 'feature'
 ticket: '5'
 created: '2026-11-06'
-status: 'in-progress'
+status: 'built'
 baseline_revision: 'b27a46218fcf140b07c569f43ce083e4d32c3738'
 route: 'full'
 route_source: 'auto'
 risk: 'low'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: ['_bmad-output/initiative-rust-rewrite/tickets/epic-map-view/epic-map-view.md']
 ---
@@ -112,6 +112,17 @@ Parking and overlap icons are prepared but get their data from later epics.
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 1 medium and 3 low patched; 1 low deferred; 2 low and 2 false rejected.
+  - low, patch: the parking SVG names Lato-Bold, so usvg fell back to fontdb's serif family. The serif family is now set to Arial too, so the "P" is sans.
+  - low, patch: a zero rasterise size returned None without the promised log line. It is now logged.
+  - medium, patch: the grid had no density limit (spacing 0.1 at zoom just over 2 is about 30k lines). It is now skipped below `lod::MIN_GRID_PX` = 4 px on-screen spacing; unit-tested.
+  - low, patch: `resvg` was a caret requirement. It is pinned as `=0.45.1`.
+  - low, defer: the height-warning check walks every visible node each frame, even at minimum zoom. Within budget; recorded in deferred-work.md for story 2.7.
+  - low, rejected: long marker names can pop at the panel edge (60 px pad). Cosmetic and rare; a fix needs per-name width measurement.
+  - low, rejected: icon and grid sizes are egui points, not physical px. This is consistent with the whole view; handling pixels_per_point is a cross-cutting change.
+  - false: "frame budget not demonstrated". Orchestrator quiet run: min zoom 9.4 ms median; the over-budget maxima came with outside load.
+  - false: the unticked Execution checklist is plan bookkeeping.
 
 ## Verification
 
