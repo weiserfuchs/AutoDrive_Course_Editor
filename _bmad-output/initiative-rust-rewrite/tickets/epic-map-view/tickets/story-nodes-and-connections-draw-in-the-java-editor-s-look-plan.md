@@ -3,14 +3,14 @@ title: "Nodes and connections draw in the Java editor's look"
 type: 'feature'
 ticket: '4'
 created: '2026-11-06'
-status: 'in-progress'
+status: 'built'
 baseline_revision: '8e3be97b2a8c0c4c9af1bf2dbda077078ecc2f62'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: ['_bmad-output/initiative-rust-rewrite/tickets/epic-map-view/epic-map-view.md']
 ---
@@ -106,9 +106,22 @@ context: ['_bmad-output/initiative-rust-rewrite/tickets/epic-map-view/epic-map-v
 - Frame time, release, noisy machine (median ms, several runs): min zoom centre 10.5-15.5 (baseline 9.4); mid zoom dense 2.2-4.2; max zoom centre 0.06-0.13; max zoom dense 0.11-0.31. Min zoom is borderline on a loaded machine and needs a re-run on a quiet one.
 - Not checked: the hitl comparison with the Java editor's look.
 
+- Orchestrator note: the "10.5-15.5 ms, borderline" line above dates from before the edge-index cache (286e2d9). After the cache, alternating runs on the same machine give min zoom 7.7–9.8 ms median, the same as master (story 2.3) at 6–8 ms. The over-budget values all came from runs under outside load.
+- `node_size` became `f64` after review (Java stores it as a float, stepped by 0.1); the minimum is 0.1.
+
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 4 low patched; 1 low and 3 false rejected.
+  - low, patch: the node-size check in `colours_arrows_and_node_size` ran at zoom 0.8, where sizes 1 and 2 both give ns 1. It now runs at zoom 3.28 and asserts the difference.
+  - low, patch: Java truncates `diff` to int, and dual uses integer `/ 2`. `look::arrow` now does the same; test `arrow_diff_truncates_like_java`.
+  - low, patch: node size is a float in Java (EditorXML.java:60), but was `u32` here. It is now `f64` in MapSettings and MapContext, minimum 0.1. An integer in TOML still loads (tested).
+  - low, patch: a local `look` shadowed the `look` module in `view.rs`. The code uses `e.look` directly.
+  - false: "AC2 not shown, notes contradict". The note predates the cache; a clarifying note was added above, and min zoom is measured at 7.7–9.8 ms.
+  - false: the hitl look check is unverified. It is open by design; the user checks it later.
+  - low, rejected: `frame_time` hard-codes node size 2 instead of reading MapContext. 2 is MapContext's default, so the timing is identical and a fix would change nothing.
+  - false: `DUAL_SUBPRIO` (150,100,50) — the reviewer confirmed it is correct.
 
 ## Design Notes
 
