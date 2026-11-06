@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use rstar::RTree;
 use rstar::primitives::GeomWithData;
@@ -159,9 +160,30 @@ impl RemovedNode {
     }
 }
 
+/// Hasher for `NodeId` keys: one multiply. Ids are our own sequential counters, so the
+/// DoS resistance of SipHash buys nothing and the drawing path does two lookups per edge.
+#[derive(Debug, Default)]
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n.wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Network {
-    nodes: HashMap<NodeId, Node>,
+    nodes: HashMap<NodeId, Node, BuildHasherDefault<IdHasher>>,
     order: Vec<NodeId>,
     markers: Vec<Marker>,
     next_id: u64,
@@ -187,7 +209,7 @@ impl Network {
                 })
                 .collect()
         };
-        let mut nodes = HashMap::with_capacity(len);
+        let mut nodes = HashMap::with_capacity_and_hasher(len, BuildHasherDefault::default());
         for (l, id) in loaded.iter().zip(&ids) {
             nodes.insert(
                 *id,
@@ -523,16 +545,21 @@ impl Network {
 
     /// The displayed kind of the link from `a` to `b` (Java `RoadMap.getConnection`).
     pub fn connection_kind(&self, a: NodeId, b: NodeId) -> ConnectionKind {
-        let (Some(na), Some(nb)) = (self.nodes.get(&a), self.nodes.get(&b)) else {
-            return ConnectionKind::None;
-        };
+        self.link_look(a, b)
+            .map_or(ConnectionKind::None, |(kind, _, _)| kind)
+    }
+
+    /// Kind of the link `a -> b` with the flags of both ends, for drawing, in two node
+    /// lookups. `None` when a node is missing or `a` has no link to `b`.
+    pub fn link_look(&self, a: NodeId, b: NodeId) -> Option<(ConnectionKind, NodeFlag, NodeFlag)> {
+        let (na, nb) = (self.nodes.get(&a)?, self.nodes.get(&b)?);
         if !na.outgoing.contains(&b) {
-            return ConnectionKind::None;
+            return None;
         }
         let p = nb.incoming.contains(&a);
         let q = nb.outgoing.contains(&a);
         let r = na.incoming.contains(&b);
-        match (p, q, r) {
+        let kind = match (p, q, r) {
             (true, true, false) => ConnectionKind::CrossedRegular,
             (false, true, true) => ConnectionKind::CrossedReverse,
             (true, true, true) => ConnectionKind::Dual,
@@ -543,7 +570,8 @@ impl Network {
                 _ => ConnectionKind::Unknown,
             },
             _ => ConnectionKind::Unknown,
-        }
+        };
+        Some((kind, na.flag, nb.flag))
     }
 }
 

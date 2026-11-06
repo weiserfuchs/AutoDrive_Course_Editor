@@ -3,9 +3,10 @@
 use eframe::egui;
 
 use ad_core::geometry::{MAP_PIXELS, MapGeometry};
-use ad_core::network::{EdgeSegment, Network, NodeId};
+use ad_core::network::{ConnectionKind, EdgeSegment, Network, NodeId};
 
-use crate::lod::{MAX_ZOOM, MIN_EDGE_PX, MIN_NODE_PX, NODE_SIZE, WHEEL_POINTS_PER_STEP, ZOOM_STEP};
+use crate::lod::{MAX_ZOOM, MIN_NODE_PX, WHEEL_POINTS_PER_STEP, ZOOM_STEP};
+use crate::look;
 
 /// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
 /// centre is in map px. The panel is the screen rectangle the map is shown in.
@@ -135,6 +136,7 @@ impl MapView {
         ui: &mut egui::Ui,
         net: &Network,
         geometry: MapGeometry,
+        node_size: u32,
         map_texture: Option<egui::TextureId>,
     ) {
         let (response, painter) =
@@ -174,7 +176,7 @@ impl MapView {
             }
         }
         let t = *transform;
-        self.paint(&painter, net, geometry, map_texture, &t);
+        self.paint(&painter, net, geometry, node_size, map_texture, &t);
     }
 
     fn paint(
@@ -182,6 +184,7 @@ impl MapView {
         painter: &egui::Painter,
         net: &Network,
         geometry: MapGeometry,
+        node_size: u32,
         map_texture: Option<egui::TextureId>,
         t: &ViewTransform,
     ) {
@@ -197,26 +200,33 @@ impl MapView {
             t.map_to_screen(mx, my)
         };
 
-        // All connections go into one mesh of 1 px quads: one shape instead of tens of
-        // thousands is what keeps the tessellation inside the frame budget.
-        let line_color = egui::Color32::from_gray(120);
+        let node_size = f64::from(node_size);
+        let ns = look::node_px(node_size, t.zoom);
+
+        // All connections and arrowheads go into one mesh with per-vertex colour: one shape
+        // instead of tens of thousands is what keeps the tessellation inside the frame budget.
         let half_width = 0.5_f32;
         let mut mesh = egui::Mesh::default();
         net.edges_in_rect_into(x0, z0, x1, z1, &mut self.edges);
-        mesh.reserve_triangles(self.edges.len() * 2);
-        mesh.reserve_vertices(self.edges.len() * 4);
+        mesh.reserve_triangles(self.edges.len() * 3);
+        mesh.reserve_vertices(self.edges.len() * 7);
         for e in &self.edges {
-            let (ax, ay) = to_screen(e.a[0], e.a[1]);
-            let (bx, by) = to_screen(e.b[0], e.b[1]);
-            let len = (bx - ax).hypot(by - ay);
-            if len < MIN_EDGE_PX {
+            let start = to_screen(e.a[0], e.a[1]);
+            let end = to_screen(e.b[0], e.b[1]);
+            let Some((from, to)) = look::line_ends(start, end, ns) else {
                 continue;
-            }
-            let nx = (-(by - ay) / len) as f32 * half_width;
-            let ny = ((bx - ax) / len) as f32 * half_width;
+            };
+            let Some((kind, fa, fb)) = net.link_look(e.from, e.to) else {
+                continue;
+            };
+            let colour = look::connection_colour(kind, fa.0, fb.0);
+            // The normal comes from the full line; shortening can cross the ends on short lines.
+            let len = (end.0 - start.0).hypot(end.1 - start.1);
+            let nx = (-(end.1 - start.1) / len) as f32 * half_width;
+            let ny = ((end.0 - start.0) / len) as f32 * half_width;
             let (a, b) = (
-                egui::pos2(ax as f32, ay as f32),
-                egui::pos2(bx as f32, by as f32),
+                egui::pos2(from.0 as f32, from.1 as f32),
+                egui::pos2(to.0 as f32, to.1 as f32),
             );
             let i = mesh.vertices.len() as u32;
             for p in [
@@ -225,24 +235,34 @@ impl MapView {
                 egui::pos2(b.x - nx, b.y - ny),
                 egui::pos2(b.x + nx, b.y + ny),
             ] {
-                mesh.colored_vertex(p, line_color);
+                mesh.colored_vertex(p, colour);
             }
             mesh.add_triangle(i, i + 1, i + 2);
             mesh.add_triangle(i, i + 2, i + 3);
+            let dual = kind == ConnectionKind::Dual;
+            if let Some(tri) = look::arrow(start, end, ns, node_size, t.zoom, dual) {
+                let i = mesh.vertices.len() as u32;
+                for p in tri {
+                    mesh.colored_vertex(egui::pos2(p.0 as f32, p.1 as f32), colour);
+                }
+                mesh.add_triangle(i, i + 1, i + 2);
+            }
         }
         painter.add(egui::Shape::mesh(mesh));
 
-        let node_px = NODE_SIZE * t.zoom * 0.5;
-        if node_px >= MIN_NODE_PX {
-            let dot = egui::Color32::from_rgb(80, 200, 120);
-            let radius = (node_px / 2.0) as f32;
+        if f64::from(ns) >= MIN_NODE_PX {
+            let radius = ns as f32 / 2.0;
             // Widen by the dot radius so dots just outside the view still show their edge.
             let pad = f64::from(radius) / t.zoom * geometry.scale;
             net.nodes_in_rect_into(x0 - pad, z0 - pad, x1 + pad, z1 + pad, &mut self.nodes);
             for &id in &self.nodes {
                 if let Some(n) = net.node(id) {
                     let (sx, sy) = to_screen(n.x, n.z);
-                    painter.circle_filled(egui::pos2(sx as f32, sy as f32), radius, dot);
+                    painter.circle_filled(
+                        egui::pos2(sx as f32, sy as f32),
+                        radius,
+                        look::node_colour(n.flag.0),
+                    );
                 }
             }
         }
@@ -326,31 +346,54 @@ mod tests {
         size: egui::Vec2,
         texture: Option<egui::TextureId>,
     ) -> egui::FullOutput {
+        frame_sized(ctx, view, net, geometry, 2, size, texture)
+    }
+
+    fn frame_sized(
+        ctx: &egui::Context,
+        view: &mut MapView,
+        net: &Network,
+        geometry: MapGeometry,
+        node_size: u32,
+        size: egui::Vec2,
+        texture: Option<egui::TextureId>,
+    ) -> egui::FullOutput {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             ..Default::default()
         };
-        let mut out = ctx.run_ui(input, |ui| view.show(ui, net, geometry, texture));
+        let mut out = ctx.run_ui(input, |ui| view.show(ui, net, geometry, node_size, texture));
         // No renderer here, so there is nothing to upload.
         out.textures_delta.clear();
         out
     }
 
-    /// Counts painted (connection quads, circles).
+    /// Counts painted (connection quads, circles). Arrowheads are triangles in the mesh.
     fn count(out: &egui::FullOutput) -> (usize, usize) {
-        let (mut lines, mut circles) = (0, 0);
+        let (lines, _, circles) = count3(out);
+        (lines, circles)
+    }
+
+    /// Counts painted (connection quads, arrowheads, circles).
+    fn count3(out: &egui::FullOutput) -> (usize, usize, usize) {
+        let (mut verts, mut tris, mut circles) = (0, 0, 0);
         for s in &out.shapes {
             let mut stack = vec![&s.shape];
             while let Some(shape) = stack.pop() {
                 match shape {
-                    egui::Shape::Mesh(m) => lines += m.vertices.len() / 4,
+                    egui::Shape::Mesh(m) => {
+                        verts += m.vertices.len();
+                        tris += m.indices.len() / 3;
+                    }
                     egui::Shape::Circle(_) => circles += 1,
                     egui::Shape::Vec(v) => stack.extend(v.iter()),
                     _ => {}
                 }
             }
         }
-        (lines, circles)
+        // Quad = 4 vertices and 2 triangles, arrowhead = 3 and 1.
+        let lines = (3 * tris - verts) / 2;
+        (lines, tris - 2 * lines, circles)
     }
 
     #[test]
@@ -415,6 +458,8 @@ mod tests {
             .zoom_at((0.0, 0.0), 8.0);
         let out = frame(&ctx, &mut view, &net, g, size, None);
         assert_eq!(count(&out), (1, 2));
+        // Node size 2 at zoom 30 gives 31 px nodes; the one-way edge has one arrowhead.
+        assert_eq!(count3(&out), (1, 1, 2));
 
         // A view of the crossing edge's middle, with both ends outside it.
         view.transform.as_mut().expect("set").center = (1024.0, 1524.0);
@@ -429,6 +474,66 @@ mod tests {
         let mut view = MapView::default();
         let out = frame(&ctx, &mut view, &tiny, g, size, None);
         assert_eq!(count(&out), (0, 0));
+    }
+
+    #[test]
+    fn colours_arrows_and_node_size() {
+        let mut net = Network::new();
+        let a = net.add_node(-1000.0, -1000.0, -1000.0, NodeFlag::REGULAR);
+        let b = net.add_node(-900.0, 0.0, -1000.0, NodeFlag::SUB_PRIO);
+        let c = net.add_node(-1000.0, 0.0, -900.0, NodeFlag::REGULAR);
+        net.connect(a, b, ConnectionShape::Dual).expect("ok");
+        net.connect(a, c, ConnectionShape::OneWay).expect("ok");
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        let size = egui::vec2(1024.0, 1024.0);
+        let mut view = MapView::default();
+        let _ = frame(&ctx, &mut view, &net, g, size, None);
+        view.transform
+            .as_mut()
+            .expect("set")
+            .zoom_at((0.0, 0.0), 4.0);
+        let out = frame(&ctx, &mut view, &net, g, size, None);
+        // Dual: two entries with an arrowhead each; one-way: one.
+        assert_eq!(count3(&out), (3, 3, 3));
+        let colours: Vec<egui::Color32> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(m) => {
+                    Some(m.vertices.iter().map(|v| v.color).collect::<Vec<_>>())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        // Dual with a subprio end is brown; the one-way edge from a regular node is green.
+        assert!(colours.contains(&look::DUAL_SUBPRIO) && colours.contains(&look::REGULAR));
+        // Nodes: red for flag 0, orange for the subprio node.
+        let mut node_colours: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Circle(c) => Some(c.fill),
+                _ => None,
+            })
+            .collect();
+        node_colours.sort_by_key(|c| c.to_array());
+        assert_eq!(node_colours.len(), 3);
+        assert!(node_colours.contains(&look::NODE_REGULAR));
+        assert!(node_colours.contains(&look::NODE_SUBPRIO));
+
+        // A node size of 1 at this zoom gives nodes under 2 px: no circles, no arrowheads.
+        let mut small = MapView::default();
+        let _ = frame_sized(&ctx, &mut small, &net, g, 1, size, None);
+        small
+            .transform
+            .as_mut()
+            .expect("set")
+            .zoom_at((0.0, 0.0), 1.0);
+        let out = frame_sized(&ctx, &mut small, &net, g, 1, size, None);
+        let (_, arrows, circles) = count3(&out);
+        assert_eq!((arrows, circles), (0, 0));
     }
 
     /// Release timing of the view path on the fixture. Run by hand:
