@@ -601,4 +601,70 @@ mod tests {
             check_looks(&n);
         }
     }
+
+    /// The no-height set equals a full scan after random mutations.
+    #[test]
+    fn no_height_set_follows_every_mutation() {
+        // The reference mirrors the network's no-height rule: exactly `y == -1.0`.
+        let check = |n: &Network| {
+            let mut want: Vec<NodeId> = n
+                .order()
+                .iter()
+                .copied()
+                .filter(|id| n.node(*id).is_some_and(|x| x.y == -1.0))
+                .collect();
+            want.sort();
+            let got: Vec<NodeId> = n.nodes_without_height().collect();
+            assert_eq!(got, want);
+        };
+        let mut rng = Lcg(7);
+        let height = |rng: &mut Lcg| if rng.below(2) == 0 { -1.0 } else { 3.0 };
+        let mut n = Network::new();
+        let mut ids: Vec<NodeId> = (0..30)
+            .map(|_| {
+                let y = height(&mut rng);
+                n.add_node(rng.coord(), y, rng.coord(), NodeFlag(0))
+            })
+            .collect();
+        check(&n);
+        for _ in 0..1000 {
+            let a = ids[rng.below(ids.len() as u64) as usize];
+            match rng.below(4) {
+                0 => {
+                    let y = height(&mut rng);
+                    ids.push(n.add_node(rng.coord(), y, rng.coord(), NodeFlag(0)));
+                }
+                1 | 2 => {
+                    let y = height(&mut rng);
+                    let _ = n.move_node(a, rng.coord(), y, rng.coord());
+                }
+                _ => {
+                    if let Ok(removed) = n.remove_node(a) {
+                        check(&n);
+                        if rng.below(2) == 0 {
+                            n.reinsert(removed);
+                        } else {
+                            // Left out for good.
+                            ids.retain(|i| *i != a);
+                        }
+                    }
+                }
+            }
+            check(&n);
+        }
+        let loaded: Vec<LoadedNode> = n
+            .order()
+            .iter()
+            .filter_map(|id| n.node(*id))
+            .map(|x| LoadedNode {
+                x: x.x,
+                y: x.y,
+                z: x.z,
+                flag: x.flag,
+                outgoing: Vec::new(),
+                incoming: Vec::new(),
+            })
+            .collect();
+        check(&Network::from_loaded(loaded).expect("ok"));
+    }
 }

@@ -2,3 +2,5 @@ target/
 # Local map image and heightmap for the fixture; third-party map content, not committed.
 /mapImages/
 /terrain.heightmap.png
+/dem.png
+/pda_map_H.dds
