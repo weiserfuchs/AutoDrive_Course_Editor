@@ -3,7 +3,7 @@ title: 'Loading and saving run in the background and never corrupt the open docu
 type: 'feature'
 ticket: '7'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: '496320d535e02d823ba5ccff19688e9d0714c488'
 route: 'full'
 route_source: 'auto'
@@ -95,6 +95,8 @@ context: ['{project-root}/_bmad-output/initiative-rust-rewrite/architecture-rust
 - Given a broken XML file opened while the fixture is shown, when loading fails, then an error window names the file and element, and the fixture stays shown.
 
 ## Implementation Notes
+
+- 2026-11-06: The user approved the merge without running the manual GUI checks (responsiveness while loading, the error window for a broken file, a clean `git status` after Save). They remain unverified on screen.
 
 ## Plan Change Log
 
