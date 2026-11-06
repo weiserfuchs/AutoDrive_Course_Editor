@@ -5,14 +5,20 @@ use std::sync::mpsc::Sender;
 use std::thread;
 
 use ad_core::history::SavePoint;
+use ad_core::map_context::MapContext;
 use ad_io::config_xml::{self, LoadedConfig};
+use ad_io::map_image::{self, MapImage};
+use ad_io::settings::Settings;
 
 use crate::document::Document;
+
+/// A parsed config with its map image and the notice about the image, if any.
+pub type Loaded = (LoadedConfig, MapImage, Option<String>);
 
 pub enum JobResult {
     Loaded {
         path: PathBuf,
-        result: Result<Box<LoadedConfig>, String>,
+        result: Result<Box<Loaded>, String>,
     },
     Saved {
         epoch: u64,
@@ -22,17 +28,32 @@ pub enum JobResult {
     },
 }
 
-/// Reads and parses the file; the error message names the file and the config problem.
-pub fn load_file(path: &Path) -> Result<LoadedConfig, String> {
+/// Reads and parses the file, then finds and loads the map image. The error message names the
+/// file and the config problem; image problems never fail the load (they become a notice).
+pub fn load_file(path: &Path, exe_dir: Option<&Path>) -> Result<Loaded, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-    config_xml::load(&bytes).map_err(|e| format!("Cannot load {}: {e}", path.display()))
+    let config =
+        config_xml::load(&bytes).map_err(|e| format!("Cannot load {}: {e}", path.display()))?;
+    let found = config
+        .map_name()
+        .and_then(|name| map_image::find_map_image(name, exe_dir, path.parent()));
+    let (image, notice) = match found {
+        Some(image_path) => map_image::load_map_image(&image_path),
+        None => (map_image::blank(), None),
+    };
+    Ok((config, image, notice))
 }
 
 /// Runs `load_file` on a background thread, then calls `notify` (a repaint request).
-pub fn spawn_load(path: PathBuf, tx: Sender<JobResult>, notify: impl FnOnce() + Send + 'static) {
+pub fn spawn_load(
+    path: PathBuf,
+    exe_dir: Option<PathBuf>,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
     thread::spawn(move || {
         tracing::info!("loading {}", path.display());
-        let result = load_file(&path).map(Box::new);
+        let result = load_file(&path, exe_dir.as_deref()).map(Box::new);
         match &result {
             Ok(_) => tracing::info!("loaded {}", path.display()),
             Err(e) => tracing::warn!("{e}"),
@@ -75,12 +96,29 @@ pub fn spawn_save(
 pub fn replace_document(
     doc: &mut Option<Document>,
     epoch_counter: &mut u64,
-    config: LoadedConfig,
+    loaded: Loaded,
     path: PathBuf,
-    history_cap: usize,
+    settings: &Settings,
 ) {
+    let (config, image, notice) = loaded;
+    let scale = config
+        .map_name()
+        .and_then(|name| settings.maps.get(name))
+        .map_or_else(
+            || ad_io::settings::MapSettings::default().scale,
+            |m| m.scale,
+        );
+    let map = MapContext::new(config.map_name().map(str::to_owned), scale);
     *epoch_counter += 1;
-    *doc = Some(Document::new(config, path, *epoch_counter, history_cap));
+    *doc = Some(Document::new(
+        config,
+        map,
+        image,
+        notice,
+        path,
+        *epoch_counter,
+        settings.global.history_cap,
+    ));
 }
 
 /// Applies a finished job on the UI thread. Returns an error message to show, if any.
@@ -88,13 +126,13 @@ pub fn replace_document(
 pub fn apply_result(
     doc: &mut Option<Document>,
     epoch_counter: &mut u64,
-    history_cap: usize,
+    settings: &Settings,
     result: JobResult,
 ) -> Option<String> {
     match result {
         JobResult::Loaded { path, result } => match result {
             Ok(config) => {
-                replace_document(doc, epoch_counter, *config, path, history_cap);
+                replace_document(doc, epoch_counter, *config, path, settings);
                 None
             }
             Err(message) => Some(message),
@@ -144,6 +182,16 @@ mod tests {
         )
     }
 
+    fn settings(history_cap: usize) -> Settings {
+        let mut s = Settings::default();
+        s.global.history_cap = history_cap;
+        s
+    }
+
+    fn loaded_config(config: LoadedConfig) -> Loaded {
+        (config, map_image::blank(), None)
+    }
+
     fn config() -> LoadedConfig {
         config_xml::load(inline_text("1.000,2.500").as_bytes()).expect("inline config loads")
     }
@@ -160,9 +208,9 @@ mod tests {
     fn loaded(doc: &mut Option<Document>, counter: &mut u64) {
         let result = JobResult::Loaded {
             path: fixture_path(),
-            result: Ok(Box::new(config())),
+            result: Ok(Box::new(loaded_config(config()))),
         };
-        assert_eq!(apply_result(doc, counter, 500, result), None);
+        assert_eq!(apply_result(doc, counter, &settings(500), result), None);
     }
 
     fn saved(doc: &Document, point: SavePoint, result: Result<(), String>) -> JobResult {
@@ -180,9 +228,12 @@ mod tests {
         let (mut doc, mut counter) = (None, 0);
         let result = JobResult::Loaded {
             path: fixture_path(),
-            result: Ok(Box::new(config)),
+            result: Ok(Box::new(loaded_config(config))),
         };
-        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &settings(500), result),
+            None
+        );
         doc.expect("doc")
     }
 
@@ -233,7 +284,10 @@ mod tests {
         let d = doc.as_ref().expect("doc");
         assert!(d.is_dirty());
         let result = saved(d, d.history.save_point(), Ok(()));
-        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &settings(500), result),
+            None
+        );
         assert!(!doc.expect("doc").is_dirty());
     }
 
@@ -256,9 +310,12 @@ mod tests {
         let (mut doc, mut counter) = (None, 0);
         let result = JobResult::Loaded {
             path: fixture_path(),
-            result: Ok(Box::new(config())),
+            result: Ok(Box::new(loaded_config(config()))),
         };
-        assert_eq!(apply_result(&mut doc, &mut counter, 1, result), None);
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &settings(1), result),
+            None
+        );
         let d = doc.as_mut().expect("doc");
         d.apply(edit()).expect("edit");
         d.apply(edit()).expect("edit");
@@ -270,13 +327,13 @@ mod tests {
     fn load_fail_keeps_document() {
         let (mut doc, mut counter) = (None, 0);
         loaded(&mut doc, &mut counter);
-        let missing = load_file(Path::new("missing.xml")).expect_err("missing file");
+        let missing = load_file(Path::new("missing.xml"), None).expect_err("missing file");
         assert!(missing.contains("missing.xml"));
         let dir = std::env::temp_dir().join("ad_app_jobs_broken");
         std::fs::create_dir_all(&dir).expect("dir");
         let broken = dir.join("broken.xml");
         std::fs::write(&broken, inline_text("abc,2.500")).expect("write");
-        let loaded_err = load_file(&broken);
+        let loaded_err = load_file(&broken, None);
         std::fs::remove_dir_all(&dir).expect("cleanup");
         let message = loaded_err.expect_err("invalid value");
         assert!(message.contains("broken.xml"), "{message}");
@@ -286,7 +343,7 @@ mod tests {
             result: Err(message.clone()),
         };
         assert_eq!(
-            apply_result(&mut doc, &mut counter, 500, result),
+            apply_result(&mut doc, &mut counter, &settings(500), result),
             Some(message)
         );
         let d = doc.as_mut().expect("doc");
@@ -303,7 +360,10 @@ mod tests {
         d.apply(edit()).expect("edit");
         let point = d.history.save_point();
         let result = saved(d, point, Ok(()));
-        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &settings(500), result),
+            None
+        );
         let d = doc.as_ref().expect("doc");
         assert!(!d.is_dirty());
         assert_eq!(d.path, PathBuf::from("target.xml"));
@@ -318,7 +378,10 @@ mod tests {
         let point = d.history.save_point();
         let result = saved(d, point, Ok(()));
         d.apply(edit()).expect("edit");
-        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &settings(500), result),
+            None
+        );
         assert!(doc.as_ref().expect("doc").is_dirty());
     }
 
@@ -333,7 +396,10 @@ mod tests {
         loaded(&mut doc, &mut counter);
         let d = doc.as_mut().expect("doc");
         d.apply(edit()).expect("edit");
-        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &settings(500), result),
+            None
+        );
         let d = doc.as_ref().expect("doc");
         assert!(d.is_dirty());
         assert_eq!(d.path, fixture_path());
@@ -348,7 +414,7 @@ mod tests {
         let point = d.history.save_point();
         let result = saved(d, point, Err("disk full".to_owned()));
         assert_eq!(
-            apply_result(&mut doc, &mut counter, 500, result),
+            apply_result(&mut doc, &mut counter, &settings(500), result),
             Some("disk full".to_owned())
         );
         let d = doc.as_ref().expect("doc");
@@ -366,7 +432,10 @@ mod tests {
         d.apply(edit()).expect("edit");
         d.apply(edit()).expect("edit");
         let result = saved(d, point, Ok(()));
-        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &settings(500), result),
+            None
+        );
         assert!(doc.as_ref().expect("doc").is_dirty());
     }
 
@@ -374,7 +443,7 @@ mod tests {
     fn load_through_channel() {
         let (tx, rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        spawn_load(fixture_path(), tx, move || {
+        spawn_load(fixture_path(), None, tx, move || {
             let _ = done_tx.send(());
         });
         done_rx
@@ -382,7 +451,78 @@ mod tests {
             .expect("job finished");
         let (mut doc, mut counter) = (None, 0);
         let result = rx.try_recv().expect("result queued before notify");
-        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &settings(500), result),
+            None
+        );
         assert!(doc.is_some_and(|d| !d.config.network.is_empty()));
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ad_app_jobs_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    fn named(text: &str) -> String {
+        text.replace("<AutoDrive>", "<AutoDrive><MapName>Tiny</MapName>")
+    }
+
+    #[test]
+    fn job_result_carries_the_image() {
+        let dir = temp_dir("carries");
+        let folder = dir.join("mapImages").join("Tiny");
+        std::fs::create_dir_all(&folder).expect("folder");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+            .save(folder.join("Tiny.png"))
+            .expect("png");
+        let config = dir.join("AutoDrive_config.xml");
+        std::fs::write(&config, named(&inline_text("1.000,2.500"))).expect("write");
+        let loaded = load_file(&config, None);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        let (_, image, notice) = loaded.expect("loads");
+        assert_ne!(image, map_image::blank());
+        assert_eq!(&image.rgba[..4], &[1, 2, 3, 255]);
+        assert!(notice.expect("notice").contains("Tiny.png"));
+    }
+
+    #[test]
+    fn missing_image_or_name_falls_back_to_blank() {
+        let dir = temp_dir("fallback");
+        let config = dir.join("AutoDrive_config.xml");
+        for text in [
+            named(&inline_text("1.000,2.500")),
+            inline_text("1.000,2.500"),
+        ] {
+            std::fs::write(&config, text).expect("write");
+            let (_, image, notice) = load_file(&config, None).expect("loads");
+            assert_eq!((image, notice), (map_image::blank(), None));
+        }
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn scale_from_settings_reaches_the_map_context() {
+        let text = inline_text("1.000,2.500")
+            .replace("<AutoDrive>", "<AutoDrive><MapName>Marsch</MapName>");
+        let mut s = settings(500);
+        s.maps.insert(
+            "Marsch".to_owned(),
+            ad_io::settings::MapSettings { scale: 2 },
+        );
+        let config = config_xml::load(text.as_bytes()).expect("config loads");
+        let (mut doc, mut counter) = (None, 0);
+        let result = JobResult::Loaded {
+            path: fixture_path(),
+            result: Ok(Box::new(loaded_config(config))),
+        };
+        assert_eq!(apply_result(&mut doc, &mut counter, &s, result), None);
+        let d = doc.expect("doc");
+        assert_eq!(d.map.geometry.scale, 2.0);
+        assert_eq!(d.map.name.as_deref(), Some("Marsch"));
+        assert!(d.map_image.is_some() && d.notice.is_none());
+        // A missing name uses scale 1.
+        assert_eq!(open(&inline_text("1.000,2.500")).map.geometry.scale, 1.0);
     }
 }

@@ -3,4 +3,5 @@
 //! Depends on `ad-core` and never on the UI.
 mod atomic;
 pub mod config_xml;
+pub mod map_image;
 pub mod settings;

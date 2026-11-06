@@ -106,6 +106,16 @@ impl ViewTransform {
     }
 }
 
+/// Screen rectangle of map pixels 0..2048.
+fn image_rect(t: &ViewTransform) -> egui::Rect {
+    let (x0, y0) = t.map_to_screen(0.0, 0.0);
+    let (x1, y1) = t.map_to_screen(MAP_PIXELS, MAP_PIXELS);
+    egui::Rect::from_min_max(
+        egui::pos2(x0 as f32, y0 as f32),
+        egui::pos2(x1 as f32, y1 as f32),
+    )
+}
+
 /// Draws the network on the map. Owns the query buffers reused across frames.
 #[derive(Default)]
 pub struct MapView {
@@ -120,7 +130,13 @@ impl MapView {
         self.transform = None;
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, net: &Network, geometry: MapGeometry) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        net: &Network,
+        geometry: MapGeometry,
+        map_texture: Option<egui::TextureId>,
+    ) {
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let rect = response.rect;
@@ -158,7 +174,7 @@ impl MapView {
             }
         }
         let t = *transform;
-        self.paint(&painter, net, geometry, &t);
+        self.paint(&painter, net, geometry, map_texture, &t);
     }
 
     fn paint(
@@ -166,8 +182,13 @@ impl MapView {
         painter: &egui::Painter,
         net: &Network,
         geometry: MapGeometry,
+        map_texture: Option<egui::TextureId>,
         t: &ViewTransform,
     ) {
+        if let Some(id) = map_texture {
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(id, image_rect(t), uv, egui::Color32::WHITE);
+        }
         let (mx0, my0, mx1, my1) = t.visible_map_rect();
         let (x0, z0) = geometry.to_world(mx0, my0);
         let (x1, z1) = geometry.to_world(mx1, my1);
@@ -303,12 +324,13 @@ mod tests {
         net: &Network,
         geometry: MapGeometry,
         size: egui::Vec2,
+        texture: Option<egui::TextureId>,
     ) -> egui::FullOutput {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             ..Default::default()
         };
-        let mut out = ctx.run_ui(input, |ui| view.show(ui, net, geometry));
+        let mut out = ctx.run_ui(input, |ui| view.show(ui, net, geometry, texture));
         // No renderer here, so there is nothing to upload.
         out.textures_delta.clear();
         out
@@ -332,6 +354,22 @@ mod tests {
     }
 
     #[test]
+    fn image_rect_matches_map_pixels() {
+        let mut v = view();
+        v.zoom_at((200.0, 300.0), 3.0);
+        let r = image_rect(&v);
+        let (x0, y0) = v.map_to_screen(0.0, 0.0);
+        let (x1, y1) = v.map_to_screen(2048.0, 2048.0);
+        assert_eq!((r.min.x, r.min.y), (x0 as f32, y0 as f32));
+        assert_eq!((r.max.x, r.max.y), (x1 as f32, y1 as f32));
+        // World (0,0) at scale 2 is map px (1024,1024): the middle of the image rect.
+        let (mx, my) = MapGeometry::new(2.0).to_map(0.0, 0.0);
+        let (sx, sy) = v.map_to_screen(mx, my);
+        assert!((r.center().x - sx as f32).abs() < 1e-3);
+        assert!((r.center().y - sy as f32).abs() < 1e-3);
+    }
+
+    #[test]
     fn zero_size_panel_does_not_panic() {
         let ctx = egui::Context::default();
         let mut view = MapView::default();
@@ -342,6 +380,7 @@ mod tests {
             &net,
             MapGeometry::new(1.0),
             egui::Vec2::ZERO,
+            None,
         );
         assert_eq!(count(&out), (0, 0));
     }
@@ -366,7 +405,7 @@ mod tests {
         let size = egui::vec2(1024.0, 1024.0);
 
         // Minimum zoom 0.5: nodes are 0.5 px (no dots), all three edges are visible.
-        let out = frame(&ctx, &mut view, &net, g, size);
+        let out = frame(&ctx, &mut view, &net, g, size, None);
         assert_eq!(count(&out), (3, 0));
 
         // Zoomed into the top-left corner: only the near edge and its two nodes.
@@ -374,12 +413,12 @@ mod tests {
             .as_mut()
             .expect("set")
             .zoom_at((0.0, 0.0), 8.0);
-        let out = frame(&ctx, &mut view, &net, g, size);
+        let out = frame(&ctx, &mut view, &net, g, size, None);
         assert_eq!(count(&out), (1, 2));
 
         // A view of the crossing edge's middle, with both ends outside it.
         view.transform.as_mut().expect("set").center = (1024.0, 1524.0);
-        let out = frame(&ctx, &mut view, &net, g, size);
+        let out = frame(&ctx, &mut view, &net, g, size, None);
         assert_eq!(count(&out), (1, 0));
 
         // An edge shorter than 1 px on screen is skipped (1 map px at zoom 0.5).
@@ -388,7 +427,7 @@ mod tests {
         let b = tiny.add_node(1.0, 0.0, 0.0, NodeFlag::REGULAR);
         tiny.connect(a, b, ConnectionShape::OneWay).expect("ok");
         let mut view = MapView::default();
-        let out = frame(&ctx, &mut view, &tiny, g, size);
+        let out = frame(&ctx, &mut view, &tiny, g, size, None);
         assert_eq!(count(&out), (0, 0));
     }
 
@@ -407,6 +446,13 @@ mod tests {
         let geometry = MapGeometry::new(2.0);
         let size = egui::vec2(1920.0, 1080.0);
         let ctx = egui::Context::default();
+        let texture = ctx
+            .load_texture(
+                "map_image",
+                egui::ColorImage::filled([2048, 2048], egui::Color32::GRAY),
+                egui::TextureOptions::LINEAR,
+            )
+            .id();
 
         // The densest 256x256 world-unit cell of a coarse grid over the map.
         let mut dense_world = (0.0, 0.0);
@@ -429,14 +475,14 @@ mod tests {
         let run = |name: &str, steps: f64, at: (f64, f64)| {
             let mut view = MapView::default();
             // The first frame creates the transform at minimum zoom.
-            let _ = frame(&ctx, &mut view, net, geometry, size);
+            let _ = frame(&ctx, &mut view, net, geometry, size, Some(texture));
             let t = view.transform.as_mut().expect("set");
             t.center = at;
             t.zoom_at((960.0, 540.0), steps);
             let mut times = Vec::new();
             for i in 0..40 {
                 let start = std::time::Instant::now();
-                let out = frame(&ctx, &mut view, net, geometry, size);
+                let out = frame(&ctx, &mut view, net, geometry, size, Some(texture));
                 let _prims = ctx.tessellate(out.shapes, out.pixels_per_point);
                 if i >= 10 {
                     times.push(start.elapsed().as_secs_f64() * 1000.0);

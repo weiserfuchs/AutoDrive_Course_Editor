@@ -134,6 +134,7 @@ dependencies = [
  "ad-io",
  "directories",
  "eframe",
+ "image",
  "rfd",
  "tracing",
  "tracing-appender",
@@ -153,6 +154,7 @@ name = "ad-io"
 version = "0.1.0"
 dependencies = [
  "ad-core",
+ "image",
  "quick-xml 0.42.0",
  "serde",
  "thiserror 2.0.21",
