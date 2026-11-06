@@ -5,6 +5,15 @@ use rstar::primitives::{GeomWithData, Line};
 
 use super::{Network, Node, NodeId};
 
+/// One indexed edge: its node ids and its endpoints as (x, z).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdgeSegment {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub a: [f64; 2],
+    pub b: [f64; 2],
+}
+
 pub(super) type NodeEntry = GeomWithData<[f64; 2], NodeId>;
 pub(super) type EdgeEntry = GeomWithData<Line<[f64; 2]>, (NodeId, NodeId)>;
 
@@ -63,6 +72,40 @@ impl Network {
             .collect();
         ids.sort();
         ids
+    }
+
+    /// Fills `out` with the nodes inside the rectangle, bounds inclusive. Unsorted;
+    /// `out` is cleared first and its capacity reused.
+    pub fn nodes_in_rect_into(&self, x0: f64, z0: f64, x1: f64, z1: f64, out: &mut Vec<NodeId>) {
+        out.clear();
+        let aabb = AABB::from_corners([x0, z0], [x1, z1]);
+        out.extend(self.node_index.locate_in_envelope(aabb).map(|e| e.data));
+    }
+
+    /// Fills `out` with the edges whose segment's bounding box intersects the rectangle,
+    /// so an edge crossing it with both ends outside is included. Unsorted; `out` is
+    /// cleared first and its capacity reused.
+    pub fn edges_in_rect_into(
+        &self,
+        x0: f64,
+        z0: f64,
+        x1: f64,
+        z1: f64,
+        out: &mut Vec<EdgeSegment>,
+    ) {
+        out.clear();
+        let aabb = AABB::from_corners([x0, z0], [x1, z1]);
+        // The index entries carry the endpoints, so drawing needs no node lookups.
+        out.extend(
+            self.edge_index
+                .locate_in_envelope_intersecting(aabb)
+                .map(|e| EdgeSegment {
+                    from: e.data.0,
+                    to: e.data.1,
+                    a: e.geom().from,
+                    b: e.geom().to,
+                }),
+        );
     }
 
     /// Nodes inside the polygon (even-odd rule). Sorted by id.
@@ -134,6 +177,86 @@ mod tests {
         }
         fn coord(&mut self) -> f64 {
             self.below(200) as f64
+        }
+    }
+
+    #[test]
+    fn rect_into_queries_match_brute_force() {
+        let mut n = Network::new();
+        let a = n.add_node(-50.0, 0.0, 5.0, NodeFlag::REGULAR);
+        let b = n.add_node(50.0, 0.0, 5.0, NodeFlag::REGULAR);
+        let c = n.add_node(5.0, 0.0, 5.0, NodeFlag::REGULAR);
+        let d = n.add_node(100.0, 0.0, 100.0, NodeFlag::REGULAR);
+        n.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        n.connect(c, d, ConnectionShape::OneWay).expect("ok");
+        let stale = EdgeSegment {
+            from: d,
+            to: d,
+            a: [0.0; 2],
+            b: [0.0; 2],
+        };
+        let (mut nodes, mut edges) = (vec![d], vec![stale]);
+        n.nodes_in_rect_into(0.0, 0.0, 10.0, 10.0, &mut nodes);
+        n.edges_in_rect_into(0.0, 0.0, 10.0, 10.0, &mut edges);
+        assert_eq!(nodes, vec![c]);
+        edges.sort_by_key(|e| (e.from, e.to));
+        assert_eq!(
+            edges,
+            vec![
+                EdgeSegment {
+                    from: a,
+                    to: b,
+                    a: [-50.0, 5.0],
+                    b: [50.0, 5.0],
+                },
+                EdgeSegment {
+                    from: c,
+                    to: d,
+                    a: [5.0, 5.0],
+                    b: [100.0, 100.0],
+                },
+            ]
+        );
+        n.edges_in_rect_into(200.0, 200.0, 210.0, 210.0, &mut edges);
+        assert!(edges.is_empty());
+
+        let mut rng = Lcg(7);
+        let mut big = Network::new();
+        let ids: Vec<NodeId> = (0..300)
+            .map(|_| big.add_node(rng.coord(), 0.0, rng.coord(), NodeFlag::REGULAR))
+            .collect();
+        for _ in 0..400 {
+            let (p, q) = (ids[rng.below(300) as usize], ids[rng.below(300) as usize]);
+            let _ = big.connect(p, q, ConnectionShape::OneWay);
+        }
+        let pos = |id: NodeId| big.node(id).map(|x| (x.x, x.z)).unwrap_or((0.0, 0.0));
+        for _ in 0..30 {
+            let (x0, z0) = (rng.coord(), rng.coord());
+            let (x1, z1) = (x0 + rng.below(60) as f64, z0 + rng.below(60) as f64);
+            let mut got = Vec::new();
+            big.nodes_in_rect_into(x0, z0, x1, z1, &mut got);
+            got.sort();
+            assert_eq!(got, big.in_rect(x0, z0, x1, z1));
+            let mut want = Vec::new();
+            for id in big.order() {
+                for t in big
+                    .node(*id)
+                    .map(|x| x.outgoing().to_vec())
+                    .unwrap_or_default()
+                {
+                    let ((ax, az), (bx, bz)) = (pos(*id), pos(t));
+                    if ax.min(bx) <= x1 && ax.max(bx) >= x0 && az.min(bz) <= z1 && az.max(bz) >= z0
+                    {
+                        want.push((*id, t));
+                    }
+                }
+            }
+            want.sort();
+            let mut segments = Vec::new();
+            big.edges_in_rect_into(x0, z0, x1, z1, &mut segments);
+            let mut got: Vec<(NodeId, NodeId)> = segments.iter().map(|e| (e.from, e.to)).collect();
+            got.sort();
+            assert_eq!(got, want);
         }
     }
 

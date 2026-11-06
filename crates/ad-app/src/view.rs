@@ -1,0 +1,457 @@
+//! The map view: map pixel <-> screen transform, culling, painting and input.
+
+use eframe::egui;
+
+use ad_core::geometry::{MAP_PIXELS, MapGeometry};
+use ad_core::network::{EdgeSegment, Network, NodeId};
+
+use crate::lod::{MAX_ZOOM, MIN_EDGE_PX, MIN_NODE_PX, NODE_SIZE, WHEEL_POINTS_PER_STEP, ZOOM_STEP};
+
+/// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
+/// centre is in map px. The panel is the screen rectangle the map is shown in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewTransform {
+    pub zoom: f64,
+    pub center: (f64, f64),
+    panel_center: (f64, f64),
+    panel_size: (f64, f64),
+}
+
+impl ViewTransform {
+    /// A view of the map's centre at the minimum zoom of the panel.
+    pub fn new(panel_center: (f64, f64), panel_size: (f64, f64)) -> Self {
+        let mut v = Self {
+            zoom: 0.0,
+            center: (MAP_PIXELS / 2.0, MAP_PIXELS / 2.0),
+            panel_center,
+            panel_size,
+        };
+        v.clamp();
+        v
+    }
+
+    /// Java minimum: the map always covers the panel.
+    fn min_zoom(&self) -> f64 {
+        (self.panel_size.0 / MAP_PIXELS).max(self.panel_size.1 / MAP_PIXELS)
+    }
+
+    /// Moves/resizes the panel, keeping zoom and centre valid.
+    pub fn set_panel(&mut self, panel_center: (f64, f64), panel_size: (f64, f64)) {
+        self.panel_center = panel_center;
+        self.panel_size = panel_size;
+        self.clamp();
+    }
+
+    fn clamp(&mut self) {
+        let min = self.min_zoom();
+        self.zoom = self.zoom.clamp(min, MAX_ZOOM.max(min));
+        let axis = |c: f64, size: f64| {
+            let half = size / 2.0 / self.zoom;
+            if half * 2.0 >= MAP_PIXELS {
+                MAP_PIXELS / 2.0
+            } else {
+                c.clamp(half, MAP_PIXELS - half)
+            }
+        };
+        self.center = (
+            axis(self.center.0, self.panel_size.0),
+            axis(self.center.1, self.panel_size.1),
+        );
+    }
+
+    pub fn map_to_screen(&self, mx: f64, my: f64) -> (f64, f64) {
+        (
+            self.panel_center.0 + (mx - self.center.0) * self.zoom,
+            self.panel_center.1 + (my - self.center.1) * self.zoom,
+        )
+    }
+
+    pub fn screen_to_map(&self, sx: f64, sy: f64) -> (f64, f64) {
+        (
+            self.center.0 + (sx - self.panel_center.0) / self.zoom,
+            self.center.1 + (sy - self.panel_center.1) / self.zoom,
+        )
+    }
+
+    /// Zooms by `ZOOM_STEP^steps` keeping the map point under `cursor` there.
+    pub fn zoom_at(&mut self, cursor: (f64, f64), steps: f64) {
+        let (mx, my) = self.screen_to_map(cursor.0, cursor.1);
+        self.zoom = (self.zoom * ZOOM_STEP.powf(steps)).clamp(self.min_zoom(), MAX_ZOOM);
+        self.center = (
+            mx - (cursor.0 - self.panel_center.0) / self.zoom,
+            my - (cursor.1 - self.panel_center.1) / self.zoom,
+        );
+        self.clamp();
+    }
+
+    /// Drags the content by (dx, dy) screen px.
+    pub fn pan(&mut self, dx: f64, dy: f64) {
+        self.center = (
+            self.center.0 - dx / self.zoom,
+            self.center.1 - dy / self.zoom,
+        );
+        self.clamp();
+    }
+
+    /// Map-pixel rectangle `(x0, y0, x1, y1)` the panel shows.
+    pub fn visible_map_rect(&self) -> (f64, f64, f64, f64) {
+        let hx = self.panel_size.0 / 2.0 / self.zoom;
+        let hy = self.panel_size.1 / 2.0 / self.zoom;
+        (
+            self.center.0 - hx,
+            self.center.1 - hy,
+            self.center.0 + hx,
+            self.center.1 + hy,
+        )
+    }
+}
+
+/// Draws the network on the map. Owns the query buffers reused across frames.
+#[derive(Default)]
+pub struct MapView {
+    transform: Option<ViewTransform>,
+    nodes: Vec<NodeId>,
+    edges: Vec<EdgeSegment>,
+}
+
+impl MapView {
+    /// Forgets the view; the next frame starts at the minimum zoom, centred.
+    pub fn reset(&mut self) {
+        self.transform = None;
+    }
+
+    pub fn show(&mut self, ui: &mut egui::Ui, net: &Network, geometry: MapGeometry) {
+        let (response, painter) =
+            ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+        let rect = response.rect;
+        if rect.width() < 1.0 || rect.height() < 1.0 {
+            return;
+        }
+        let panel_center = (f64::from(rect.center().x), f64::from(rect.center().y));
+        let panel_size = (f64::from(rect.width()), f64::from(rect.height()));
+        let transform = self
+            .transform
+            .get_or_insert_with(|| ViewTransform::new(panel_center, panel_size));
+        transform.set_panel(panel_center, panel_size);
+
+        if response.dragged_by(egui::PointerButton::Primary)
+            || response.dragged_by(egui::PointerButton::Middle)
+        {
+            let d = response.drag_delta();
+            transform.pan(f64::from(d.x), f64::from(d.y));
+        }
+        if response.hovered() {
+            let steps: f32 = ui.input(|i| {
+                i.events
+                    .iter()
+                    .map(|e| match e {
+                        egui::Event::MouseWheel { unit, delta, .. } => match unit {
+                            egui::MouseWheelUnit::Point => delta.y / WHEEL_POINTS_PER_STEP,
+                            _ => delta.y,
+                        },
+                        _ => 0.0,
+                    })
+                    .sum()
+            });
+            if let (true, Some(p)) = (steps != 0.0, response.hover_pos()) {
+                transform.zoom_at((f64::from(p.x), f64::from(p.y)), f64::from(steps));
+            }
+        }
+        let t = *transform;
+        self.paint(&painter, net, geometry, &t);
+    }
+
+    fn paint(
+        &mut self,
+        painter: &egui::Painter,
+        net: &Network,
+        geometry: MapGeometry,
+        t: &ViewTransform,
+    ) {
+        let (mx0, my0, mx1, my1) = t.visible_map_rect();
+        let (x0, z0) = geometry.to_world(mx0, my0);
+        let (x1, z1) = geometry.to_world(mx1, my1);
+        let to_screen = |x: f64, z: f64| {
+            let (mx, my) = geometry.to_map(x, z);
+            t.map_to_screen(mx, my)
+        };
+
+        // All connections go into one mesh of 1 px quads: one shape instead of tens of
+        // thousands is what keeps the tessellation inside the frame budget.
+        let line_color = egui::Color32::from_gray(120);
+        let half_width = 0.5_f32;
+        let mut mesh = egui::Mesh::default();
+        net.edges_in_rect_into(x0, z0, x1, z1, &mut self.edges);
+        mesh.reserve_triangles(self.edges.len() * 2);
+        mesh.reserve_vertices(self.edges.len() * 4);
+        for e in &self.edges {
+            let (ax, ay) = to_screen(e.a[0], e.a[1]);
+            let (bx, by) = to_screen(e.b[0], e.b[1]);
+            let len = (bx - ax).hypot(by - ay);
+            if len < MIN_EDGE_PX {
+                continue;
+            }
+            let nx = (-(by - ay) / len) as f32 * half_width;
+            let ny = ((bx - ax) / len) as f32 * half_width;
+            let (a, b) = (
+                egui::pos2(ax as f32, ay as f32),
+                egui::pos2(bx as f32, by as f32),
+            );
+            let i = mesh.vertices.len() as u32;
+            for p in [
+                egui::pos2(a.x + nx, a.y + ny),
+                egui::pos2(a.x - nx, a.y - ny),
+                egui::pos2(b.x - nx, b.y - ny),
+                egui::pos2(b.x + nx, b.y + ny),
+            ] {
+                mesh.colored_vertex(p, line_color);
+            }
+            mesh.add_triangle(i, i + 1, i + 2);
+            mesh.add_triangle(i, i + 2, i + 3);
+        }
+        painter.add(egui::Shape::mesh(mesh));
+
+        let node_px = NODE_SIZE * t.zoom * 0.5;
+        if node_px >= MIN_NODE_PX {
+            let dot = egui::Color32::from_rgb(80, 200, 120);
+            let radius = (node_px / 2.0) as f32;
+            // Widen by the dot radius so dots just outside the view still show their edge.
+            let pad = f64::from(radius) / t.zoom * geometry.scale;
+            net.nodes_in_rect_into(x0 - pad, z0 - pad, x1 + pad, z1 + pad, &mut self.nodes);
+            for &id in &self.nodes {
+                if let Some(n) = net.node(id) {
+                    let (sx, sy) = to_screen(n.x, n.z);
+                    painter.circle_filled(egui::pos2(sx as f32, sy as f32), radius, dot);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+    use ad_core::network::{ConnectionShape, NodeFlag};
+
+    fn view() -> ViewTransform {
+        ViewTransform::new((500.0, 400.0), (1000.0, 800.0))
+    }
+
+    #[test]
+    fn starts_at_min_zoom_centred() {
+        let v = view();
+        assert!((v.zoom - 1000.0 / 2048.0).abs() < 1e-12);
+        assert_eq!(v.center, (1024.0, 1024.0));
+    }
+
+    #[test]
+    fn zoom_keeps_point_under_cursor() {
+        let mut v = view();
+        for (cursor, steps) in [
+            ((500.0, 400.0), 1.0),
+            ((120.0, 700.0), 2.0),
+            ((900.0, 50.0), 3.0),
+            ((300.0, 300.0), -1.0),
+        ] {
+            let before = v.screen_to_map(cursor.0, cursor.1);
+            v.zoom_at(cursor, steps);
+            let after = v.screen_to_map(cursor.0, cursor.1);
+            assert!((before.0 - after.0).abs() < 1e-6 && (before.1 - after.1).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn zoom_is_clamped() {
+        let mut v = view();
+        v.zoom_at((500.0, 400.0), 100.0);
+        assert_eq!(v.zoom, MAX_ZOOM);
+        v.zoom_at((500.0, 400.0), -100.0);
+        assert!((v.zoom - 1000.0 / 2048.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pan_moves_centre_and_clamps() {
+        let mut v = view();
+        v.zoom_at((500.0, 400.0), 4.0);
+        let c = v.center;
+        v.pan(10.0, -20.0);
+        assert!((v.center.0 - (c.0 - 10.0 / v.zoom)).abs() < 1e-9);
+        assert!((v.center.1 - (c.1 + 20.0 / v.zoom)).abs() < 1e-9);
+        v.pan(1e9, 1e9);
+        let (x0, y0, _, _) = v.visible_map_rect();
+        assert!(x0.abs() < 1e-9 && y0.abs() < 1e-9);
+        v.pan(-1e9, -1e9);
+        let (_, _, x1, y1) = v.visible_map_rect();
+        assert!((x1 - 2048.0).abs() < 1e-9 && (y1 - 2048.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn screen_map_round_trip() {
+        let mut v = view();
+        v.zoom_at((200.0, 200.0), 3.0);
+        let (sx, sy) = v.map_to_screen(900.0, 1100.0);
+        let (mx, my) = v.screen_to_map(sx, sy);
+        assert!((mx - 900.0).abs() < 1e-9 && (my - 1100.0).abs() < 1e-9);
+    }
+
+    /// Runs one frame of `MapView` and returns what it painted.
+    fn frame(
+        ctx: &egui::Context,
+        view: &mut MapView,
+        net: &Network,
+        geometry: MapGeometry,
+        size: egui::Vec2,
+    ) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| view.show(ui, net, geometry));
+        // No renderer here, so there is nothing to upload.
+        out.textures_delta.clear();
+        out
+    }
+
+    /// Counts painted (connection quads, circles).
+    fn count(out: &egui::FullOutput) -> (usize, usize) {
+        let (mut lines, mut circles) = (0, 0);
+        for s in &out.shapes {
+            let mut stack = vec![&s.shape];
+            while let Some(shape) = stack.pop() {
+                match shape {
+                    egui::Shape::Mesh(m) => lines += m.vertices.len() / 4,
+                    egui::Shape::Circle(_) => circles += 1,
+                    egui::Shape::Vec(v) => stack.extend(v.iter()),
+                    _ => {}
+                }
+            }
+        }
+        (lines, circles)
+    }
+
+    #[test]
+    fn zero_size_panel_does_not_panic() {
+        let ctx = egui::Context::default();
+        let mut view = MapView::default();
+        let net = Network::new();
+        let out = frame(
+            &ctx,
+            &mut view,
+            &net,
+            MapGeometry::new(1.0),
+            egui::Vec2::ZERO,
+        );
+        assert_eq!(count(&out), (0, 0));
+    }
+
+    #[test]
+    fn culling_and_lod() {
+        let mut net = Network::new();
+        let mut add = |x: f64, z: f64| net.add_node(x, 0.0, z, NodeFlag::REGULAR);
+        // Scale 1: map px = world + 1024.
+        let near = add(-1000.0, -1000.0);
+        let near2 = add(-990.0, -1000.0);
+        let far_a = add(1000.0, 1000.0);
+        let far_b = add(1000.0, 990.0);
+        let cross_a = add(-1000.0, 500.0);
+        let cross_b = add(1000.0, 500.0);
+        for (a, b) in [(near, near2), (far_a, far_b), (cross_a, cross_b)] {
+            net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        }
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        let mut view = MapView::default();
+        let size = egui::vec2(1024.0, 1024.0);
+
+        // Minimum zoom 0.5: nodes are 0.5 px (no dots), all three edges are visible.
+        let out = frame(&ctx, &mut view, &net, g, size);
+        assert_eq!(count(&out), (3, 0));
+
+        // Zoomed into the top-left corner: only the near edge and its two nodes.
+        view.transform
+            .as_mut()
+            .expect("set")
+            .zoom_at((0.0, 0.0), 8.0);
+        let out = frame(&ctx, &mut view, &net, g, size);
+        assert_eq!(count(&out), (1, 2));
+
+        // A view of the crossing edge's middle, with both ends outside it.
+        view.transform.as_mut().expect("set").center = (1024.0, 1524.0);
+        let out = frame(&ctx, &mut view, &net, g, size);
+        assert_eq!(count(&out), (1, 0));
+
+        // An edge shorter than 1 px on screen is skipped (1 map px at zoom 0.5).
+        let mut tiny = Network::new();
+        let a = tiny.add_node(0.0, 0.0, 0.0, NodeFlag::REGULAR);
+        let b = tiny.add_node(1.0, 0.0, 0.0, NodeFlag::REGULAR);
+        tiny.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        let mut view = MapView::default();
+        let out = frame(&ctx, &mut view, &tiny, g, size);
+        assert_eq!(count(&out), (0, 0));
+    }
+
+    /// Release timing of the view path on the fixture. Run by hand:
+    /// `cargo test -p ad-app --release -- --ignored frame_time --nocapture`
+    #[test]
+    #[ignore = "timing; run by hand in release"]
+    fn frame_time() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../AutoDrive_config.xml"
+        ))
+        .expect("fixture");
+        let cfg = ad_io::config_xml::load(&bytes).expect("loads");
+        let net = &cfg.network;
+        let geometry = MapGeometry::new(2.0);
+        let size = egui::vec2(1920.0, 1080.0);
+        let ctx = egui::Context::default();
+
+        // The densest 256x256 world-unit cell of a coarse grid over the map.
+        let mut dense_world = (0.0, 0.0);
+        let mut best = 0;
+        let mut ids = Vec::new();
+        for gx in 0..16 {
+            for gz in 0..16 {
+                let cx = -2048.0 + 256.0 * (f64::from(gx) + 0.5);
+                let cz = -2048.0 + 256.0 * (f64::from(gz) + 0.5);
+                net.nodes_in_rect_into(cx - 128.0, cz - 128.0, cx + 128.0, cz + 128.0, &mut ids);
+                if ids.len() > best {
+                    best = ids.len();
+                    dense_world = (cx, cz);
+                }
+            }
+        }
+        let dense = geometry.to_map(dense_world.0, dense_world.1);
+        println!("{} nodes; densest cell {best} nodes", net.order().len());
+
+        let run = |name: &str, steps: f64, at: (f64, f64)| {
+            let mut view = MapView::default();
+            // The first frame creates the transform at minimum zoom.
+            let _ = frame(&ctx, &mut view, net, geometry, size);
+            let t = view.transform.as_mut().expect("set");
+            t.center = at;
+            t.zoom_at((960.0, 540.0), steps);
+            let mut times = Vec::new();
+            for i in 0..40 {
+                let start = std::time::Instant::now();
+                let out = frame(&ctx, &mut view, net, geometry, size);
+                let _prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+                if i >= 10 {
+                    times.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            times.sort_by(|a, b| a.total_cmp(b));
+            println!(
+                "{name}: median {:.3} ms, max {:.3} ms",
+                times[times.len() / 2],
+                times[times.len() - 1]
+            );
+        };
+        run("min zoom, centre", -100.0, (1024.0, 1024.0));
+        run("mid zoom, dense", 6.0, dense);
+        run("max zoom, centre", 100.0, (1024.0, 1024.0));
+        run("max zoom, dense", 100.0, dense);
+    }
+}
