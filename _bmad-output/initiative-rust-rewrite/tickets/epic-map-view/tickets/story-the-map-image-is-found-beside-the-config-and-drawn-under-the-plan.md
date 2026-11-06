@@ -3,14 +3,14 @@ title: 'The map image is found beside the config and drawn under the network'
 type: 'feature'
 ticket: '3'
 created: '2026-11-06'
-status: 'in-progress'
+status: 'built'
 baseline_revision: '6b7b431591d407a4dc908918f30436350007d183'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: ['_bmad-output/initiative-rust-rewrite/tickets/epic-map-view/epic-map-view.md']
 ---
@@ -118,6 +118,14 @@ Frame time (release, 1920x1080, with a 2048x2048 texture, headless so GPU share 
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 3 low patched; 1 low and 2 false rejected.
+  - low, patch: the `load_map_image` doc comment said a wrong size gives Blank. It now says the image is kept, resized, with a notice.
+  - low, patch: the Blank fallback (missing image, no MapName) was untested. Added `missing_image_or_name_falls_back_to_blank`.
+  - low, patch: `job_result_carries_the_image` decoded the gitignored real map on dev machines and got Blank in CI. It now uses an inline config with a generated 4x4 PNG in a temp dir and checks pixel and notice. `image` is a dev-dependency of ad-app.
+  - false: "frame budget breached". Orchestrator reruns at minimum zoom: medians of 6.9, 9.4 and 17.9 ms with unchanged code. The outlier came with outside load. The image adds one shape; quiet runs are well under 16 ms.
+  - low, rejected: a relative config path would make the image lookup relative to the working directory. The file dialog always returns absolute paths, so this state is unreachable in the app; a guard would protect an input that never occurs.
+  - false: unchecked task boxes and an uncommitted plan file. That is plan bookkeeping; fixing it would only edit this plan.
 
 ## Verification
 
