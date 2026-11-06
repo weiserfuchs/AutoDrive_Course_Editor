@@ -56,3 +56,4 @@ The developer can open the FS25 fixture in the Rust editor and save it without l
 - Decision (2026-11-05): stories 6 and 8 are chained after 5 and 7 because they touch the same config I/O and app startup code.
 - Decision (2026-11-05): a config with an unknown game version opens read-only with a notice (architecture AD-11 amended).
 - Decision (2026-11-05): story 1 (setup) and story 2 (tracer) stay separate.
+- Decision (2026-11-06): story 10 added from retro B2 — a load that resets flags starts dirty.

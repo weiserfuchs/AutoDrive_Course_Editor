@@ -106,3 +106,15 @@ covers = []
 after = [2, 3, 4, 5, 6, 7, 8]
 hitl = false
 risk = "low"
+
+[[entry]]
+id = 10
+type = "story"
+title = "A config whose flags were reset on load opens with unsaved changes"
+description = "When an FS22 or FS25 load resets flags 2 and 4 to 0 on at least one node, the document starts dirty, so a close prompt or autosave treats it as changed. A config with no reset flags, an FS19 config and a read-only config start clean. The reset is not an undo step: undo cannot bring the old flags back, and a successful save makes the document clean."
+verify = "Unit tests with synthetic configs, loaded through the app's load path: FS25 with a flag 2 or 4 is dirty; FS25 without one is clean; FS19 with flag 2 is clean; legacy and unknown-version configs are clean and read-only; undo after load does nothing; a save of the reset document makes it clean."
+covers = ["R3", "R4"]
+after = [6, 7]
+hitl = false
+risk = "low"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-11--game-version-handling-lives-in-ad-io", "epic-core-config-roundtrip-retrospective.md#action-items"]
