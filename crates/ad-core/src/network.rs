@@ -14,6 +14,7 @@ mod markers;
 mod spatial;
 
 pub use markers::{Marker, MarkerDelta};
+pub use spatial::EdgeSegment;
 use spatial::{EdgeEntry, NodeEntry, edge_entry};
 
 /// Stable node identity. Monotonically increasing and never reused.

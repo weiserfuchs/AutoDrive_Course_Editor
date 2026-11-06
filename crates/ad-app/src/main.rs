@@ -2,15 +2,19 @@
 
 mod document;
 mod jobs;
+mod lod;
 mod startup;
+mod view;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use eframe::egui;
 
-use ad_io::settings::Settings;
+use ad_core::geometry::MapGeometry;
+use ad_io::settings::{MapSettings, Settings};
 use document::Document;
 use jobs::JobResult;
+use view::MapView;
 
 struct App {
     doc: Option<Document>,
@@ -22,6 +26,9 @@ struct App {
     saving: bool,
     error: Option<String>,
     settings: Settings,
+    view: MapView,
+    /// Epoch of the document the view was last reset for.
+    view_epoch: Option<u64>,
 }
 
 impl App {
@@ -36,6 +43,8 @@ impl App {
             saving: false,
             error: None,
             settings,
+            view: MapView::default(),
+            view_epoch: None,
         }
     }
 
@@ -98,54 +107,26 @@ impl App {
         );
     }
 
-    fn paint_network(&self, ui: &mut egui::Ui) {
-        let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::hover());
+    fn paint_network(&mut self, ui: &mut egui::Ui) {
         let Some(doc) = &self.doc else {
+            ui.allocate_space(ui.available_size());
             return;
         };
-        let net = &doc.config.network;
-        let (mut min_x, mut max_x, mut min_z, mut max_z) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-        for id in net.order() {
-            if let Some(n) = net.node(*id) {
-                min_x = min_x.min(n.x);
-                max_x = max_x.max(n.x);
-                min_z = min_z.min(n.z);
-                max_z = max_z.max(n.z);
-            }
+        if self.view_epoch != Some(doc.epoch) {
+            self.view.reset();
+            self.view_epoch = Some(doc.epoch);
         }
-        if net.is_empty() {
-            return;
-        }
-        let rect = response.rect.shrink(8.0);
-        let span_x = (max_x - min_x).max(1e-6);
-        let span_z = (max_z - min_z).max(1e-6);
-        let scale = (f64::from(rect.width()) / span_x).min(f64::from(rect.height()) / span_z);
-        let center = rect.center();
-        let to_screen = |x: f64, z: f64| {
-            egui::pos2(
-                center.x + ((x - (min_x + max_x) / 2.0) * scale) as f32,
-                center.y + ((z - (min_z + max_z) / 2.0) * scale) as f32,
-            )
-        };
-
-        let line = egui::Stroke::new(1.0, egui::Color32::from_gray(120));
-        let dot = egui::Color32::from_rgb(80, 200, 120);
-        for id in net.order() {
-            let Some(node) = net.node(*id) else {
-                continue;
-            };
-            let from = to_screen(node.x, node.z);
-            for target in node.outgoing() {
-                if let Some(t) = net.node(*target) {
-                    painter.line_segment([from, to_screen(t.x, t.z)], line);
-                }
-            }
-        }
-        for id in net.order() {
-            if let Some(node) = net.node(*id) {
-                painter.circle_filled(to_screen(node.x, node.z), 1.5, dot);
-            }
-        }
+        let scale = doc
+            .config
+            .map_name()
+            .and_then(|name| self.settings.maps.get(name))
+            .map_or_else(MapSettings::default, Clone::clone)
+            .scale;
+        self.view.show(
+            ui,
+            &doc.config.network,
+            MapGeometry::new(f64::from(scale.max(1))),
+        );
     }
 }
 

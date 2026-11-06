@@ -3,5 +3,6 @@
 //! This crate performs no I/O and has no UI dependencies (AD-1).
 
 pub mod command;
+pub mod geometry;
 pub mod history;
 pub mod network;

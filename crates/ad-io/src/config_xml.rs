@@ -114,6 +114,7 @@ pub struct LoadedConfig {
     game_version: GameVersion,
     read_only: Option<ReadOnlyReason>,
     flags_reset: bool,
+    map_name: Option<String>,
     pub network: Network,
 }
 
@@ -132,6 +133,18 @@ impl LoadedConfig {
     pub fn flags_reset(&self) -> bool {
         self.flags_reset
     }
+
+    /// The map name from `<MapName>`, without path and extension.
+    pub fn map_name(&self) -> Option<&str> {
+        self.map_name.as_deref()
+    }
+}
+
+/// `C:\maps\Foo.i3d` and `Foo.xml` both give `Foo`; an empty result is `None`.
+fn strip_map_name(raw: &str) -> Option<String> {
+    let file = raw.trim().rsplit(['/', '\\']).next().unwrap_or_default();
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    (!stem.is_empty()).then(|| stem.to_owned())
 }
 
 /// Minimal element tree for the two modelled blocks.
@@ -354,6 +367,7 @@ pub fn load(bytes: &[u8]) -> Result<LoadedConfig, ConfigError> {
     let mut mapmarker: Option<(Range<usize>, Elem)> = None;
     let mut root_end = None;
     let mut version_text: Option<String> = None;
+    let mut map_name_text: Option<String> = None;
     let mut legacy = false;
 
     loop {
@@ -374,6 +388,8 @@ pub fn load(bytes: &[u8]) -> Result<LoadedConfig, ConfigError> {
                     mapmarker = Some((before..reader.buffer_position() as usize + bom_len, elem));
                 } else if name == "version" && version_text.is_none() {
                     version_text = Some(read_elem(&mut reader, name)?.text);
+                } else if name == "MapName" && map_name_text.is_none() {
+                    map_name_text = Some(read_elem(&mut reader, name)?.text);
                 } else {
                     if name == "markerID" {
                         legacy = true;
@@ -460,6 +476,7 @@ pub fn load(bytes: &[u8]) -> Result<LoadedConfig, ConfigError> {
         game_version,
         read_only,
         flags_reset,
+        map_name: map_name_text.and_then(|t| strip_map_name(&t)),
         network,
     })
 }
@@ -644,6 +661,28 @@ pub fn save_to(cfg: &LoadedConfig, target: &Path) -> Result<(), ConfigError> {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_name_is_stripped_of_path_and_extension() {
+        let cases = [
+            ("NF_Marsch_4fach", Some("NF_Marsch_4fach")),
+            ("C:\\maps\\Foo.i3d", Some("Foo")),
+            ("Foo.xml", Some("Foo")),
+            ("", None),
+        ];
+        for (text, want) in cases {
+            let bytes = format!(
+                "<AutoDrive><MapName>{text}</MapName><version>3</version><waypoints><id></id><x></x><y></y><z></z><out></out><incoming></incoming><flags></flags></waypoints></AutoDrive>"
+            );
+            let cfg = load(bytes.as_bytes()).expect("loads");
+            assert_eq!(cfg.map_name(), want, "{text}");
+        }
+        let none = config(
+            "
+", false, "",
+        );
+        assert_eq!(load(&none).expect("loads").map_name(), None);
+    }
 
     fn lines(nl: &str, lines: &[&str]) -> String {
         lines.iter().map(|l| format!("{l}{nl}")).collect()
