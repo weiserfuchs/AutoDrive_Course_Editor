@@ -19,6 +19,14 @@ enum Position {
     After(EntryId),
 }
 
+/// A captured history position, to be marked saved later (AD-16). Opaque.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavePoint {
+    position: Position,
+    /// Entries evicted so far; tells whether a captured `Base` still means the same state.
+    evicted: u64,
+}
+
 #[derive(Debug)]
 struct Entry {
     id: EntryId,
@@ -32,6 +40,8 @@ pub struct History {
     cursor: usize,
     cap: usize,
     next_id: u64,
+    /// Number of entries evicted by the cap so far.
+    evicted: u64,
     /// `None` once the saved position is lost (evicted or discarded).
     saved: Option<Position>,
     /// While set, `apply` is refused and `undo`/`redo` do nothing.
@@ -52,6 +62,7 @@ impl History {
             cursor: 0,
             cap: cap.max(1),
             next_id: 0,
+            evicted: 0,
             saved: Some(Position::Base),
             read_only: false,
         }
@@ -98,6 +109,7 @@ impl History {
             && let Some(evicted) = self.entries.pop_front()
         {
             self.cursor -= 1;
+            self.evicted += 1;
             if matches!(self.saved, Some(Position::Base))
                 || self.saved == Some(Position::After(evicted.id))
             {
@@ -150,6 +162,25 @@ impl History {
 
     pub fn mark_saved(&mut self) {
         self.saved = Some(self.current());
+    }
+
+    /// Captures the current position, for a save that finishes later.
+    pub fn save_point(&self) -> SavePoint {
+        SavePoint {
+            position: self.current(),
+            evicted: self.evicted,
+        }
+    }
+
+    /// Marks a captured position as saved. If it no longer names the same state (its entry
+    /// was evicted or discarded, or entries were evicted since a `Base` capture), the saved
+    /// state is lost and the document stays dirty.
+    pub fn mark_saved_at(&mut self, point: SavePoint) {
+        let valid = match point.position {
+            Position::Base => point.evicted == self.evicted,
+            Position::After(id) => self.entries.iter().any(|e| e.id == id),
+        };
+        self.saved = valid.then_some(point.position);
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -342,6 +373,55 @@ mod tests {
         assert!(h.undo(&mut n));
         assert!(h.is_dirty());
         assert!(h.undo(&mut n));
+        assert!(h.is_dirty());
+    }
+
+    #[test]
+    fn save_point_after_edit_stays_dirty() {
+        let mut n = Network::new();
+        let mut h = History::default();
+        h.apply(&mut n, add(1.0)).expect("a");
+        let point = h.save_point();
+        h.apply(&mut n, add(2.0)).expect("b");
+        h.mark_saved_at(point);
+        assert!(h.is_dirty());
+        assert!(h.undo(&mut n));
+        assert!(!h.is_dirty());
+    }
+
+    #[test]
+    fn save_point_without_edit_is_clean() {
+        let mut n = Network::new();
+        let mut h = History::default();
+        h.apply(&mut n, add(1.0)).expect("a");
+        let point = h.save_point();
+        h.mark_saved_at(point);
+        assert!(!h.is_dirty());
+    }
+
+    #[test]
+    fn save_point_at_evicted_base_stays_dirty() {
+        let mut n = Network::new();
+        let mut h = History::new(1);
+        let point = h.save_point();
+        h.apply(&mut n, add(1.0)).expect("a");
+        h.apply(&mut n, add(2.0)).expect("b");
+        h.mark_saved_at(point);
+        assert!(h.is_dirty());
+        while h.undo(&mut n) {}
+        assert!(h.is_dirty());
+    }
+
+    #[test]
+    fn save_point_of_discarded_entry_stays_dirty() {
+        let mut n = Network::new();
+        let mut h = History::default();
+        h.apply(&mut n, add(1.0)).expect("a");
+        h.apply(&mut n, add(2.0)).expect("b");
+        let point = h.save_point();
+        assert!(h.undo(&mut n));
+        h.apply(&mut n, add(3.0)).expect("c");
+        h.mark_saved_at(point);
         assert!(h.is_dirty());
     }
 

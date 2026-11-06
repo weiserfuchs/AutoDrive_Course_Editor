@@ -1,69 +1,104 @@
 //! Shell layer: the eframe application.
 
-use std::path::PathBuf;
+mod document;
+mod jobs;
 
-use ad_io::config_xml::{self, LoadedConfig};
+use std::sync::mpsc::{self, Receiver, Sender};
+
 use eframe::egui;
 
-#[derive(Default)]
+use document::Document;
+use jobs::JobResult;
+
 struct App {
-    config: Option<LoadedConfig>,
-    path: Option<PathBuf>,
+    doc: Option<Document>,
+    /// Epoch of the newest document; each new document takes the next value (AD-18).
+    epoch_counter: u64,
+    tx: Sender<JobResult>,
+    rx: Receiver<JobResult>,
+    loading: bool,
+    saving: bool,
     error: Option<String>,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            doc: None,
+            epoch_counter: 0,
+            tx,
+            rx,
+            loading: false,
+            saving: false,
+            error: None,
+        }
+    }
+}
+
 impl App {
-    fn open(&mut self) {
+    /// Applies finished jobs. Called once per frame on the UI thread.
+    fn poll_jobs(&mut self) {
+        while let Ok(result) = self.rx.try_recv() {
+            match &result {
+                JobResult::Loaded { .. } => self.loading = false,
+                JobResult::Saved { .. } => self.saving = false,
+            }
+            if let Some(message) =
+                jobs::apply_result(&mut self.doc, &mut self.epoch_counter, result)
+            {
+                self.error = Some(message);
+            }
+        }
+    }
+
+    fn open(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("XML", &["xml"])
             .pick_file()
         else {
             return;
         };
-        let result = std::fs::read(&path)
-            .map_err(|e| format!("Cannot read {}: {e}", path.display()))
-            .and_then(|bytes| {
-                config_xml::load(&bytes).map_err(|e| format!("Cannot load {}: {e}", path.display()))
-            });
-        match result {
-            Ok(config) => {
-                self.config = Some(config);
-                self.path = Some(path);
-            }
-            Err(message) => self.error = Some(message),
-        }
+        self.loading = true;
+        let ctx = ctx.clone();
+        jobs::spawn_load(path, self.tx.clone(), move || ctx.request_repaint());
     }
 
-    fn save(&mut self) {
-        let Some(config) = &self.config else {
+    fn save(&mut self, ctx: &egui::Context) {
+        let Some(doc) = &self.doc else {
             return;
         };
-        if config.read_only().is_some() {
+        if doc.config.read_only().is_some() {
             return;
         }
         let mut dialog = rfd::FileDialog::new().add_filter("XML", &["xml"]);
-        if let Some(path) = &self.path {
-            if let Some(dir) = path.parent() {
-                dialog = dialog.set_directory(dir);
-            }
-            if let Some(name) = path.file_name() {
-                dialog = dialog.set_file_name(name.to_string_lossy());
-            }
+        if let Some(dir) = doc.path.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(name) = doc.path.file_name() {
+            dialog = dialog.set_file_name(name.to_string_lossy());
         }
         let Some(target) = dialog.save_file() else {
             return;
         };
-        if let Err(e) = config_xml::save_to(config, &target) {
-            self.error = Some(e.to_string());
-        }
+        self.saving = true;
+        let ctx = ctx.clone();
+        jobs::spawn_save(
+            doc.config.clone(),
+            doc.epoch,
+            doc.history.save_point(),
+            target,
+            self.tx.clone(),
+            move || ctx.request_repaint(),
+        );
     }
 
     fn paint_network(&self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::hover());
-        let Some(config) = &self.config else {
+        let Some(doc) = &self.doc else {
             return;
         };
-        let net = &config.network;
+        let net = &doc.config.network;
         let (mut min_x, mut max_x, mut min_z, mut max_z) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
         for id in net.order() {
             if let Some(n) = net.node(*id) {
@@ -111,22 +146,34 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_jobs();
+        let ctx = ui.ctx().clone();
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Open…").clicked() {
-                    self.open();
+                if ui
+                    .add_enabled(!self.loading, egui::Button::new("Open…"))
+                    .clicked()
+                {
+                    self.open(&ctx);
                 }
-                let editable = self
-                    .config
-                    .as_ref()
-                    .is_some_and(|c| c.read_only().is_none());
+                let editable = !self.saving
+                    && self
+                        .doc
+                        .as_ref()
+                        .is_some_and(|d| d.config.read_only().is_none());
                 if ui
                     .add_enabled(editable, egui::Button::new("Save"))
                     .clicked()
                 {
-                    self.save();
+                    self.save(&ctx);
                 }
-                if let Some(reason) = self.config.as_ref().and_then(|c| c.read_only()) {
+                if self.loading {
+                    ui.label("Loading…");
+                }
+                if self.saving {
+                    ui.label("Saving…");
+                }
+                if let Some(reason) = self.doc.as_ref().and_then(|d| d.config.read_only()) {
                     ui.colored_label(ui.visuals().warn_fg_color, reason.to_string());
                 }
             });
