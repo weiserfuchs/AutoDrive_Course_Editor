@@ -41,11 +41,50 @@ pub enum ConfigError {
     UnknownNode { element: String, value: String },
     #[error(transparent)]
     Network(#[from] NetworkError),
+    #[error("config is read-only: {0}")]
+    ReadOnly(ReadOnlyReason),
     #[error("cannot write {}: {source}", path.display())]
     Io {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// The game a config was written by, from the major of the root `<version>` (AD-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameVersion {
+    FS19,
+    FS22,
+    FS25,
+    Unknown,
+}
+
+impl GameVersion {
+    /// Major 1 is FS19, 2 is FS22, 3 is FS25; anything else is `Unknown`.
+    fn from_text(text: &str) -> Self {
+        match text
+            .trim()
+            .split('.')
+            .next()
+            .and_then(|m| m.parse::<u32>().ok())
+        {
+            Some(1) => Self::FS19,
+            Some(2) => Self::FS22,
+            Some(3) => Self::FS25,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Why a config can be viewed but not edited or saved.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ReadOnlyReason {
+    #[error(
+        "This config format is no longer supported (pre AutoDrive 1.1.0.6). Reload it in the game and save to update it. Viewing only."
+    )]
+    Legacy,
+    #[error("Unknown game version {0:?}. Viewing only.")]
+    UnknownVersion(String),
 }
 
 fn xml_err(e: impl std::fmt::Display) -> ConfigError {
@@ -72,7 +111,20 @@ pub struct LoadedConfig {
     base_indent: String,
     unit: String,
     child_order: Vec<String>,
+    game_version: GameVersion,
+    read_only: Option<ReadOnlyReason>,
     pub network: Network,
+}
+
+impl LoadedConfig {
+    pub fn game_version(&self) -> GameVersion {
+        self.game_version
+    }
+
+    /// `Some` when the config may be viewed but not edited or saved.
+    pub fn read_only(&self) -> Option<&ReadOnlyReason> {
+        self.read_only.as_ref()
+    }
 }
 
 /// Minimal element tree for the two modelled blocks.
@@ -199,9 +251,15 @@ fn parse_adjacency(
 
 const WAYPOINT_ELEMENTS: [&str; 7] = ["id", "x", "y", "z", "out", "incoming", "flags"];
 
-fn build_network(waypoints: &Elem, mapmarker: Option<&Elem>) -> Result<Network, ConfigError> {
+/// A read-only config is never saved, so unknown `<waypoints>` children are ignored.
+fn build_network(
+    waypoints: &Elem,
+    mapmarker: Option<&Elem>,
+    version: GameVersion,
+    read_only: bool,
+) -> Result<Network, ConfigError> {
     for c in &waypoints.children {
-        if !WAYPOINT_ELEMENTS.contains(&c.name.as_str()) {
+        if !read_only && !WAYPOINT_ELEMENTS.contains(&c.name.as_str()) {
             return Err(ConfigError::UnexpectedElement(
                 c.name.clone(),
                 waypoints.name.clone(),
@@ -240,7 +298,11 @@ fn build_network(waypoints: &Elem, mapmarker: Option<&Elem>) -> Result<Network, 
             x: xs[i],
             y: ys[i],
             z: zs[i],
-            flag: NodeFlag(flags[i]),
+            flag: NodeFlag(match (version, flags[i]) {
+                // FS22/FS25 keep spline flags 2 and 4, which the editor treats as regular.
+                (GameVersion::FS22 | GameVersion::FS25, 2 | 4) if !read_only => 0,
+                (_, f) => f,
+            }),
             outgoing,
             incoming,
         })
@@ -281,6 +343,8 @@ pub fn load(bytes: &[u8]) -> Result<LoadedConfig, ConfigError> {
     let mut waypoints: Option<(Range<usize>, Elem)> = None;
     let mut mapmarker: Option<(Range<usize>, Elem)> = None;
     let mut root_end = None;
+    let mut version_text: Option<String> = None;
+    let mut legacy = false;
 
     loop {
         let before = reader.buffer_position() as usize + bom_len;
@@ -298,10 +362,20 @@ pub fn load(bytes: &[u8]) -> Result<LoadedConfig, ConfigError> {
                 } else if name == "mapmarker" && mapmarker.is_none() {
                     let elem = read_elem(&mut reader, name)?;
                     mapmarker = Some((before..reader.buffer_position() as usize + bom_len, elem));
+                } else if name == "version" && version_text.is_none() {
+                    version_text = Some(read_elem(&mut reader, name)?.text);
                 } else {
+                    if name == "markerID" {
+                        legacy = true;
+                    }
                     reader.read_to_end(e.name()).map_err(xml_err)?;
                 }
             }
+            Event::Empty(e) if depth == 1 => match name_of(e.name().as_ref()).as_str() {
+                "markerID" => legacy = true,
+                "version" if version_text.is_none() => version_text = Some(String::new()),
+                _ => {}
+            },
             Event::Empty(e) if depth == 0 => {
                 return Err(ConfigError::UnexpectedRoot(name_of(e.name().as_ref())));
             }
@@ -319,7 +393,23 @@ pub fn load(bytes: &[u8]) -> Result<LoadedConfig, ConfigError> {
     let root_end = root_end.ok_or_else(|| xml_err("unexpected end of file in <AutoDrive>"))?;
     let (wp_range, wp_elem) =
         waypoints.ok_or_else(|| ConfigError::MissingElement("waypoints".to_owned()))?;
-    let network = build_network(&wp_elem, mapmarker.as_ref().map(|(_, e)| e))?;
+    let version_text = version_text.unwrap_or_default();
+    let game_version = GameVersion::from_text(&version_text);
+    let read_only = if legacy {
+        Some(ReadOnlyReason::Legacy)
+    } else if game_version == GameVersion::Unknown {
+        Some(ReadOnlyReason::UnknownVersion(
+            version_text.trim().to_owned(),
+        ))
+    } else {
+        None
+    };
+    let network = build_network(
+        &wp_elem,
+        mapmarker.as_ref().map(|(_, e)| e),
+        game_version,
+        read_only.is_some(),
+    )?;
 
     let mut child_order: Vec<String> = wp_elem.children.iter().map(|c| c.name.clone()).collect();
     if !child_order.iter().any(|n| n == "flags") {
@@ -357,6 +447,8 @@ pub fn load(bytes: &[u8]) -> Result<LoadedConfig, ConfigError> {
         base_indent,
         unit,
         child_order,
+        game_version,
+        read_only,
         network,
     })
 }
@@ -492,7 +584,10 @@ fn mapmarker_block(cfg: &LoadedConfig, file_ids: &SaveIdMap) -> String {
 }
 
 /// Regenerates the two modelled blocks and splices them into the original bytes.
-pub fn save(cfg: &LoadedConfig) -> Vec<u8> {
+pub fn save(cfg: &LoadedConfig) -> Result<Vec<u8>, ConfigError> {
+    if let Some(reason) = &cfg.read_only {
+        return Err(ConfigError::ReadOnly(reason.clone()));
+    }
     let file_ids = SaveIdMap::from_network(&cfg.network);
     let orig = &cfg.original;
     // Replacements as (source range, new bytes), spliced in source-byte order.
@@ -521,12 +616,13 @@ pub fn save(cfg: &LoadedConfig) -> Vec<u8> {
         pos = range.end;
     }
     out.extend_from_slice(&orig[pos..]);
-    out
+    Ok(out)
 }
 
 /// Writes the saved bytes to a temp file in the target's directory and renames it over
 /// the target. On any error the target is untouched and the temp file is removed.
 pub fn save_to(cfg: &LoadedConfig, target: &Path) -> Result<(), ConfigError> {
+    let bytes = save(cfg)?;
     let io_err = |source| ConfigError::Io {
         path: target.to_path_buf(),
         source,
@@ -547,7 +643,7 @@ pub fn save_to(cfg: &LoadedConfig, target: &Path) -> Result<(), ConfigError> {
     let tmp = dir.join(tmp_name);
     let result = std::fs::File::create(&tmp)
         .and_then(|mut file| {
-            std::io::Write::write_all(&mut file, &save(cfg))?;
+            std::io::Write::write_all(&mut file, &bytes)?;
             file.sync_all()
         })
         .and_then(|()| std::fs::rename(&tmp, target));
@@ -608,7 +704,7 @@ mod tests {
     fn roundtrip(bytes: &[u8]) -> LoadedConfig {
         let cfg = load(bytes).expect("loads");
         assert_eq!(
-            String::from_utf8_lossy(&save(&cfg)),
+            String::from_utf8_lossy(&save(&cfg).expect("saves")),
             String::from_utf8_lossy(bytes)
         );
         cfg
@@ -622,6 +718,108 @@ mod tests {
         let cfg = roundtrip(text.as_bytes());
         let second = cfg.network.order()[1];
         assert_eq!(cfg.network.node(second).map(|n| n.flag), Some(NodeFlag(7)));
+    }
+
+    fn with_version(version_line: &str) -> String {
+        String::from_utf8(config("\n", false, ""))
+            .expect("utf8")
+            .replace("    <version>3</version>\n", version_line)
+            .replace("<flags>0,1</flags>", "<flags>0,2,4,1</flags>")
+            .replace("<id>1,2</id>", "<id>1,2,3,4</id>")
+            .replace("<x>1.000,2.500</x>", "<x>1.000,2.500,3.000,4.000</x>")
+            .replace("<y>0.000,0.000</y>", "<y>0.000,0.000,0.000,0.000</y>")
+            .replace("<z>-3.250,4.000</z>", "<z>0.000,0.000,0.000,0.000</z>")
+            .replace("<out>2;-1</out>", "<out>-1;-1;-1;-1</out>")
+            .replace(
+                "<incoming>-1;1</incoming>",
+                "<incoming>-1;-1;-1;-1</incoming>",
+            )
+    }
+
+    fn flags_of(cfg: &LoadedConfig) -> Vec<u8> {
+        cfg.network
+            .order()
+            .iter()
+            .filter_map(|id| cfg.network.node(*id))
+            .map(|n| n.flag.0)
+            .collect()
+    }
+
+    #[test]
+    fn fs19_keeps_flags_and_roundtrips() {
+        let text = with_version("    <version>1.1.0.8</version>\n");
+        let cfg = roundtrip(text.as_bytes());
+        assert_eq!(cfg.game_version(), GameVersion::FS19);
+        assert!(cfg.read_only().is_none());
+        assert_eq!(flags_of(&cfg), [0, 2, 4, 1]);
+    }
+
+    #[test]
+    fn fs22_and_fs25_reset_spline_flags() {
+        for (v, expected) in [
+            ("2.0.0.5", GameVersion::FS22),
+            ("3.0.1.4", GameVersion::FS25),
+        ] {
+            let text = with_version(&format!("    <version>{v}</version>\n"));
+            let cfg = load(text.as_bytes()).expect("loads");
+            assert_eq!(cfg.game_version(), expected);
+            assert!(cfg.read_only().is_none());
+            assert_eq!(flags_of(&cfg), [0, 0, 0, 1]);
+            assert!(saved_text(&cfg).contains("<flags>0,0,0,1</flags>"));
+        }
+    }
+
+    #[test]
+    fn unknown_or_missing_version_is_read_only() {
+        let cases = [
+            ("    <version>4.0</version>\n", "4.0"),
+            ("    <version>abc</version>\n", "abc"),
+            ("    <version/>\n", ""),
+            ("", ""),
+        ];
+        for (line, text) in cases {
+            let cfg = load(with_version(line).as_bytes()).expect("loads");
+            assert_eq!(cfg.game_version(), GameVersion::Unknown, "{line}");
+            assert_eq!(
+                cfg.read_only(),
+                Some(&ReadOnlyReason::UnknownVersion(text.to_owned()))
+            );
+            assert_eq!(flags_of(&cfg), [0, 2, 4, 1]);
+            assert!(matches!(
+                save(&cfg),
+                Err(ConfigError::ReadOnly(ReadOnlyReason::UnknownVersion(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_marker_id_is_read_only() {
+        for tag in ["<markerID>1</markerID>", "<markerID/>"] {
+            let text = with_version("    <version>3.0.1.4</version>\n")
+                .replace("<waypoints>", &format!("{tag}\n    <waypoints>"))
+                .replace("<flags>", "<extra>1</extra>\n        <flags>");
+            let cfg = load(text.as_bytes()).expect("loads");
+            assert_eq!(cfg.read_only(), Some(&ReadOnlyReason::Legacy), "{tag}");
+            assert_eq!(cfg.network.len(), 4);
+            assert_eq!(flags_of(&cfg), [0, 2, 4, 1]);
+            assert!(matches!(
+                save(&cfg),
+                Err(ConfigError::ReadOnly(ReadOnlyReason::Legacy))
+            ));
+        }
+    }
+
+    #[test]
+    fn read_only_save_to_writes_nothing() {
+        let dir = scratch_dir("ro");
+        let target = dir.join("AutoDrive_config.xml");
+        let cfg = load(with_version("    <version>4.0</version>\n").as_bytes()).expect("loads");
+        assert!(matches!(
+            save_to(&cfg, &target),
+            Err(ConfigError::ReadOnly(_))
+        ));
+        assert_eq!(std::fs::read_dir(&dir).expect("ls").count(), 0);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
@@ -731,7 +929,7 @@ mod tests {
 
     fn three_node_config(extra: &str) -> Vec<u8> {
         format!(
-            "<AutoDrive>\n    <waypoints>\n        <id>1,2,3</id>\n        <x>1.000,2.000,3.000</x>\n        <y>0.000,0.000,0.000</y>\n        <z>0.000,0.000,0.000</z>\n        <out>2,3;3;-1</out>\n        <incoming>-1;1;2,1</incoming>\n        <flags>0,0,0</flags>\n    </waypoints>\n{extra}</AutoDrive>\n"
+            "<AutoDrive>\n    <version>3</version>\n    <waypoints>\n        <id>1,2,3</id>\n        <x>1.000,2.000,3.000</x>\n        <y>0.000,0.000,0.000</y>\n        <z>0.000,0.000,0.000</z>\n        <out>2,3;3;-1</out>\n        <incoming>-1;1;2,1</incoming>\n        <flags>0,0,0</flags>\n    </waypoints>\n{extra}</AutoDrive>\n"
         )
         .into_bytes()
     }
@@ -747,7 +945,7 @@ mod tests {
     }
 
     fn saved_text(cfg: &LoadedConfig) -> String {
-        String::from_utf8(save(cfg)).expect("utf8")
+        String::from_utf8(save(cfg).expect("saves")).expect("utf8")
     }
 
     #[test]

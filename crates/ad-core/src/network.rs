@@ -100,6 +100,8 @@ pub enum NetworkError {
     SelfConnection(NodeId),
     #[error("adjacency index {index} is out of range for {len} loaded nodes")]
     IndexOutOfRange { index: usize, len: usize },
+    #[error("the config is read-only")]
+    ReadOnly,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -38,6 +38,9 @@ impl App {
         let Some(config) = &self.config else {
             return;
         };
+        if config.read_only().is_some() {
+            return;
+        }
         let mut dialog = rfd::FileDialog::new().add_filter("XML", &["xml"]);
         if let Some(path) = &self.path {
             if let Some(dir) = path.parent() {
@@ -113,11 +116,18 @@ impl eframe::App for App {
                 if ui.button("Open…").clicked() {
                     self.open();
                 }
+                let editable = self
+                    .config
+                    .as_ref()
+                    .is_some_and(|c| c.read_only().is_none());
                 if ui
-                    .add_enabled(self.config.is_some(), egui::Button::new("Save"))
+                    .add_enabled(editable, egui::Button::new("Save"))
                     .clicked()
                 {
                     self.save();
+                }
+                if let Some(reason) = self.config.as_ref().and_then(|c| c.read_only()) {
+                    ui.colored_label(ui.visuals().warn_fg_color, reason.to_string());
                 }
             });
         });

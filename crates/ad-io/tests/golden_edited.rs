@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use ad_core::command::{AddNode, Command, Connect, DeleteNodes, EditMarker, Transaction};
 use ad_core::history::History;
 use ad_core::network::{ConnectionKind, ConnectionShape, Network, NodeFlag, NodeId};
-use ad_io::config_xml::{load, save_to};
+use ad_io::config_xml::{GameVersion, load, save_to};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -71,6 +71,8 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
     let original = std::fs::read(&fixture)?;
     let mut cfg = load(&original)?;
+    assert_eq!(cfg.game_version(), GameVersion::FS25);
+    assert!(cfg.read_only().is_none());
     let order: Vec<NodeId> = cfg.network.order().to_vec();
 
     // A node that some other node lists in `out` without listing it back in `incoming`.

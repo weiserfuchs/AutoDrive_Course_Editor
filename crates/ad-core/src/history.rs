@@ -34,6 +34,8 @@ pub struct History {
     next_id: u64,
     /// `None` once the saved position is lost (evicted or discarded).
     saved: Option<Position>,
+    /// While set, `apply` is refused and `undo`/`redo` do nothing.
+    read_only: bool,
 }
 
 impl Default for History {
@@ -51,7 +53,17 @@ impl History {
             cap: cap.max(1),
             next_id: 0,
             saved: Some(Position::Base),
+            read_only: false,
         }
+    }
+
+    /// Gate for read-only documents (AD-11).
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     fn current(&self) -> Position {
@@ -68,6 +80,9 @@ impl History {
         net: &mut Network,
         mut tx: Transaction,
     ) -> Result<EntryId, NetworkError> {
+        if self.read_only {
+            return Err(NetworkError::ReadOnly);
+        }
         tx.apply(net)?;
         if let Some(Position::After(saved)) = self.saved
             && self.entries.iter().skip(self.cursor).any(|e| e.id == saved)
@@ -93,15 +108,18 @@ impl History {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.cursor > 0
+        !self.read_only && self.cursor > 0
     }
 
     pub fn can_redo(&self) -> bool {
-        self.cursor < self.entries.len()
+        !self.read_only && self.cursor < self.entries.len()
     }
 
     /// Returns false when there is nothing to undo, or the revert failed.
     pub fn undo(&mut self, net: &mut Network) -> bool {
+        if self.read_only {
+            return false;
+        }
         let Some(index) = self.cursor.checked_sub(1) else {
             return false;
         };
@@ -117,6 +135,9 @@ impl History {
 
     /// Returns false when there is nothing to redo, or the apply failed.
     pub fn redo(&mut self, net: &mut Network) -> bool {
+        if self.read_only {
+            return false;
+        }
         let Some(entry) = self.entries.get_mut(self.cursor) else {
             return false;
         };
@@ -152,6 +173,39 @@ mod tests {
             0.0,
             NodeFlag::REGULAR,
         ))])
+    }
+
+    #[test]
+    fn read_only_history_refuses_commands() {
+        let (mut n, _) = linked();
+        let mut h = History::default();
+        h.apply(&mut n, add(1.0)).expect("apply");
+        assert!(h.undo(&mut n));
+        let before = snap(&n);
+        h.set_read_only(true);
+        assert!(h.is_read_only());
+        assert!(!h.can_undo() && !h.can_redo());
+        assert_eq!(h.apply(&mut n, add(2.0)), Err(NetworkError::ReadOnly));
+        assert!(!h.redo(&mut n));
+        assert_eq!(snap(&n), before);
+        h.set_read_only(false);
+        assert!(h.redo(&mut n));
+        h.set_read_only(true);
+        assert!(!h.undo(&mut n));
+        h.set_read_only(false);
+        assert!(h.undo(&mut n));
+        assert_eq!(snap(&n), before);
+    }
+
+    #[test]
+    fn read_only_apply_pushes_nothing() {
+        let (mut n, _) = linked();
+        let before = snap(&n);
+        let mut h = History::default();
+        h.set_read_only(true);
+        assert_eq!(h.apply(&mut n, add(1.0)), Err(NetworkError::ReadOnly));
+        assert_eq!(snap(&n), before);
+        assert!(!h.can_undo() && !h.is_dirty());
     }
 
     #[test]
