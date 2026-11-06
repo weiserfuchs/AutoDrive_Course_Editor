@@ -22,7 +22,10 @@ Editor for AutoDrive route networks (AutoDrive_config.xml) of Farming Simulator.
 ## Running and verifying
 
 - Maven is not installed here: do not try to build or run the Java editor; port from reading the source.
-- TODO (Rust/egui, not yet created): record the crate location and any non-obvious build/run command here on the first refresh after the Rust project exists.
+- **Rust workspace:** `crates/ad-core` holds the model, commands and history, with no I/O and no UI. `crates/ad-io` holds the config XML and the settings. `crates/ad-app` is the eframe app. `rust-toolchain.toml` pins the toolchain.
+- **Checks (CI runs the same):** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+- **The app:** `cargo run -p ad-app --release`. It opens and saves only through file dialogs, so checks in the GUI need a human.
+- **Settings and logs:** `%APPDATA%\AutoDrive Course Editor\config\settings.toml` and `...\data\logs\`.
 - Verify load/save with `AutoDrive_config.xml` (FS25); FS19/FS22 compatibility is not required for testing.
 
 <!-- /bmad:context -->
