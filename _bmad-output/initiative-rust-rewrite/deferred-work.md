@@ -13,3 +13,39 @@
 - source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/tickets/story-refactor-sweep-plan.md`
   summary: Align the AGENTS.md Policy merge gate ("cargo build, cargo test and cargo clippy") with CI, which also runs `cargo fmt --all --check` and clippy with `-D warnings`.
   evidence: The gate predates this sweep. An agent that follows Policy alone can merge code that CI then fails on fmt or on clippy warnings. The fix edits agent-context, so it is deferred.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/epic-core-config-roundtrip-retrospective.md`
+  summary: (Retro B4) The in-memory network keeps dangling `incoming` ids after a delete, and the edited golden test cannot catch a regression because save and its `model()` both drop unknown ids; the consistency scan (epic-scans-autosave) should find or repair them.
+  evidence: `golden_edited.rs:22,41`, `config_xml.rs:506`, `network.rs:514-519`; verified in the epic retrospective.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/epic-core-config-roundtrip-retrospective.md`
+  summary: (Retro B5) A panic inside a load or save job leaves Open or Save disabled for good, behind a "crashed" dialog while the window is still alive.
+  evidence: `jobs.rs` spawn helpers never send a result after a panic, so `loading`/`saving` stay true; 1.7 triage deferred it to story 8, which did not solve it.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/epic-core-config-roundtrip-retrospective.md`
+  summary: (Retro B6) Deeply nested XML inside `<waypoints>` or `<mapmarker>` overflows the job thread's stack in the recursive `read_elem`, aborting with no log and no dialog; add a depth limit that returns a typed error (AD-12).
+  evidence: Recursion verified at `config_xml.rs` `read_elem`; a stack overflow is not caught by the panic hook.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/epic-core-config-roundtrip-retrospective.md`
+  summary: (Retro B7) A self-closing `<mapmarker/>` counts as missing, so Save inserts a second mapmarker block.
+  evidence: Verified in the retrospective; whether the game ever writes that form is unknown (only the FS25 fixture is available).
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/epic-core-config-roundtrip-retrospective.md`
+  summary: (Retro B8) Several markers on one node load, but `EditMarker` changes only the first; AD-17 says at most one marker per node. The markers epic decides.
+  evidence: `network.rs` marker lookup and `EditMarker` apply; seen in the retrospective's boundary review.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/epic-core-config-roundtrip-retrospective.md`
+  summary: (Retro S1) Split `network.rs` (about 1,320 lines) into spatial and markers modules before epic-map-view adds queries.
+  evidence: `crates/ad-core/src/network.rs` holds id types, kind derivation, markers, undo deltas, adjacency, two R-trees, five queries and a polygon helper.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/epic-core-config-roundtrip-retrospective.md`
+  summary: (Retro A2) Extend the AD-1 dependency check so `ad-io` cannot pick up UI crates, and consider a separate CI step for it.
+  evidence: `crates/ad-core/tests/dependency_boundary.rs` checks only `ad-core`, and runs inside `cargo test`.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/epic-core-config-roundtrip-retrospective.md`
+  summary: (Retro R4) Every Save is a Save As (a dialog prefilled with the path); AD-16 distinguishes Save and Save As. For epic-settings-ui-shell.
+  evidence: `crates/ad-app/src/main.rs` `save` always opens the file dialog.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-core-config-roundtrip/epic-core-config-roundtrip-retrospective.md`
+  summary: (Retro P2) `ad-app` carries errors as `String`, there is no string table for UI text, and the command is `AddNode` where the conventions say `AddNodes`. For epic-settings-ui-shell or the tools epic.
+  evidence: `jobs.rs` `JobResult`, `main.rs` `error`, `command.rs` `AddNode`.

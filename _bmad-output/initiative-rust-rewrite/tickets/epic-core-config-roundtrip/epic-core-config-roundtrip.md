@@ -8,6 +8,7 @@ companions: [_bmad-output/initiative-rust-rewrite/architecture-rust-rewrite/arch
 after: []
 refined: true
 risk: high
+status: done
 ---
 
 # FS25 configs load, display and save losslessly
@@ -57,3 +58,4 @@ The developer can open the FS25 fixture in the Rust editor and save it without l
 - Decision (2026-11-05): a config with an unknown game version opens read-only with a notice (architecture AD-11 amended).
 - Decision (2026-11-05): story 1 (setup) and story 2 (tracer) stay separate.
 - Decision (2026-11-06): story 10 added from retro B2 — a load that resets flags starts dirty.
+- Decision (2026-11-06): epic closed. The closure check found R1–R4 and every Done-when line met, with CI green on 9b24a46. Retro open items stay open outside the epic; the deferred findings B4–B8, S1, A2, R4 and P2 are in deferred-work.md.
