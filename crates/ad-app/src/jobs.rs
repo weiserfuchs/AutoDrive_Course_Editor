@@ -126,7 +126,7 @@ mod tests {
 
     use ad_core::command::{AddNode, Command, Transaction};
     use ad_core::history::History;
-    use ad_core::network::NodeFlag;
+    use ad_core::network::{NetworkError, NodeFlag};
 
     use super::*;
 
@@ -172,6 +172,27 @@ mod tests {
             target: PathBuf::from("target.xml"),
             result,
         }
+    }
+
+    #[test]
+    fn read_only_config_gets_a_gated_history() {
+        let legacy =
+            inline_text("1.000,2.500").replace("<version>3</version>", "<markerID>1</markerID>");
+        let config = config_xml::load(legacy.as_bytes()).expect("legacy loads");
+        assert_eq!(
+            config.read_only(),
+            Some(&config_xml::ReadOnlyReason::Legacy)
+        );
+        let (mut doc, mut counter) = (None, 0);
+        let result = JobResult::Loaded {
+            path: fixture_path(),
+            result: Ok(Box::new(config)),
+        };
+        assert_eq!(apply_result(&mut doc, &mut counter, 500, result), None);
+        let d = doc.as_mut().expect("doc");
+        assert!(d.history.is_read_only());
+        assert_eq!(d.apply(edit()), Err(NetworkError::ReadOnly));
+        assert!(!d.history.can_undo() && !d.is_dirty());
     }
 
     #[test]
