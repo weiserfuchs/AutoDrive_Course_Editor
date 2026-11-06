@@ -1,6 +1,8 @@
 //! Anchors and grid lines of the icons, marker names and grid as pure functions
 //! (Java `NodeDrawThread` 110-139, `MapPanel.drawGrid`). Nothing here paints.
 
+use crate::lod::MIN_GRID_PX;
+
 /// The grid shows only above this zoom (Java).
 pub const GRID_MIN_ZOOM: f64 = 2.0;
 /// Opaque grid line colour (Java `Color(25, 25, 25)`).
@@ -35,6 +37,12 @@ pub fn grid_visible(on: bool, zoom: f64) -> bool {
     on && zoom > GRID_MIN_ZOOM
 }
 
+/// Whether lines `spacing` world units apart are far enough apart on screen. Zoom is screen
+/// px per map px; one world unit is `1 / scale` map px.
+pub fn grid_spacing_visible(spacing: f64, zoom: f64, scale: f64) -> bool {
+    spacing * zoom / scale >= MIN_GRID_PX
+}
+
 /// Whole multiples of `spacing` in `min..=max`.
 pub fn grid_lines(spacing: f64, min: f64, max: f64) -> impl Iterator<Item = f64> {
     let first = (min / spacing).ceil() as i64;
@@ -67,6 +75,16 @@ mod tests {
         assert!(grid_visible(true, 2.5));
         assert!(!grid_visible(true, 2.0));
         assert!(!grid_visible(false, 5.0));
+    }
+
+    #[test]
+    fn dense_grid_is_skipped() {
+        // 0.1 world units at zoom 2.5 and scale 1 are 0.25 px apart.
+        assert!(!grid_spacing_visible(0.1, 2.5, 1.0));
+        assert!(grid_spacing_visible(2.0, 2.5, 1.0));
+        // Scale 2 halves the on-screen spacing: 2 * 2.5 / 2 = 2.5 px.
+        assert!(!grid_spacing_visible(2.0, 2.5, 2.0));
+        assert!(grid_spacing_visible(4.0, 2.5, 2.0));
     }
 
     #[test]

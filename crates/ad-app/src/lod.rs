@@ -4,6 +4,8 @@
 pub const MIN_NODE_PX: f64 = 2.0;
 /// Connections shorter than this many pixels on screen are not drawn.
 pub const MIN_EDGE_PX: f64 = 1.0;
+/// Grid lines closer than this many pixels on screen are not drawn.
+pub const MIN_GRID_PX: f64 = 4.0;
 /// Zoom factor of one wheel step.
 pub const ZOOM_STEP: f64 = 1.6;
 /// Largest zoom, in screen pixels per map pixel.

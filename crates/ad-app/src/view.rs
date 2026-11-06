@@ -236,12 +236,20 @@ impl MapView {
             let mut mesh = egui::Mesh::default();
             let (top, bottom) = (to_screen(x0, z0).1 as f32, to_screen(x0, z1).1 as f32);
             let (left, right) = (to_screen(x0, z0).0 as f32, to_screen(x1, z0).0 as f32);
-            for x in overlay::grid_lines(self.grid.0, x0, x1) {
+            let (sx_ok, sz_ok) = (
+                overlay::grid_spacing_visible(self.grid.0, t.zoom, geometry.scale),
+                overlay::grid_spacing_visible(self.grid.1, t.zoom, geometry.scale),
+            );
+            for x in
+                overlay::grid_lines(self.grid.0, x0, x1).take(if sx_ok { usize::MAX } else { 0 })
+            {
                 let sx = to_screen(x, z0).0 as f32;
                 let (a, b) = (egui::pos2(sx - 0.5, top), egui::pos2(sx + 0.5, bottom));
                 mesh.add_colored_rect(egui::Rect::from_min_max(a, b), colour);
             }
-            for z in overlay::grid_lines(self.grid.1, z0, z1) {
+            for z in
+                overlay::grid_lines(self.grid.1, z0, z1).take(if sz_ok { usize::MAX } else { 0 })
+            {
                 let sy = to_screen(x0, z).1 as f32;
                 let (a, b) = (egui::pos2(left, sy - 0.5), egui::pos2(right, sy + 0.5));
                 mesh.add_colored_rect(egui::Rect::from_min_max(a, b), colour);

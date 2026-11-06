@@ -23,7 +23,9 @@ pub fn rasterise(svg: &[u8], px: u32) -> Option<egui::ColorImage> {
         let mut db = usvg::fontdb::Database::new();
         db.load_system_fonts();
         // The parking icon names Lato, which is not installed everywhere: use a sans font.
+        // usvg resolves the unknown "Lato-Bold" to the serif family, so set both.
         db.set_sans_serif_family("Arial");
+        db.set_serif_family("Arial");
         std::sync::Arc::new(db)
     });
     let options = usvg::Options {
@@ -38,7 +40,10 @@ pub fn rasterise(svg: &[u8], px: u32) -> Option<egui::ColorImage> {
             return None;
         }
     };
-    let mut pixmap = tiny_skia::Pixmap::new(px, px)?;
+    let Some(mut pixmap) = tiny_skia::Pixmap::new(px, px) else {
+        tracing::error!("icon size {px} is not valid");
+        return None;
+    };
     let size = tree.size();
     let transform =
         tiny_skia::Transform::from_scale(px as f32 / size.width(), px as f32 / size.height());
