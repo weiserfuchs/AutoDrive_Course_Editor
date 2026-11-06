@@ -36,8 +36,8 @@ pub fn blank() -> MapImage {
     }
 }
 
-/// Decodes and scales the file. A broken file gives Blank and a notice; so does a wrong size
-/// (the image is resized, the notice names the original size).
+/// Decodes and scales the file. A broken file gives Blank and a notice; a wrong size keeps the
+/// image, resized to 2048x2048, with a notice naming the original size.
 pub fn load_map_image(path: &Path) -> (MapImage, Option<String>) {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,

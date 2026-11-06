@@ -134,6 +134,7 @@ dependencies = [
  "ad-io",
  "directories",
  "eframe",
+ "image",
  "rfd",
  "tracing",
  "tracing-appender",

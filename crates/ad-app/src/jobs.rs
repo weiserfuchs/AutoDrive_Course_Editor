@@ -458,10 +458,48 @@ mod tests {
         assert!(doc.is_some_and(|d| !d.config.network.is_empty()));
     }
 
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ad_app_jobs_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    fn named(text: &str) -> String {
+        text.replace("<AutoDrive>", "<AutoDrive><MapName>Tiny</MapName>")
+    }
+
     #[test]
     fn job_result_carries_the_image() {
-        let (_, image, _) = load_file(&fixture_path(), None).expect("loads");
-        assert_eq!(image.rgba.len(), 2048 * 2048 * 4);
+        let dir = temp_dir("carries");
+        let folder = dir.join("mapImages").join("Tiny");
+        std::fs::create_dir_all(&folder).expect("folder");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+            .save(folder.join("Tiny.png"))
+            .expect("png");
+        let config = dir.join("AutoDrive_config.xml");
+        std::fs::write(&config, named(&inline_text("1.000,2.500"))).expect("write");
+        let loaded = load_file(&config, None);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        let (_, image, notice) = loaded.expect("loads");
+        assert_ne!(image, map_image::blank());
+        assert_eq!(&image.rgba[..4], &[1, 2, 3, 255]);
+        assert!(notice.expect("notice").contains("Tiny.png"));
+    }
+
+    #[test]
+    fn missing_image_or_name_falls_back_to_blank() {
+        let dir = temp_dir("fallback");
+        let config = dir.join("AutoDrive_config.xml");
+        for text in [
+            named(&inline_text("1.000,2.500")),
+            inline_text("1.000,2.500"),
+        ] {
+            std::fs::write(&config, text).expect("write");
+            let (_, image, notice) = load_file(&config, None).expect("loads");
+            assert_eq!((image, notice), (map_image::blank(), None));
+        }
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
