@@ -8,7 +8,6 @@ use ad_core::history::History;
 use ad_core::map_context::MapContext;
 use ad_core::network::{ConnectionShape, Network, NodeFlag, NodeId};
 
-use crate::App;
 use crate::input::{self, Action};
 use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
@@ -18,6 +17,7 @@ use crate::tools::node::NodeTool;
 use crate::tools::priority::PriorityTool;
 use crate::tools::{Tool, ToolContext};
 use crate::view::{DragEvent, MapPx, ViewHooks, ViewTransform};
+use crate::{App, Choice, Pending};
 
 /// The top bar: Open, Save, the Grid toggle and the status labels.
 pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -27,7 +27,7 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 .add_enabled(!app.loading && !app.saving, egui::Button::new("Open…"))
                 .clicked()
             {
-                app.open(ctx);
+                app.request(Pending::Open, ctx);
             }
             // Load and save never overlap: either could read or replace the same file.
             let editable = !app.saving
@@ -259,5 +259,37 @@ pub(crate) fn error_window(app: &mut App, ctx: &egui::Context) {
         if !open {
             app.error = None;
         }
+    }
+}
+
+/// The unsaved-changes prompt: Save (not for a read-only document), Discard or Cancel.
+/// Its backdrop keeps the pointer off the map while it is shown.
+pub(crate) fn unsaved_prompt(app: &mut App, ctx: &egui::Context) {
+    if app.prompt.is_none() {
+        return;
+    }
+    let editable = app.editable();
+    let can_save = !app.saving && !app.loading;
+    let mut choice = None;
+    egui::Modal::new(egui::Id::unique("unsaved_prompt")).show(ctx, |ui| {
+        ui.label("The document has unsaved changes.");
+        ui.horizontal(|ui| {
+            if editable
+                && ui
+                    .add_enabled(can_save, egui::Button::new("Save"))
+                    .clicked()
+            {
+                choice = Some(Choice::Save);
+            }
+            if ui.button("Discard").clicked() {
+                choice = Some(Choice::Discard);
+            }
+            if ui.button("Cancel").clicked() {
+                choice = Some(Choice::Cancel);
+            }
+        });
+    });
+    if let Some(choice) = choice {
+        app.choose(choice, ctx);
     }
 }
