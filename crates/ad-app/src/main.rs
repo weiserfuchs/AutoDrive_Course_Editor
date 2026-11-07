@@ -3,11 +3,13 @@
 mod document;
 mod hover;
 mod icons;
+mod input;
 mod jobs;
 mod lod;
 mod look;
 mod overlay;
 mod startup;
+mod ui;
 mod view;
 
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -122,96 +124,16 @@ impl App {
             move || ctx.request_repaint(),
         );
     }
-
-    fn paint_network(&mut self, ui: &mut egui::Ui) {
-        let Some(doc) = &mut self.doc else {
-            self.view.clear_hover();
-            ui.allocate_space(ui.available_size());
-            return;
-        };
-        if self.view_epoch != Some(doc.epoch) {
-            self.view.reset();
-            self.view_epoch = Some(doc.epoch);
-        }
-        // Upload once per document, then drop the CPU copy (AD-14).
-        if let Some(image) = doc.map_image.take() {
-            let color = egui::ColorImage::from_rgba_unmultiplied([2048, 2048], &image.rgba);
-            doc.map_texture = Some(ui.ctx().load_texture(
-                "map_image",
-                color,
-                egui::TextureOptions::LINEAR,
-            ));
-        }
-        self.view.grid = doc.map.grid;
-        self.view.show(
-            ui,
-            &doc.config.network,
-            doc.map.geometry,
-            doc.map.node_size,
-            doc.map_texture.as_ref().map(egui::TextureHandle::id),
-            // Tools draw here, on top of the view.
-            |_, _, _| {},
-        );
-    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_jobs();
         let ctx = ui.ctx().clone();
-        if ctx.input(|i| i.key_pressed(egui::Key::F4)) {
-            self.view.show_node_id = !self.view.show_node_id;
-        }
-        egui::Panel::top("top_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!self.loading && !self.saving, egui::Button::new("Open…"))
-                    .clicked()
-                {
-                    self.open(&ctx);
-                }
-                // Load and save never overlap: either could read or replace the same file.
-                let editable = !self.saving
-                    && !self.loading
-                    && self
-                        .doc
-                        .as_ref()
-                        .is_some_and(|d| d.config.read_only().is_none());
-                if ui
-                    .add_enabled(editable, egui::Button::new("Save"))
-                    .clicked()
-                {
-                    self.save(&ctx);
-                }
-                ui.checkbox(&mut self.view.show_grid, "Grid");
-                if self.loading {
-                    ui.label("Loading…");
-                }
-                if self.saving {
-                    ui.label("Saving…");
-                }
-                if let Some(reason) = self.doc.as_ref().and_then(|d| d.config.read_only()) {
-                    ui.colored_label(ui.visuals().warn_fg_color, reason.to_string());
-                }
-                if let Some(notice) = self.doc.as_ref().and_then(|d| d.notice.as_deref()) {
-                    ui.colored_label(ui.visuals().warn_fg_color, notice);
-                }
-            });
-        });
-        egui::CentralPanel::default().show(ui, |ui| self.paint_network(ui));
-
-        if let Some(message) = self.error.clone() {
-            let mut open = true;
-            egui::Window::new("Error")
-                .open(&mut open)
-                .collapsible(false)
-                .show(ui.ctx(), |ui| {
-                    ui.label(message);
-                });
-            if !open {
-                self.error = None;
-            }
-        }
+        input::handle_shortcuts(self, &ctx);
+        ui::top_bar(self, ui, &ctx);
+        egui::CentralPanel::default().show(ui, |ui| ui::map_panel(self, ui));
+        ui::error_window(self, &ctx);
     }
 }
 

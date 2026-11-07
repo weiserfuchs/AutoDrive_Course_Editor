@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use ad_core::command::{AddNode, Command, Connect, DeleteNodes, EditMarker, Transaction};
+use ad_core::command::{AddNodes, Command, Connect, DeleteNodes, EditMarker, Transaction};
 use ad_core::history::History;
 use ad_core::network::{ConnectionKind, ConnectionShape, Network, NodeFlag, NodeId};
 use ad_io::config_xml::{GameVersion, load, save_to};
@@ -107,12 +107,12 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
     // The add runs in its own transaction because `Connect` needs the new node's id.
     history.apply(
         &mut cfg.network,
-        Transaction::new(vec![Command::AddNode(AddNode::new(
+        Transaction::new(vec![Command::AddNodes(AddNodes::new(vec![(
             12.5,
             3.25,
             -40.125,
             NodeFlag(0),
-        ))]),
+        )]))]),
     )?;
     let added = *cfg.network.order().last().ok_or("empty")?;
 
