@@ -25,7 +25,9 @@ struct Drag {
     /// The grabbed node's previewed world (x, z).
     target: (f64, f64),
     /// The grabbed node's allowed target range (x0, x1, z0, z1): ±half narrowed by the
-    /// group's extent, so no moved node leaves the map and the group keeps its shape.
+    /// group's extent, so no moved node leaves the map and the group keeps its shape. It
+    /// always holds the start, so a node already outside never makes the group move on its
+    /// own; it can only move back toward the map.
     range: (f64, f64, f64, f64),
     /// Every moved node with its stored position when the drag started.
     moved: Vec<(NodeId, Position)>,
@@ -106,10 +108,10 @@ impl Tool for MoveTool {
             grab_offset: (n.x - ctx.x, n.z - ctx.z),
             target: (n.x, n.z),
             range: (
-                -half + (n.x - x0),
-                half - (x1 - n.x),
-                -half + (n.z - z0),
-                half - (z1 - n.z),
+                n.x.min(-half + (n.x - x0)),
+                n.x.max(half - (x1 - n.x)),
+                n.z.min(-half + (n.z - z0)),
+                n.z.max(half - (z1 - n.z)),
             ),
             preview: moved.iter().map(|&(id, (x, _, z))| (id, (x, z))).collect(),
             moved,
@@ -128,7 +130,6 @@ impl Tool for MoveTool {
             half_extent(ctx.map.geometry),
             ctx.snap.then_some(ctx.map.grid),
         );
-        // max/min, not clamp: a group wider than the map (bad data) must not panic.
         let (x0, x1, z0, z1) = d.range;
         d.target = (x.max(x0).min(x1), z.max(z0).min(z1));
         let (dx, dz) = (d.target.0 - d.origin.0, d.target.1 - d.origin.1);
@@ -447,6 +448,24 @@ mod tests {
         let moves = group_drag(&net, &map, &selection, b, &[(10.0, -1023.0)], true).expect("moves");
         let after: Vec<_> = moves.iter().map(|m| (m.2.0, m.2.2)).collect();
         assert_eq!(after, [(0.0, -1024.0), (10.0, -1019.0), (-20.0, -1016.0)]);
+    }
+
+    #[test]
+    fn a_node_stored_past_the_edge_never_moves_the_group_on_its_own() {
+        let (mut net, [a, b, _, _], map) = group();
+        let e = net.add_node(1100.0, 6.0, 0.0, NodeFlag::REGULAR);
+        let selection = BTreeSet::from([a, b, e]);
+        // Released where it started: nothing commits.
+        assert!(group_drag(&net, &map, &selection, b, &[(10.0, 5.0)], false).is_none());
+        // Outwards on x the group cannot go; z still follows.
+        assert!(group_drag(&net, &map, &selection, b, &[(30.0, 5.0)], false).is_none());
+        let moves = group_drag(&net, &map, &selection, b, &[(30.0, 20.0)], false).expect("moves");
+        let after: Vec<_> = moves.iter().map(|m| (m.2.0, m.2.2)).collect();
+        assert_eq!(after, [(0.0, 15.0), (10.0, 20.0), (1100.0, 15.0)]);
+        // Inwards it moves, with e still outside the map.
+        let moves = group_drag(&net, &map, &selection, b, &[(-50.0, 5.0)], false).expect("moves");
+        let after: Vec<_> = moves.iter().map(|m| (m.2.0, m.2.2)).collect();
+        assert_eq!(after, [(-60.0, 0.0), (-50.0, 5.0), (1040.0, 0.0)]);
     }
 
     #[test]
