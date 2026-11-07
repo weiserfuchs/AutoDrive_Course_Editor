@@ -9,7 +9,11 @@ use crate::App;
 pub(crate) enum Action {
     NodeTool,
     MoveTool,
+    /// Selects the regular connect tool, then cycles regular, dual, reverse.
+    ConnectTool,
     ToggleSnap,
+    /// Continuous connections: after a commit the end node starts the next link.
+    ToggleContinuous,
     Undo,
     Redo,
     ToggleNodeId,
@@ -19,7 +23,7 @@ pub(crate) enum Action {
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 7] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 10] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -37,8 +41,21 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 7] = [
         KeyboardShortcut::new(Modifiers::NONE, Key::M),
     ),
     (
+        Action::ConnectTool,
+        KeyboardShortcut::new(Modifiers::NONE, Key::L),
+    ),
+    (
         Action::ToggleSnap,
         KeyboardShortcut::new(Modifiers::NONE, Key::S),
+    ),
+    (
+        Action::ToggleContinuous,
+        KeyboardShortcut::new(Modifiers::NONE, Key::Semicolon),
+    ),
+    // Layouts such as German type `;` with Shift, and egui reports it with Shift held.
+    (
+        Action::ToggleContinuous,
+        KeyboardShortcut::new(Modifiers::SHIFT, Key::Semicolon),
     ),
     (
         Action::ToggleNodeId,
@@ -124,6 +141,15 @@ mod tests {
         assert_eq!(press(Modifiers::NONE, Key::M), [Action::MoveTool]);
         assert_eq!(press(Modifiers::NONE, Key::S), [Action::ToggleSnap]);
         assert_eq!(press(Modifiers::NONE, Key::Delete), [Action::DeleteHovered]);
+        assert_eq!(press(Modifiers::NONE, Key::L), [Action::ConnectTool]);
+        assert_eq!(
+            press(Modifiers::NONE, Key::Semicolon),
+            [Action::ToggleContinuous]
+        );
+        assert_eq!(
+            press(Modifiers::SHIFT, Key::Semicolon),
+            [Action::ToggleContinuous]
+        );
     }
 
     #[test]
@@ -151,5 +177,8 @@ mod tests {
         assert!(press(CTRL, Key::S).is_empty());
         assert!(press(Modifiers::SHIFT, Key::M).is_empty());
         assert!(press(CTRL, Key::Delete).is_empty());
+        assert!(press(Modifiers::SHIFT, Key::L).is_empty());
+        assert!(press(CTRL, Key::L).is_empty());
+        assert!(press(CTRL, Key::Semicolon).is_empty());
     }
 }
