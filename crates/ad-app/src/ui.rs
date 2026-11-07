@@ -12,6 +12,7 @@ use crate::App;
 use crate::input::{self, Action};
 use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
+use crate::tools::flip::FlipTool;
 use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
 use crate::tools::priority::PriorityTool;
@@ -66,12 +67,13 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
-    let tools: [Box<dyn Tool>; 8] = [
+    let tools: [Box<dyn Tool>; 9] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
         Box::new(DeleteTool),
         Box::new(PriorityTool),
+        Box::new(FlipTool),
         Box::new(ConnectTool::new(ConnectionShape::OneWay, continuous)),
         Box::new(ConnectTool::new(ConnectionShape::Dual, continuous)),
         Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous)),
@@ -176,6 +178,12 @@ impl ViewHooks for ToolHooks<'_> {
 
     fn preview(&self) -> Option<(NodeId, f64, f64)> {
         self.tool.as_deref().and_then(Tool::preview)
+    }
+
+    fn highlights_edge(&self, edge: (NodeId, NodeId)) -> bool {
+        self.tool
+            .as_deref()
+            .is_some_and(|tool| tool.acts_on_edge(self.net, edge))
     }
 
     fn paint(

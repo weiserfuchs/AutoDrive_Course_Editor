@@ -3,6 +3,7 @@
 
 pub mod connect;
 pub mod delete;
+pub mod flip;
 pub mod move_node;
 pub mod node;
 pub mod priority;
@@ -79,6 +80,12 @@ pub trait Tool {
 
     /// Continuous connections were turned on or off; only the connect tools use it.
     fn set_continuous(&mut self, _on: bool) {}
+
+    /// Whether a click on the connection `(from, to)` would act on it; only such a hovered
+    /// connection is highlighted.
+    fn acts_on_edge(&self, _net: &Network, _edge: (NodeId, NodeId)) -> bool {
+        true
+    }
 
     /// Drops any uncommitted preview; nothing commits.
     fn cancel(&mut self);

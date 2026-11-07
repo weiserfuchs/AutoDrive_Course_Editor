@@ -258,6 +258,50 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .iter()
         .position(|id| *id == flagged)
         .ok_or("flag node")?;
+    // The flip tool: a one-way link between nodes no other edit touches turns around.
+    let busy = [&touched[..], &[rev_a, rev_b, flagged]].concat();
+    let (flip_a, flip_b) = cfg
+        .network
+        .order()
+        .iter()
+        .filter(|id| !busy.contains(id))
+        .filter_map(|a| cfg.network.node(*a).map(|n| (*a, n)))
+        .flat_map(|(a, n)| n.outgoing().iter().map(move |b| (a, *b)))
+        .find(|(a, b)| {
+            !busy.contains(b)
+                && cfg
+                    .network
+                    .node(*b)
+                    .is_some_and(|nb| nb.incoming().contains(a) && !nb.outgoing().contains(a))
+                && cfg
+                    .network
+                    .node(*a)
+                    .is_some_and(|na| !na.incoming().contains(b))
+        })
+        .ok_or("fixture has no free one-way link")?;
+    assert_ne!(
+        cfg.network.connection_kind(flip_a, flip_b),
+        ConnectionKind::None
+    );
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![
+            Command::Disconnect(Disconnect::new(flip_a, flip_b)),
+            Command::Connect(Connect::new(flip_b, flip_a, ConnectionShape::OneWay)),
+        ]),
+    )?;
+    let flipped = (
+        cfg.network
+            .order()
+            .iter()
+            .position(|id| *id == flip_a)
+            .ok_or("flip node")?,
+        cfg.network
+            .order()
+            .iter()
+            .position(|id| *id == flip_b)
+            .ok_or("flip node")?,
+    );
     let shaped_kind = cfg.network.connection_kind(shape_a, shape_b);
     assert_ne!(shaped_kind, old_kind);
     let index_of = |id: NodeId| cfg.network.order().iter().position(|n| *n == id);
@@ -329,5 +373,11 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
             .flag,
         new_flag
     );
+    let (fa, fb) = (net.order()[flipped.0], net.order()[flipped.1]);
+    assert_eq!(net.connection_kind(fa, fb), ConnectionKind::None);
+    let back = net.node(fb).ok_or("flip node")?;
+    assert!(back.outgoing().contains(&fa));
+    assert!(net.node(fa).ok_or("flip node")?.incoming().contains(&fb));
+    assert!(!back.incoming().contains(&fa));
     Ok(())
 }

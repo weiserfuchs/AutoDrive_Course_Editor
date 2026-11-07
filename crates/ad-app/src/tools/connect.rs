@@ -64,7 +64,7 @@ pub fn cycled(active: Option<&dyn Tool>, continuous: bool) -> ConnectTool {
 }
 
 /// Whether the links between `a` and `b` are exactly `shape` from `a` to `b`.
-fn is_exactly(net: &Network, a: NodeId, b: NodeId, shape: ConnectionShape) -> bool {
+pub(crate) fn is_exactly(net: &Network, a: NodeId, b: NodeId, shape: ConnectionShape) -> bool {
     let (Some(na), Some(nb)) = (net.node(a), net.node(b)) else {
         return false;
     };
