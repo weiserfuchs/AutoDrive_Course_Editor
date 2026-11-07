@@ -8,6 +8,7 @@ companions: []
 after: []
 refined: true
 risk: medium
+status: done
 ---
 
 # Users edit nodes and connections
@@ -63,3 +64,4 @@ A course author edits the FS25 fixture's nodes and connections with the toolbar 
 - Decision (2026-11-07): R15's budget while dragging nodes moved here from epic-map-view (its decision of 2026-11-06).
 - Decision (2026-11-07): build order 10 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9, one lane. Story 10 is an opening refactor that moves the UI wiring out of main.rs (and renames AddNode to AddNodes, retro P2), so the tracer stays thin. Story 1 is the tracer: Tool trait, toolbar, shortcut table and the node tool through every layer. Story 2 (dragging) comes next as the least certain path, and 3 measures it. The stories share command.rs, the shortcut table and golden_edited.rs, so they run in sequence; 7 also waits on 4 for the edge hit-test rule.
 - Note: node warnings today are only "no height" (y == -1); Network keeps that set current on every mutation, so warnings follow each edit without extra work.
+- Decision (2026-11-07): epic closed after the closure check. The user checked every tool story by hand on the FS25 fixture; read-only rejection rests on per-tool unit tests (no legacy config at hand), accepted by the user; rotate and the multi-node tool variants stay with epic-selection-clipboard.
