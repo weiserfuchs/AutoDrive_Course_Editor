@@ -3,7 +3,7 @@ title: 'UI wiring moves out of main.rs and AddNode becomes AddNodes'
 type: 'refactor'
 ticket: '10'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: 'c395e2c0fd94f1eedbbcc4e017d15ca19f2c890e'
 route: 'full'
 route_source: 'auto'

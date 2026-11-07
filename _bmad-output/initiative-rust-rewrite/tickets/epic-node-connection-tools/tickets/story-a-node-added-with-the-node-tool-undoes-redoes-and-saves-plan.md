@@ -3,7 +3,7 @@ title: 'A node added with the node tool undoes, redoes and saves'
 type: 'feature'
 ticket: '1'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: '1352f7866c887fc26155e1199d3ef8a3a2778659'
 route: 'full'
 route_source: 'auto'
