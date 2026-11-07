@@ -13,8 +13,8 @@ pub(crate) enum Action {
     ToggleNodeId,
 }
 
-/// The shortcut table. egui ignores extra Shift when matching, so a shortcut with Shift
-/// comes before the same one without it: Ctrl+Shift+Z must not be read as Ctrl+Z.
+/// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
+/// and Shift+N or Alt+N do nothing.
 pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 4] = [
     (
         Action::Redo,
@@ -34,12 +34,23 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 4] = [
     ),
 ];
 
+/// Consumes the presses of `shortcut` whose modifiers match it exactly (egui's
+/// `consume_shortcut` ignores extra Shift and Alt). Returns whether there was one.
+fn consume_exact(i: &mut egui::InputState, shortcut: &KeyboardShortcut) -> bool {
+    let before = i.events.len();
+    i.events.retain(|e| {
+        !matches!(e, egui::Event::Key { key, modifiers, pressed: true, .. }
+            if *key == shortcut.logical_key && modifiers.matches_exact(shortcut.modifiers))
+    });
+    i.events.len() != before
+}
+
 /// The actions pressed this frame, in table order; their key presses are consumed.
 pub(crate) fn pressed(ctx: &egui::Context) -> Vec<Action> {
     ctx.input_mut(|i| {
         SHORTCUTS
             .iter()
-            .filter(|(_, shortcut)| i.consume_shortcut(shortcut))
+            .filter(|(_, shortcut)| consume_exact(i, shortcut))
             .map(|(action, _)| *action)
             .collect()
     })
@@ -91,5 +102,14 @@ mod tests {
     fn plain_z_and_shift_z_do_nothing() {
         assert!(press(Modifiers::NONE, Key::Z).is_empty());
         assert!(press(Modifiers::SHIFT, Key::Z).is_empty());
+        assert!(press(CTRL.plus(Modifiers::ALT), Key::Z).is_empty());
+    }
+
+    #[test]
+    fn extra_modifiers_do_not_fire_n_or_f4() {
+        assert!(press(Modifiers::SHIFT, Key::N).is_empty());
+        assert!(press(Modifiers::ALT, Key::N).is_empty());
+        assert!(press(CTRL, Key::N).is_empty());
+        assert!(press(Modifiers::SHIFT, Key::F4).is_empty());
     }
 }

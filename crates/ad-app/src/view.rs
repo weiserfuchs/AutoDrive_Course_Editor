@@ -1328,7 +1328,8 @@ mod tests {
             let mut rounds = Vec::new();
             for _ in 0..ROUNDS {
                 prepare(&mut view);
-                // With `hover`, the pointer rests on the lowest-id node within 300 px of the panel centre.
+                // With `hover`, the pointer rests on the lowest-id node within 300 px of screen
+                // point (960, 540), the window centre; the top bar puts it above the panel centre.
                 let pointer = hover.then(|| {
                     let t = *view.transform.as_ref().expect("set");
                     let mut ids = Vec::new();
