@@ -133,7 +133,8 @@ impl App {
                 }
             }
             Choice::Discard => self.proceed(action, ctx),
-            Choice::Cancel => {}
+            // Also drops an action still waiting for an earlier save.
+            Choice::Cancel => self.pending = None,
         }
     }
 
@@ -150,6 +151,14 @@ impl App {
             self.prompt = Some(action);
         } else {
             self.proceed(action, ctx);
+        }
+    }
+
+    /// Cancels a window close while the document is dirty and asks first.
+    fn intercept_close(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.prompt = Some(Pending::Close);
         }
     }
 
@@ -371,10 +380,7 @@ impl eframe::App for App {
         self.poll_jobs();
         let ctx = ui.ctx().clone();
         self.resume(&ctx);
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.prompt = Some(Pending::Close);
-        }
+        self.intercept_close(&ctx);
         let title = window_title(self.doc.as_ref());
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -1181,6 +1187,62 @@ mod tests {
         app.resume(&ctx);
         assert!(app.pending.is_none());
         assert!(app.allow_close);
+    }
+
+    #[test]
+    fn cancel_drops_a_close_waiting_for_a_running_save() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        edit(&mut app);
+        // Save was picked earlier; the save runs, and a second close is answered Cancel.
+        app.pending = Some(Pending::Close);
+        app.saving = true;
+        app.request(Pending::Close, &ctx);
+        app.choose(Choice::Cancel, &ctx);
+        let doc = app.doc.as_ref().expect("doc");
+        let saved = JobResult::Saved {
+            epoch: doc.epoch,
+            point: doc.history.save_point(),
+            target: PathBuf::from("b.xml"),
+            result: Ok(()),
+        };
+        app.tx.send(saved).expect("send");
+        app.poll_jobs();
+        app.resume(&ctx);
+        assert!(app.pending.is_none() && app.prompt.is_none());
+        assert!(!app.allow_close);
+    }
+
+    /// Runs one frame with a close request for the root viewport through `intercept_close`;
+    /// returns whether the frame sent `CancelClose`.
+    fn close_frame(app: &mut App) -> bool {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let mut output = ctx.run_ui(input, |ui| app.intercept_close(ui.ctx()));
+        // No painter applies the font texture here; epaint asserts it was handled.
+        output.textures_delta.clear();
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose))
+    }
+
+    #[test]
+    fn a_window_close_is_cancelled_only_while_dirty() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        assert!(!close_frame(&mut app));
+        assert!(app.prompt.is_none());
+        edit(&mut app);
+        assert!(close_frame(&mut app));
+        assert_eq!(app.prompt, Some(Pending::Close));
     }
 
     #[test]
