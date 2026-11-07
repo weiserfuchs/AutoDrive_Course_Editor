@@ -179,6 +179,9 @@ impl MapView {
         self.hovered_edge = None;
     }
 
+    /// Draws the view and handles pan and zoom. A primary or middle drag pans (Java's
+    /// default); a primary click is returned as the clicked map pixel for the active tool.
+    /// The overlay hook gets the pointer's screen position while it is over the view.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -186,13 +189,13 @@ impl MapView {
         geometry: MapGeometry,
         node_size: f64,
         map_texture: Option<egui::TextureId>,
-        overlay_hook: impl FnOnce(&egui::Painter, &ViewTransform, MapGeometry),
-    ) {
+        overlay_hook: impl FnOnce(&egui::Painter, &ViewTransform, MapGeometry, Option<egui::Pos2>),
+    ) -> Option<(f64, f64)> {
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let rect = response.rect;
         if rect.width() < 1.0 || rect.height() < 1.0 {
-            return;
+            return None;
         }
         let panel_center = (f64::from(rect.center().x), f64::from(rect.center().y));
         let panel_size = (f64::from(rect.width()), f64::from(rect.height()));
@@ -207,6 +210,12 @@ impl MapView {
             let d = response.drag_delta();
             transform.pan(f64::from(d.x), f64::from(d.y));
         }
+        // A click is a press and release without a drag, so it never pans.
+        let clicked = response
+            .clicked_by(egui::PointerButton::Primary)
+            .then(|| response.interact_pointer_pos())
+            .flatten()
+            .map(|p| transform.screen_to_map(f64::from(p.x), f64::from(p.y)));
         if response.hovered() {
             let steps: f32 = ui.input(|i| {
                 i.events
@@ -240,7 +249,8 @@ impl MapView {
             self.paint_info_box(&painter, net, geometry, &t, ns, id, rect);
         }
         // Last, so tools draw on top of everything.
-        overlay_hook(&painter, &t, geometry);
+        overlay_hook(&painter, &t, geometry, response.hover_pos());
+        clicked
     }
 
     /// The info box of the hovered node, beside it and inside the panel.
@@ -618,7 +628,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
-            view.show(ui, net, geometry, node_size, texture, |_, _, _| {});
+            view.show(ui, net, geometry, node_size, texture, |_, _, _, _| {});
         });
         // No renderer here, so there is nothing to upload.
         out.textures_delta.clear();
@@ -1060,7 +1070,7 @@ mod tests {
         };
         let g = MapGeometry::new(1.0);
         let mut out = ctx.run_ui(input, |ui| {
-            view.show(ui, &net, g, 2.0, None, |painter, t, geometry| {
+            view.show(ui, &net, g, 2.0, None, |painter, t, geometry, _| {
                 seen = Some((t.zoom, geometry));
                 painter.rect_filled(marker, 0.0, egui::Color32::YELLOW);
             });
@@ -1069,6 +1079,114 @@ mod tests {
         assert_eq!(seen, Some((10.0, g)));
         let last = out.shapes.last().expect("shapes");
         assert!(matches!(&last.shape, egui::Shape::Rect(r) if r.rect == marker));
+    }
+
+    type MapPx = (f64, f64);
+
+    /// Runs one frame per event list with `button` and returns what `show` reported in
+    /// each, and the view centre after the last.
+    fn pointer_frames(
+        button: egui::PointerButton,
+        frames: Vec<Vec<egui::Event>>,
+    ) -> (Vec<Option<MapPx>>, MapPx) {
+        let ctx = egui::Context::default();
+        let net = Network::new();
+        let g = MapGeometry::new(1.0);
+        let mut view = view_at(&ctx, &net, g, 2.0);
+        let mut reported = Vec::new();
+        for (i, events) in frames.into_iter().enumerate() {
+            let events = events
+                .into_iter()
+                .map(|e| match e {
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        modifiers,
+                        ..
+                    } => egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed,
+                        modifiers,
+                    },
+                    e => e,
+                })
+                .collect();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                time: Some(i as f64 * 0.016),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                reported.push(view.show(ui, &net, g, 2.0, None, |_, _, _, _| {}));
+            });
+            out.textures_delta.clear();
+        }
+        let centre = view.transform.as_ref().expect("set").center;
+        (reported, centre)
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn primary_click_reports_the_map_pixel() {
+        let p = egui::pos2(612.0, 412.0);
+        let (reported, centre) = pointer_frames(
+            egui::PointerButton::Primary,
+            vec![
+                vec![egui::Event::PointerMoved(p)],
+                vec![press(p, true)],
+                vec![press(p, false)],
+                vec![],
+            ],
+        );
+        // Zoom 2 about the centre (1024, 1024): 100 screen px are 50 map px.
+        assert_eq!(reported, [None, None, Some((1074.0, 974.0)), None]);
+        assert_eq!(centre, (1024.0, 1024.0));
+    }
+
+    #[test]
+    fn drags_pan_and_never_click() {
+        for button in [egui::PointerButton::Primary, egui::PointerButton::Middle] {
+            let (a, b) = (egui::pos2(500.0, 500.0), egui::pos2(560.0, 500.0));
+            let (reported, centre) = pointer_frames(
+                button,
+                vec![
+                    vec![egui::Event::PointerMoved(a)],
+                    vec![press(a, true)],
+                    vec![egui::Event::PointerMoved(b)],
+                    vec![press(b, false)],
+                    vec![],
+                ],
+            );
+            assert!(reported.iter().all(Option::is_none), "{button:?}");
+            assert_eq!(centre, (994.0, 1024.0), "{button:?}");
+        }
+    }
+
+    #[test]
+    fn secondary_click_is_not_reported() {
+        let p = egui::pos2(612.0, 412.0);
+        let (reported, _) = pointer_frames(
+            egui::PointerButton::Secondary,
+            vec![
+                vec![egui::Event::PointerMoved(p)],
+                vec![press(p, true)],
+                vec![press(p, false)],
+            ],
+        );
+        assert!(reported.iter().all(Option::is_none));
     }
 
     /// Vertices of the meshes painted in the grid colour.
@@ -1154,10 +1272,37 @@ mod tests {
 
         const ROUNDS: usize = 3;
         const FRAMES: usize = 30;
+        // The app's top bar (with the toolbar) and an active node tool painting its preview.
+        let app = std::cell::RefCell::new(crate::App::new(ad_io::settings::Settings::default()));
+        app.borrow_mut().tool = Some(Box::new(crate::tools::node::NodeTool::new(
+            ad_core::network::NodeFlag::REGULAR,
+        )));
         // One timed frame: tessellation included.
         let timed = |view: &mut MapView, pointer: Option<egui::Pos2>| {
             let start = std::time::Instant::now();
-            let out = frame_hover(&ctx, view, net, geometry, 2.0, size, Some(texture), pointer);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let mut app = app.borrow_mut();
+                crate::ui::top_bar(&mut app, ui, &ctx);
+                let tool = app.tool.as_deref();
+                view.show(
+                    ui,
+                    net,
+                    geometry,
+                    2.0,
+                    Some(texture),
+                    |painter, t, g, cursor| {
+                        if let Some(tool) = tool {
+                            tool.paint(painter, t, g, cursor);
+                        }
+                    },
+                );
+            });
+            out.textures_delta.clear();
             let _prims = ctx.tessellate(out.shapes, out.pixels_per_point);
             start.elapsed().as_secs_f64() * 1000.0
         };
@@ -1178,12 +1323,13 @@ mod tests {
                 show_marker_names: true,
                 ..MapView::default()
             };
-            // The first frame creates the transform at minimum zoom.
-            let _ = frame(&ctx, &mut view, net, geometry, size, Some(texture));
+            // The first frame creates the transform at minimum zoom, below the top bar.
+            let _ = timed(&mut view, None);
             let mut rounds = Vec::new();
             for _ in 0..ROUNDS {
                 prepare(&mut view);
-                // With `hover`, the pointer rests on the lowest-id node within 300 px of the panel centre.
+                // With `hover`, the pointer rests on the lowest-id node within 300 px of screen
+                // point (960, 540), the window centre; the top bar puts it above the panel centre.
                 let pointer = hover.then(|| {
                     let t = *view.transform.as_ref().expect("set");
                     let mut ids = Vec::new();

@@ -2,7 +2,13 @@
 
 use eframe::egui;
 
+use ad_core::history::History;
+use ad_core::network::NodeFlag;
+
 use crate::App;
+use crate::input::Action;
+use crate::tools::Tool;
+use crate::tools::node::NodeTool;
 
 /// The top bar: Open, Save, the Grid toggle and the status labels.
 pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -28,6 +34,9 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 app.save(ctx);
             }
             ui.checkbox(&mut app.view.show_grid, "Grid");
+            ui.separator();
+            toolbar(app, ui);
+            ui.separator();
             if app.loading {
                 ui.label("Loading…");
             }
@@ -42,6 +51,38 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             }
         });
     });
+}
+
+/// The tool buttons, Undo and Redo; all disabled without an editable document (AD-11).
+fn toolbar(app: &mut App, ui: &mut egui::Ui) {
+    let editable = app.editable();
+    let active = app.tool.as_ref().map(|t| t.name());
+    for flag in [NodeFlag::REGULAR, NodeFlag::SUB_PRIO] {
+        let tool = NodeTool::new(flag);
+        let selected = active == Some(tool.name());
+        let button = egui::Button::selectable(selected, tool.name());
+        if ui.add_enabled(editable, button).clicked() {
+            // A click on the active tool turns it off.
+            app.set_tool((!selected).then(|| Box::new(tool) as Box<dyn Tool>));
+        }
+    }
+    let history = app.doc.as_ref().map(|d| &d.history);
+    let can_undo = editable && history.is_some_and(History::can_undo);
+    let can_redo = editable && history.is_some_and(History::can_redo);
+    if ui
+        .add_enabled(can_undo, egui::Button::new("Undo"))
+        .on_hover_text("Ctrl+Z")
+        .clicked()
+    {
+        app.run(Action::Undo);
+    }
+    if ui
+        .add_enabled(can_redo, egui::Button::new("Redo"))
+        .on_hover_text("Ctrl+Shift+Z")
+        .clicked()
+    {
+        app.run(Action::Redo);
+    }
 }
 
 /// The map view of the open document, with the overlay hook tools draw into.
@@ -65,15 +106,23 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
         ));
     }
     app.view.grid = doc.map.grid;
-    app.view.show(
+    let tool = app.tool.as_deref();
+    let clicked = app.view.show(
         ui,
         &doc.config.network,
         doc.map.geometry,
         doc.map.node_size,
         doc.map_texture.as_ref().map(egui::TextureHandle::id),
         // Tools draw here, on top of the view.
-        |_, _, _| {},
+        |painter, t, geometry, cursor| {
+            if let Some(tool) = tool {
+                tool.paint(painter, t, geometry, cursor);
+            }
+        },
     );
+    if let Some((px, py)) = clicked {
+        app.click(px, py);
+    }
 }
 
 /// The error window, shown until the user closes it.

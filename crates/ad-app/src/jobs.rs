@@ -147,8 +147,8 @@ pub fn spawn_save(
     });
 }
 
-/// The single place a document is replaced (AD-18). Later stories clear tool preview,
-/// selection and hover here.
+/// The single place a document is replaced (AD-18). The new epoch makes `App::poll_jobs`
+/// cancel the active tool; later stories clear selection and hover here.
 pub fn replace_document(
     doc: &mut Option<Document>,
     epoch_counter: &mut u64,
