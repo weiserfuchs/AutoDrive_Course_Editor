@@ -1833,5 +1833,82 @@ mod tests {
             },
             false,
         );
+        // The lowest-id node of the densest cell is dragged with the move tool, 40 px per frame
+        // back and forth, and the view draws the preview. The tool gets the drag directly, so
+        // this times drawing the preview, not the view's press hit test (one R-tree query).
+        net.nodes_in_rect_into(
+            dense_world.0 - 128.0,
+            dense_world.1 - 128.0,
+            dense_world.0 + 128.0,
+            dense_world.1 + 128.0,
+            &mut ids,
+        );
+        ids.sort();
+        let dragged = *ids.first().expect("a node in the dense cell");
+        let start = net.node(dragged).map(|n| (n.x, n.z)).expect("node");
+        let tool_ctx = |x, z| crate::tools::ToolContext {
+            x,
+            z,
+            map: &map,
+            net,
+            snap: false,
+        };
+        let offset = std::cell::Cell::new(0.0);
+        // The view is centred on the dragged node, so it stays on screen at maximum zoom.
+        let start_px = geometry.to_map(start.0, start.1);
+        let (app_ref, offset_ref, ctx_ref) = (&app, &offset, &tool_ctx);
+        let begin_drag = |steps: f64| {
+            move |v: &mut MapView| {
+                at(start_px, steps)(v);
+                let mut tool = crate::tools::move_node::MoveTool::default();
+                let tool_ref: &mut dyn crate::tools::Tool = &mut tool;
+                assert!(tool_ref.on_drag_start(&ctx_ref(start.0, start.1), Some(dragged)));
+                app_ref.borrow_mut().tool = Some(Box::new(tool));
+                offset_ref.set(0.0);
+            }
+        };
+        // A triangle about the start, from the frame index alone so warm-up and timed frames
+        // run the same path: 0 → +320 px → -280 px → -40 px, 40 px per frame.
+        let drag_px = |i: usize| {
+            let i = i as f64;
+            40.0 * if i < 8.0 {
+                i
+            } else if i < 23.0 {
+                16.0 - i
+            } else {
+                i - 30.0
+            }
+        };
+        let drag_step = |v: &mut MapView, i: usize| {
+            let zoom = v.transform.as_ref().expect("set").zoom;
+            offset.set(drag_px(i) / zoom * geometry.scale);
+            let mut app = app.borrow_mut();
+            let tool = app.tool.as_deref_mut().expect("move tool");
+            tool.on_drag(&tool_ctx(start.0 + offset.get(), start.1));
+            // The preview follows the pointer: the drag never reaches the map edge here.
+            let (_, px, _) = tool.preview().expect("preview");
+            assert!((px - (start.0 + offset.get())).abs() < 1e-9);
+        };
+        report(
+            "drag: min zoom, dense node",
+            true,
+            &begin_drag(0.0),
+            &drag_step,
+            false,
+        );
+        report(
+            "drag: max zoom, dense node",
+            true,
+            &begin_drag(100.0),
+            &drag_step,
+            false,
+        );
+        assert!(
+            app.borrow()
+                .tool
+                .as_deref()
+                .and_then(|t| t.preview())
+                .is_some()
+        );
     }
 }
