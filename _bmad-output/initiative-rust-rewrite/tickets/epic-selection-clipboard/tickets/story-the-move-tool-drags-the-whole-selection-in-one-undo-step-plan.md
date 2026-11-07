@@ -3,14 +3,14 @@ title: 'The move tool drags the whole selection in one undo step'
 type: 'feature'
 ticket: '2'
 created: '2026-11-07'
-status: 'in-progress'
+status: 'built'
 baseline_revision: '0e3bb8ed42c4f485072d97faf06132766ae6ac60'
 route: 'full'
 route_source: 'auto'
 risk: 'high'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/initiative-rust-rewrite/tickets/epic-node-connection-tools/tickets/story-dragging-a-node-moves-it-with-grid-snap-in-one-undo-step-plan.md'
@@ -93,3 +93,8 @@ context:
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 1 medium patched; 1 false rejected.
+  - medium, patch: with a selected node stored outside ±half (the fixture has one at x = -9626), the group's offset range excluded 0, so the first drag event shifted the group without pointer movement and a release at the start committed a MoveNodes. The range now always contains the start position per axis; a node outside can only move back toward the map. Test `a_node_stored_past_the_edge_never_moves_the_group_on_its_own`.
+  - false: "AC 1 has no automated test on the fixture". It is the user's hand check; the app test covers the tool path and golden_edited the saved group move.
+- Verification re-run after the patch: fmt, clippy, workspace tests and the release frame-time test pass.
