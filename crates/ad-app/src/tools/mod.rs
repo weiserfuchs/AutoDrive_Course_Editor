@@ -8,6 +8,8 @@ pub mod move_node;
 pub mod node;
 pub mod priority;
 
+use std::collections::BTreeSet;
+
 use eframe::egui;
 
 use ad_core::command::Transaction;
@@ -15,15 +17,17 @@ use ad_core::geometry::MapGeometry;
 use ad_core::map_context::MapContext;
 use ad_core::network::{Network, NodeId};
 
-use crate::view::ViewTransform;
+use crate::view::{Preview, ViewTransform};
 
 /// What a tool sees of a click or drag: the pointer's world position, the map it lies on,
-/// the network, and whether grid snap applies (the toggle, already inverted by Shift).
+/// the network, the selection, and whether grid snap applies (the toggle, already inverted
+/// by Shift).
 pub struct ToolContext<'a> {
     pub x: f64,
     pub z: f64,
     pub map: &'a MapContext,
     pub net: &'a Network,
+    pub selection: &'a BTreeSet<NodeId>,
     pub snap: bool,
     /// The node under the pointer for a click (a drag gets its node in `on_drag_start`).
     pub hovered_node: Option<NodeId>,
@@ -59,9 +63,9 @@ pub trait Tool {
         None
     }
 
-    /// A node the view draws, with its connections, at world (x, z) instead of its stored
-    /// position while the tool previews a move.
-    fn preview(&self) -> Option<(NodeId, f64, f64)> {
+    /// The nodes the view draws, with their connections, at world (x, z) instead of their
+    /// stored positions while the tool previews a move.
+    fn preview(&self) -> Option<&Preview> {
         None
     }
 

@@ -313,6 +313,7 @@ impl App {
             z,
             map: &doc.map,
             net: &doc.config.network,
+            selection: &doc.selection,
             snap,
             hovered_node: self.view.hovered_node,
             hovered_edge: self.view.hovered_edge,
@@ -596,6 +597,54 @@ mod tests {
         assert_eq!(state(&app), ((36.0, 0.0, -24.0), true));
         app.run(Action::Undo);
         assert_eq!(state(&app), ((1.0, 0.0, 2.0), false), "one undo step");
+    }
+
+    #[test]
+    fn a_group_drag_undoes_in_one_step_and_keeps_the_selection() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        app.run(Action::MoveTool);
+        let id = first(&app);
+        let doc = app.doc.as_mut().expect("doc");
+        let b = doc
+            .config
+            .network
+            .add_node(5.5, 3.0, -7.25, NodeFlag::REGULAR);
+        let c = doc
+            .config
+            .network
+            .add_node(-9.0, 1.0, 4.0, NodeFlag::REGULAR);
+        doc.selection.extend([id, b, c]);
+        let positions = |app: &App| {
+            let net = &app.doc.as_ref().expect("doc").config.network;
+            [id, b, c].map(|n| net.node(n).map(|n| (n.x, n.y, n.z)).expect("node"))
+        };
+        let start = positions(&app);
+        // The loaded node is world (1, 2): map px (1025, 1026) at scale 1.
+        let events = [
+            DragEvent::Start {
+                at: (1025.0, 1026.0),
+                node: Some(id),
+            },
+            DragEvent::Move {
+                at: (1040.0, 1030.0),
+            },
+            DragEvent::End {
+                at: (1045.0, 1020.0),
+            },
+        ];
+        for event in events {
+            drag(&mut app, event, false);
+        }
+        assert_eq!(
+            positions(&app),
+            [(21.0, 0.0, -4.0), (25.5, 3.0, -13.25), (11.0, 1.0, -2.0)]
+        );
+        app.run(Action::Undo);
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(!doc.history.can_undo(), "one undo step");
+        assert_eq!(doc.selection, std::collections::BTreeSet::from([id, b, c]));
+        assert_eq!(positions(&app), start);
     }
 
     #[test]

@@ -100,6 +100,7 @@ impl Tool for NodeTool {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use ad_core::heightmap::Heightmap;
@@ -127,6 +128,7 @@ mod tests {
                 z,
                 map,
                 net: &net,
+                selection: &BTreeSet::new(),
                 snap,
                 hovered_node: None,
                 hovered_edge: None,

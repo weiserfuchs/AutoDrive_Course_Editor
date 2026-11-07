@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ad_core::command::{
-    AddNodes, Command, Connect, DeleteNodes, Disconnect, EditMarker, MoveNodes, SetFlag,
+    AddNodes, Command, Connect, DeleteNodes, Disconnect, EditMarker, MoveNodes, Position, SetFlag,
     Transaction,
 };
 use ad_core::heightmap::{Heightmap, sample_height};
@@ -302,6 +302,29 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
             .position(|id| *id == flip_b)
             .ok_or("flip node")?,
     );
+    // The move tool on a selection: three nodes no other edit touches move in one
+    // MoveNodes, each to a value the writer's three decimals hold exactly, y kept.
+    let busy = [&busy[..], &[flip_a, flip_b]].concat();
+    let group: Vec<(NodeId, Position, Position)> = cfg
+        .network
+        .order()
+        .iter()
+        .copied()
+        .filter(|id| !busy.contains(id))
+        .take(3)
+        .zip([(300.125, -150.5), (305.625, -148.25), (310.0, -152.75)])
+        .filter_map(|(id, (x, z))| {
+            let n = cfg.network.node(id)?;
+            Some((id, (n.x, n.y, n.z), (x, n.y, z)))
+        })
+        .collect();
+    assert_eq!(group.len(), 3);
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::MoveNodes(MoveNodes {
+            moves: group.clone(),
+        })]),
+    )?;
     let shaped_kind = cfg.network.connection_kind(shape_a, shape_b);
     assert_ne!(shaped_kind, old_kind);
     let index_of = |id: NodeId| cfg.network.order().iter().position(|n| *n == id);
@@ -323,6 +346,11 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .iter()
         .position(|id| *id == moved)
         .ok_or("moved node")?;
+    let group_moved: Vec<(usize, (f64, f64, f64))> = group
+        .iter()
+        .filter_map(|&(id, _, after)| Some((index_of(id)?, after)))
+        .collect();
+    assert_eq!(group_moved.len(), 3);
     assert_eq!(cfg.network.len(), order.len() - 1);
 
     let dir = std::env::temp_dir().join(format!("ad_golden_edited_{}", std::process::id()));
@@ -351,6 +379,10 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
     assert_eq!(net.node(new_last).ok_or("added")?.y, y);
     let m = net.node(net.order()[moved_index]).ok_or("moved")?;
     assert_eq!((m.x, m.y, m.z), after);
+    for (i, after) in group_moved {
+        let m = net.node(net.order()[i]).ok_or("group node")?;
+        assert_eq!((m.x, m.y, m.z), after);
+    }
     let kinds: Vec<_> = net
         .node(new_last)
         .ok_or("added")?

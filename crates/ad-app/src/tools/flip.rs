@@ -76,6 +76,8 @@ impl Tool for FlipTool {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    use std::collections::BTreeSet;
+
     use ad_core::map_context::MapContext;
     use ad_core::network::{ConnectionKind, NodeFlag};
 
@@ -99,6 +101,7 @@ mod tests {
             z: 0.0,
             map: &map,
             net,
+            selection: &BTreeSet::new(),
             snap: false,
             hovered_node: node,
             hovered_edge: edge,

@@ -133,6 +133,7 @@ mod tests {
                 z: 6.0,
                 map: &d.map,
                 net: &d.config.network,
+                selection: &d.selection,
                 snap: false,
                 hovered_node: None,
                 hovered_edge: None,
