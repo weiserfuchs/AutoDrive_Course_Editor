@@ -3,7 +3,7 @@ title: 'The flip tool reverses the direction of a connection'
 type: 'feature'
 ticket: '7'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: 'a937bd7ca59090682318ae66f544ed5d582a76f5'
 route: 'oneshot'
 route_source: 'auto'

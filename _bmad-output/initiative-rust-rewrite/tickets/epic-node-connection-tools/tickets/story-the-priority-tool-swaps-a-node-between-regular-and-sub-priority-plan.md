@@ -3,7 +3,7 @@ title: 'The priority tool swaps a node between regular and sub-priority'
 type: 'feature'
 ticket: '6'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: '1542a5f5ff4f78cbe71e5a5b15b226024da557a2'
 route: 'oneshot'
 route_source: 'auto'
