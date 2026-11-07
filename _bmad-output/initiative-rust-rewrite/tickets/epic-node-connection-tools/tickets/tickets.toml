@@ -1,0 +1,114 @@
+# Stories of epic-node-connection-tools in build order.
+
+[[entry]]
+id = 10
+type = "story"
+title = "UI wiring moves out of main.rs and AddNode becomes AddNodes"
+description = "Opening refactor: moves the top bar, the input handling and the overlay wiring out of main.rs into ad-app modules (ui, input) that the tool stories extend, with no change in behaviour; renames the AddNode command to AddNodes as the command-naming convention says (retro P2)."
+verify = "cargo test passes unchanged, including both golden tests and the frame-time test; main.rs holds only the eframe entry and app struct wiring; no command named AddNode remains."
+covers = []
+after = ["epic-map-view"]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 1
+type = "story"
+title = "A node added with the node tool undoes, redoes and saves"
+description = "Tracer (AD-10): adds the Tool trait (input events and ViewTransform in, an optional Command and overlay drawing out), a toolbar with exactly one active tool, and one ad-app module holding the fixed shortcut table of Java defaults (N node tool, Ctrl+Z undo, Ctrl+Shift+Z redo), with Undo and Redo buttons. While a tool is active it owns the left mouse button and panning uses the middle button; with no tool the left button pans as now; the story checks Java's mapping and records it. The node tool adds a node at the click through AddNodes with its height from sample_height (no heightmap gives y = -1 and the existing height warning). Read-only documents disable the tools, Undo and Redo (AD-11); replace_document cancels the active tool (AD-18). The person's step: on the fixture, pick the node tool, add a node, undo, redo, save, reopen."
+verify = "The user adds a node on the fixture, undoes and redoes it with Ctrl+Z and Ctrl+Shift+Z, saves, and the reloaded file has the node; tests show a read-only document rejects the tool and that AddNodes with a sampled height round-trips in the edited golden test."
+covers = ["R1", "R2"]
+after = [10]
+hitl = true
+risk = "high"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-10--tools-are-stateful-controllers-that-emit-commands", "research-editing-tools-and-change-history/research-editing-tools-and-change-history.md#1-how-does-a-toolbar-tool-receive-mouse-and-keyboard-input-and-change-the-road-network-create-move-and-delete-nodes-connections"]
+notes = ["Beyond its criteria: the frame-time test still passes with the toolbar and tool overlay in place."]
+
+[[entry]]
+id = 2
+type = "story"
+title = "Dragging a node moves it with grid snap in one undo step"
+description = "The move tool (M) drags the node under the cursor directly, with no axis widget: the drag is a preview in tool state and release commits one MoveNodes with absolute before and after positions (AD-4, AD-10). Grid snap is toggled by S and inverted while Shift is held, using the map's grid spacing; positions are clamped to the map bounds as in Java. Switching tools mid-drag cancels the preview. The person's step: drag a fixture node, snapped and unsnapped, and undo it."
+verify = "Tests show a drag commits one MoveNodes that undoes to the exact start position, snapped and unsnapped, and that a tool switch mid-drag leaves the network unchanged; the edited golden test saves a moved node and reloads it identically; the user drags a fixture node and undoes it."
+covers = ["R1", "R2"]
+after = [1]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Dragging a node stays within the frame budget"
+description = "Extends the headless frame-time test with a node-drag case: frames of the fixture at minimum and maximum zoom while a node is dragged in the dense area, preview overlay included, measured like the existing cases. Fixes what the measurement shows is over budget. The person's step: drag a node on the fixture at both zoom ends and confirm it stays smooth."
+verify = "cargo test -p ad-app --release -- --ignored frame_time reports the drag cases' best-round median and max under 16 ms at minimum and maximum zoom; the user confirms dragging stays smooth."
+covers = ["R3"]
+after = [2]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "The delete tool removes the node or connection under the cursor"
+description = "The delete tool deletes the clicked node through DeleteNodes, and the Delete key deletes the hovered node whichever tool is active, as in Java. A click on a connection removes it through Disconnect. This story settles the edge hit-test rule (the deferred hovered_edge entry): whether a click tests the drawn, shortened segment and whether a hovered node suppresses the edge hit; story 7 relies on that rule."
+verify = "Tests show deleting a node and a connection each undo in one step with order and links restored, and pin the edge hit-test rule; the edited golden test saves both deletions and reloads identically."
+covers = ["R1", "R2"]
+after = [3]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Connect tools create regular, dual and reverse connections"
+description = "Three connect tools take a start node on the first click and an end node on the second; a second click on the start node cancels. A missing link is created through Connect with the tool's shape; an existing link of the same shape is removed through Disconnect; an existing link of another shape is reshaped by one transaction of Disconnect and Connect (AD-3: Network operations stay idempotent, the tool decides). The pending link is drawn as an overlay. No interpolated nodes and no end node on empty space (epic-curves-lines)."
+verify = "Tests cover create, remove and reshape for each of the three shapes, each undoing in one step; the edited golden test saves a reverse link and a reshaped link and reloads identically."
+covers = ["R1", "R2"]
+after = [4]
+hitl = false
+risk = "medium"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-3--adjacency-has-one-owner-and-explicit-operations"]
+
+[[entry]]
+id = 6
+type = "story"
+title = "The priority tool swaps a node between regular and sub-priority"
+description = "The priority tool (P) toggles the clicked node's flag between REGULAR and SUB_PRIO through a new SetFlag command that carries the old flag, so any other file value is restored on undo. Connection colours follow from the derived kind."
+verify = "Tests show SetFlag undoes to the original flag value, including a value other than 0 or 1; the edited golden test saves a swapped node and reloads identically."
+covers = ["R1", "R2"]
+after = [5]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 7
+type = "story"
+title = "The flip tool reverses the direction of a connection"
+description = "The flip tool (F) reverses the clicked one-way or reverse connection in one transaction of Disconnect and Connect, replacing Java's four-pass workaround; dual connections are left unchanged, as Java filters them. The click uses the edge hit-test rule story 4 settled."
+verify = "Tests show a flip turns a->b into b->a for one-way and reverse links, leaves a dual link unchanged, and undoes in one step; the edited golden test saves a flipped link and reloads identically."
+covers = ["R1", "R2"]
+after = [4, 6]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Unsaved changes show in the title and closing asks first"
+description = "The window title shows the file name with a trailing * while the document is dirty (History::is_dirty), and closing a dirty document asks Save, Discard or Cancel; Save closes only after the save succeeds. Opening another file while dirty asks the same. The person's step: edit the fixture, see the *, then try to close and to open another file."
+verify = "Tests show the title follows dirty state through edit, undo to the save point and save; the user gets the prompt on close and on open while dirty, and Cancel keeps the document."
+covers = ["R2"]
+after = [7]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 9
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred; scope is set at its start and limited to cleanup."
+verify = "CI is green and the golden, round-trip and frame-time tests still pass."
+covers = []
+after = [10, 1, 2, 3, 4, 5, 6, 7, 8]
+hitl = false
+risk = "low"
