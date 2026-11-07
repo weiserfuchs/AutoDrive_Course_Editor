@@ -3,14 +3,14 @@ title: 'Connect tools create regular, dual and reverse connections'
 type: 'feature'
 ticket: '5'
 created: '2026-11-07'
-status: 'in-progress'
+status: 'built'
 baseline_revision: '05beeaf1399af66329db10576d9754745ffefbe4'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/initiative-rust-rewrite/tickets/epic-node-connection-tools/tickets/story-the-delete-tool-removes-the-node-or-connection-under-the-cursor-plan.md'
@@ -96,3 +96,5 @@ The pending link is drawn from the start node to the cursor. L selects the regul
 - `;` also fires with Shift held. On layouts such as German, `;` is Shift+`,`, and egui reports the typed logical key `Semicolon` with Shift set, so an exact no-modifier match would never fire there. On US layouts Shift+`;` types `:` (`Key::Colon`), so the extra entry cannot collide. Modifiers still match exactly per entry.
 
 ## Review Triage Log
+
+- Quick review, pass 1: no findings. Observations only: the colour/arrow check is the user's hand check; the release frame-time run was repeated on review (every case under 16 ms); reverse is covered by the tool unit tests and golden_edited, not by the app-level undo test.
