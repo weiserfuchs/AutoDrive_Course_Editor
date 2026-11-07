@@ -8,6 +8,8 @@ use crate::App;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
     NodeTool,
+    MoveTool,
+    ToggleSnap,
     Undo,
     Redo,
     ToggleNodeId,
@@ -15,7 +17,7 @@ pub(crate) enum Action {
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 4] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 6] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -29,10 +31,27 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 4] = [
         KeyboardShortcut::new(Modifiers::NONE, Key::N),
     ),
     (
+        Action::MoveTool,
+        KeyboardShortcut::new(Modifiers::NONE, Key::M),
+    ),
+    (
+        Action::ToggleSnap,
+        KeyboardShortcut::new(Modifiers::NONE, Key::S),
+    ),
+    (
         Action::ToggleNodeId,
         KeyboardShortcut::new(Modifiers::NONE, Key::F4),
     ),
 ];
+
+/// Whether grid snap applies this frame: the toggle, inverted while Shift is held.
+pub(crate) fn snap(toggle: bool, ctx: &egui::Context) -> bool {
+    resolve_snap(toggle, ctx.input(|i| i.modifiers.shift))
+}
+
+fn resolve_snap(toggle: bool, shift: bool) -> bool {
+    toggle != shift
+}
 
 /// Consumes the presses of `shortcut` whose modifiers match it exactly (egui's
 /// `consume_shortcut` ignores extra Shift and Alt). Returns whether there was one.
@@ -96,6 +115,16 @@ mod tests {
         assert_eq!(press(CTRL, Key::Z), [Action::Undo]);
         assert_eq!(press(CTRL.plus(Modifiers::SHIFT), Key::Z), [Action::Redo]);
         assert_eq!(press(Modifiers::NONE, Key::F4), [Action::ToggleNodeId]);
+        assert_eq!(press(Modifiers::NONE, Key::M), [Action::MoveTool]);
+        assert_eq!(press(Modifiers::NONE, Key::S), [Action::ToggleSnap]);
+    }
+
+    #[test]
+    fn shift_inverts_snap_while_held() {
+        assert!(resolve_snap(true, false));
+        assert!(!resolve_snap(true, true));
+        assert!(!resolve_snap(false, false));
+        assert!(resolve_snap(false, true));
     }
 
     #[test]
@@ -111,5 +140,8 @@ mod tests {
         assert!(press(Modifiers::ALT, Key::N).is_empty());
         assert!(press(CTRL, Key::N).is_empty());
         assert!(press(Modifiers::SHIFT, Key::F4).is_empty());
+        // Ctrl+S stays free for saving.
+        assert!(press(CTRL, Key::S).is_empty());
+        assert!(press(Modifiers::SHIFT, Key::M).is_empty());
     }
 }

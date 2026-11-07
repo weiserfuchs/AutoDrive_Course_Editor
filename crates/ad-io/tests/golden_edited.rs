@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ad_core::command::{AddNodes, Command, Connect, DeleteNodes, EditMarker, Transaction};
+use ad_core::command::{
+    AddNodes, Command, Connect, DeleteNodes, EditMarker, MoveNodes, Transaction,
+};
 use ad_core::heightmap::{Heightmap, sample_height};
 use ad_core::history::History;
 use ad_core::map_context::MapContext;
@@ -103,8 +105,16 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .iter()
         .copied()
         .filter(|id| ![reverse_target, marked, renamed].contains(id))
-        .take(2)
+        .take(3)
         .collect();
+    let moved = keep[2];
+    let before = cfg
+        .network
+        .node(moved)
+        .map(|n| (n.x, n.y, n.z))
+        .ok_or("node")?;
+    // Values the writer's three decimals hold exactly; y stays (the move tool keeps it).
+    let after = (100.25, before.1, -200.5);
 
     // The node tool's height: sampled from a small generated heightmap (AD-7).
     let mut map = MapContext::new(None, 1, 2.0, (2.0, 2.0));
@@ -151,8 +161,17 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
                 added,
                 Some(("New place".to_owned(), "All".to_owned())),
             )),
+            Command::MoveNodes(MoveNodes {
+                moves: vec![(moved, before, after)],
+            }),
         ]),
     )?;
+    let moved_index = cfg
+        .network
+        .order()
+        .iter()
+        .position(|id| *id == moved)
+        .ok_or("moved node")?;
     assert_eq!(cfg.network.len(), order.len() - 1);
 
     let dir = std::env::temp_dir().join(format!("ad_golden_edited_{}", std::process::id()));
@@ -179,6 +198,8 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
     assert_eq!(named(&old_name), 0);
     assert!(net.markers().iter().any(|m| m.node == new_last));
     assert_eq!(net.node(new_last).ok_or("added")?.y, y);
+    let m = net.node(net.order()[moved_index]).ok_or("moved")?;
+    assert_eq!((m.x, m.y, m.z), after);
     let kinds: Vec<_> = net
         .node(new_last)
         .ok_or("added")?
