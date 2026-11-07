@@ -8,6 +8,7 @@ companions: []
 after: []
 refined: true
 risk: high
+status: done
 ---
 
 # The map view is fast and complete
@@ -57,3 +58,4 @@ Opening the FS25 fixture shows the NF_Marsch_4fach map image with the whole netw
 - Decision (2026-11-06): MapContext lives in ad-core with map name, scale, heightmap and height_map_scale; the map texture stays on ad-app's Document, because ad-core must not depend on egui (AD-1 over AD-14). The architecture spine reconciliation (retro action item 4) records it.
 - Decision (2026-11-06): a 16-bit grey heightmap is read directly as value/256, the Java scale at full precision (AD-13).
 - Decision (2026-11-06): story 9 (hit-testing, hover, overlay hook) added from the set check, because epic-node-connection-tools needs it from this epic.
+- Decision (2026-11-07): epic closed. The user checked the fixture with the real NF_Marsch_4fach image and heightmap: map alignment, the Java look, markers, grid, hover highlight, info box and node-id toggle look right, and pan and zoom stay smooth. Download, DDS and zip import remain with epic-map-images-import; the drag budget and the edge hit-test rule remain with epic-node-connection-tools.
