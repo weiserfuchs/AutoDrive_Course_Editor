@@ -18,7 +18,7 @@ use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
 use crate::tools::priority::PriorityTool;
 use crate::tools::{Tool, ToolContext};
-use crate::view::{DragEvent, MapPx, SelectEvent, ViewHooks, ViewTransform};
+use crate::view::{DragEvent, MapPx, Preview, SelectEvent, ViewHooks, ViewTransform};
 use crate::{App, Choice, Pending};
 
 /// The top bar: Open, Save, the Grid toggle and the status labels.
@@ -201,6 +201,7 @@ impl ViewHooks for ToolHooks<'_> {
                 z,
                 map: self.map,
                 net: self.net,
+                selection: self.selection,
                 snap: self.snap,
                 hovered_node: None,
                 hovered_edge: None,
@@ -223,7 +224,7 @@ impl ViewHooks for ToolHooks<'_> {
         }
     }
 
-    fn preview(&self) -> Option<(NodeId, f64, f64)> {
+    fn preview(&self) -> Option<&Preview> {
         self.tool.as_deref().and_then(Tool::preview)
     }
 

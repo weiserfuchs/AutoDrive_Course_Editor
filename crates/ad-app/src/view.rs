@@ -1,7 +1,8 @@
 //! The map view: map pixel <-> screen transform, culling, painting and input.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use eframe::egui;
 
@@ -157,6 +158,32 @@ pub enum SelectEvent {
     Click { node: Option<NodeId> },
 }
 
+/// The nodes a tool previews at new places: node id to the world (x, z) it is drawn at,
+/// instead of its stored position. The tool keeps it up to date during a drag.
+pub type Preview = HashMap<NodeId, (f64, f64), BuildHasherDefault<IdHasher>>;
+
+/// One multiply per node id: the view looks up both ends of every drawn connection while a
+/// preview lasts, and SipHash made that a visible share of the frame at minimum zoom.
+#[derive(Default)]
+pub struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        // Fibonacci hashing (as FxHash): spreads sequential ids over the high bits.
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
 /// What the caller of [`MapView::show`] plugs in: drag handling, selection, a moved-node
 /// preview and an overlay. All default to nothing.
 pub trait ViewHooks {
@@ -174,8 +201,9 @@ pub trait ViewHooks {
         false
     }
 
-    /// A node to draw, with its connections, at world (x, z) instead of its stored place.
-    fn preview(&self) -> Option<(NodeId, f64, f64)> {
+    /// Nodes to draw, with their connections, at the given world (x, z) instead of their
+    /// stored places.
+    fn preview(&self) -> Option<&Preview> {
         None
     }
 
@@ -199,12 +227,11 @@ pub trait ViewHooks {
 
 impl ViewHooks for () {}
 
-/// Where node `id` is drawn: at the preview position if it is the previewed node.
-fn place(id: NodeId, n: &Node, preview: Option<(NodeId, f64, f64)>) -> (f64, f64) {
-    match preview {
-        Some((p, x, z)) if p == id => (x, z),
-        _ => (n.x, n.z),
-    }
+/// Where node `id` is drawn: at its preview position if it is a previewed node.
+fn place(id: NodeId, n: &Node, preview: Option<&Preview>) -> (f64, f64) {
+    preview
+        .and_then(|p| p.get(&id).copied())
+        .unwrap_or((n.x, n.z))
 }
 
 /// Draws the network on the map. Owns the query buffers reused across frames.
@@ -212,7 +239,7 @@ pub struct MapView {
     transform: Option<ViewTransform>,
     nodes: Vec<NodeId>,
     edges: Vec<EdgeSegment>,
-    /// The connections of the previewed node.
+    /// Query buffer for the connections of a previewed node.
     preview_edges: Vec<EdgeSegment>,
     /// Whether the hooks claimed the primary drag in progress.
     drag_claimed: bool,
@@ -461,7 +488,7 @@ impl MapView {
         ns: i32,
         id: NodeId,
         panel: egui::Rect,
-        preview: Option<(NodeId, f64, f64)>,
+        preview: Option<&Preview>,
     ) {
         let Some(node) = net.node(id) else {
             return;
@@ -523,7 +550,7 @@ impl MapView {
         node_size: f64,
         map_texture: Option<egui::TextureId>,
         t: &ViewTransform,
-        preview: Option<(NodeId, f64, f64)>,
+        preview: Option<&Preview>,
         selection: Option<&BTreeSet<NodeId>>,
     ) {
         if let Some(id) = map_texture {
@@ -567,7 +594,7 @@ impl MapView {
 
         let ns = look::node_px(node_size, t.zoom);
         let hovered = self.hovered_node;
-        let previewed = preview.map(|(id, _, _)| id);
+        let previewed = |id: NodeId| preview.is_some_and(|p| p.contains_key(&id));
 
         // All connections and arrowheads go into one mesh with per-vertex colour: one shape
         // instead of tens of thousands is what keeps the tessellation inside the frame budget.
@@ -612,22 +639,27 @@ impl MapView {
         mesh.reserve_triangles(self.edges.len() * 3);
         mesh.reserve_vertices(self.edges.len() * 7);
         for e in &self.edges {
-            // The previewed node's connections are drawn below, from its preview position.
-            if previewed.is_some_and(|p| e.from == p || e.to == p) {
+            // The previewed nodes' connections are drawn below, from their preview positions.
+            if preview.is_some_and(|p| p.contains_key(&e.from) || p.contains_key(&e.to)) {
                 continue;
             }
             push_edge(&mut mesh, e.a, e.b, e.look);
         }
-        // Every connection of the previewed node ends at its stored position, so a point
-        // query there finds them all, whether or not that position is in view.
-        self.preview_edges.clear();
-        if let Some((p, px, pz)) = preview
-            && let Some(n) = net.node(p)
-        {
+        // Every connection of a previewed node ends at its stored position, so a point query
+        // there finds them all, whether or not that position is in view.
+        for &p in preview.into_iter().flat_map(|p| p.keys()) {
+            let Some(n) = net.node(p) else {
+                continue;
+            };
             net.edges_in_rect_into(n.x, n.z, n.x, n.z, &mut self.preview_edges);
-            let moved = |id: NodeId, end: [f64; 2]| if id == p { [px, pz] } else { end };
+            let moved = |id: NodeId, end: [f64; 2]| {
+                preview
+                    .and_then(|pv| pv.get(&id))
+                    .map_or(end, |&(x, z)| [x, z])
+            };
             for e in &self.preview_edges {
-                if e.from == p || e.to == p {
+                // A connection between two previewed nodes is drawn once, from its start.
+                if e.from == p || (e.to == p && !previewed(e.from)) {
                     push_edge(&mut mesh, moved(e.from, e.a), moved(e.to, e.b), e.look);
                 }
             }
@@ -661,7 +693,7 @@ impl MapView {
             };
             let selected = |id: NodeId| selection.is_some_and(|s| s.contains(&id));
             for &id in &self.nodes {
-                if Some(id) == hovered || Some(id) == previewed {
+                if Some(id) == hovered || previewed(id) {
                     continue;
                 }
                 if let Some(n) = net.node(id) {
@@ -671,13 +703,15 @@ impl MapView {
                     }
                 }
             }
-            // The previewed node is drawn even when its stored position is out of view.
-            if let Some(id) = previewed.filter(|&p| Some(p) != hovered)
-                && let Some(n) = net.node(id)
-            {
-                let centre = dot(id, n);
-                if selected(id) {
-                    ring(centre);
+            // The previewed nodes are drawn even when their stored positions are out of view.
+            for &id in preview.into_iter().flat_map(|p| p.keys()) {
+                if Some(id) != hovered
+                    && let Some(n) = net.node(id)
+                {
+                    let centre = dot(id, n);
+                    if selected(id) {
+                        ring(centre);
+                    }
                 }
             }
             // On top of all other nodes, with a white ring.
@@ -1488,7 +1522,7 @@ mod tests {
         claim: bool,
         events: Vec<DragEvent>,
         selects: Vec<SelectEvent>,
-        preview: Option<(NodeId, f64, f64)>,
+        preview: Option<Preview>,
     }
 
     impl ViewHooks for Recorder {
@@ -1501,8 +1535,8 @@ mod tests {
             self.claim && matches!(event, DragEvent::Start { node: Some(_), .. })
         }
 
-        fn preview(&self) -> Option<(NodeId, f64, f64)> {
-            self.preview
+        fn preview(&self) -> Option<&Preview> {
+            self.preview.as_ref()
         }
     }
 
@@ -1872,17 +1906,76 @@ mod tests {
         assert_eq!(count(&out), (0, 0));
         // b previewed at world (10, 0): screen (612, 512).
         let mut hooks = Recorder {
-            preview: Some((b, 10.0, 0.0)),
+            preview: Some([(b, (10.0, 0.0))].into_iter().collect()),
             ..Recorder::default()
         };
         let out = run(&mut view, &mut hooks);
         assert_eq!(count(&out), (1, 1));
         assert_eq!(circle_centres(&out), [egui::pos2(612.0, 512.0)]);
         // Previewing a moves the line's start, not a second line.
-        hooks.preview = Some((a, -10.0, 0.0));
+        hooks.preview = Some([(a, (-10.0, 0.0))].into_iter().collect());
         let out = run(&mut view, &mut hooks);
         assert_eq!(count(&out), (1, 1));
         assert_eq!(circle_centres(&out), [egui::pos2(412.0, 512.0)]);
+    }
+
+    #[test]
+    fn a_previewed_group_and_its_connections_are_drawn_only_at_the_preview() {
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        // Zoom 10 centred on world (0, 0): screen = 512 + 10 · world, the view shows ±51.2.
+        // a, b and d are in view, c is not; a, b and c move by (-70, 40), d stays.
+        let mut net = Network::new();
+        let a = net.add_node(30.0, 0.0, -30.0, NodeFlag::REGULAR);
+        let b = net.add_node(40.0, 0.0, -30.0, NodeFlag::REGULAR);
+        let c = net.add_node(100.0, 0.0, -30.0, NodeFlag::REGULAR);
+        let d = net.add_node(0.0, 0.0, 40.0, NodeFlag::REGULAR);
+        for (from, to) in [(a, b), (b, c), (a, d)] {
+            net.connect(from, to, ConnectionShape::OneWay).expect("ok");
+        }
+        let mut view = view_at(&ctx, &net, g, 10.0);
+        let mut run = |hooks: &mut Recorder| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                view.show(ui, &net, g, 2.0, None, hooks);
+            });
+            out.textures_delta.clear();
+            out
+        };
+        assert_eq!(count(&run(&mut Recorder::default())), (3, 3));
+        let mut hooks = Recorder {
+            preview: Some(
+                [(a, (-40.0, 10.0)), (b, (-30.0, 10.0)), (c, (30.0, 10.0))]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Recorder::default()
+        };
+        let out = run(&mut hooks);
+        // Every connection once, every node once; c entered the view from outside.
+        assert_eq!(count(&out), (3, 4));
+        let mut centres: Vec<_> = circle_centres(&out)
+            .iter()
+            .map(|p| (p.x as i32, p.y as i32))
+            .collect();
+        centres.sort_unstable();
+        assert_eq!(centres, [(112, 612), (212, 612), (512, 912), (812, 612)]);
+        // Nothing is left at the old places (screen y 212): every connection lies at or
+        // below the previewed row, y 612, give or take the line width and arrowheads.
+        let mut ys = Vec::new();
+        for s in &out.shapes {
+            if let egui::Shape::Mesh(m) = &s.shape {
+                ys.extend(m.vertices.iter().map(|v| v.pos.y));
+            }
+        }
+        assert!(!ys.is_empty());
+        assert!(ys.iter().all(|&y| y > 600.0), "{ys:?}");
     }
 
     #[test]
@@ -1893,7 +1986,7 @@ mod tests {
         let g = MapGeometry::new(1.0);
         let mut view = view_at(&ctx, &net, g, 10.0);
         let mut hooks = Recorder {
-            preview: Some((b, 30.0, 0.0)),
+            preview: Some([(b, (30.0, 0.0))].into_iter().collect()),
             ..Recorder::default()
         };
         for _ in 0..2 {
@@ -2231,6 +2324,7 @@ mod tests {
             z,
             map: &map,
             net,
+            selection: &none_selected,
             snap: false,
             hovered_node: None,
             hovered_edge: None,
@@ -2268,7 +2362,7 @@ mod tests {
             let tool = app.tool.as_deref_mut().expect("move tool");
             tool.on_drag(&tool_ctx(start.0 + offset.get(), start.1));
             // The preview follows the pointer: the drag never reaches the map edge here.
-            let (_, px, _) = tool.preview().expect("preview");
+            let (px, _) = tool.preview().expect("preview")[&dragged];
             assert!((px - (start.0 + offset.get())).abs() < 1e-9);
         };
         report(
