@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use eframe::egui;
 
 use ad_core::geometry::{MAP_PIXELS, MapGeometry};
-use ad_core::network::{ConnectionKind, EdgeSegment, Network, NodeId};
+use ad_core::network::{ConnectionKind, EdgeSegment, LinkLook, Network, Node, NodeId};
 
 use crate::icons::{self, Icons};
 use crate::lod::{HOVER_RING_FACTOR, MAX_ZOOM, MIN_NODE_PX, WHEEL_POINTS_PER_STEP, ZOOM_STEP};
@@ -127,11 +127,66 @@ fn image_rect(t: &ViewTransform) -> egui::Rect {
     )
 }
 
+/// A map pixel `(x, y)`.
+pub type MapPx = (f64, f64);
+
+/// A primary drag on the view, in map px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DragEvent {
+    /// The drag started at the press position `at`, on `node` if one was under it.
+    Start { at: MapPx, node: Option<NodeId> },
+    /// The pointer of a claimed drag is at `at`.
+    Move { at: MapPx },
+    /// A claimed drag was released at `at`.
+    End { at: MapPx },
+    /// A claimed drag stopped where no end position is known; nothing commits.
+    Cancel,
+}
+
+/// What the caller of [`MapView::show`] plugs in: drag handling, a moved-node preview and
+/// an overlay. All default to nothing.
+pub trait ViewHooks {
+    /// A primary drag event. For `Start`, true claims the drag: it does not pan, and its
+    /// `Move` and `End` events follow. The return value of other events is ignored.
+    fn drag(&mut self, _event: DragEvent) -> bool {
+        false
+    }
+
+    /// A node to draw, with its connections, at world (x, z) instead of its stored place.
+    fn preview(&self) -> Option<(NodeId, f64, f64)> {
+        None
+    }
+
+    /// Draws on top of the view; `cursor` is the pointer while it is over the view.
+    fn paint(
+        &self,
+        _painter: &egui::Painter,
+        _t: &ViewTransform,
+        _geometry: MapGeometry,
+        _cursor: Option<egui::Pos2>,
+    ) {
+    }
+}
+
+impl ViewHooks for () {}
+
+/// Where node `id` is drawn: at the preview position if it is the previewed node.
+fn place(id: NodeId, n: &Node, preview: Option<(NodeId, f64, f64)>) -> (f64, f64) {
+    match preview {
+        Some((p, x, z)) if p == id => (x, z),
+        _ => (n.x, n.z),
+    }
+}
+
 /// Draws the network on the map. Owns the query buffers reused across frames.
 pub struct MapView {
     transform: Option<ViewTransform>,
     nodes: Vec<NodeId>,
     edges: Vec<EdgeSegment>,
+    /// The connections of the previewed node.
+    preview_edges: Vec<EdgeSegment>,
+    /// Whether the hooks claimed the primary drag in progress.
+    drag_claimed: bool,
     /// Loaded on the first frame, once per app run.
     icons: Option<Icons>,
     pub show_grid: bool,
@@ -154,6 +209,8 @@ impl Default for MapView {
             transform: None,
             nodes: Vec::new(),
             edges: Vec::new(),
+            preview_edges: Vec::new(),
+            drag_claimed: false,
             icons: None,
             show_grid: false,
             show_marker_icons: true,
@@ -170,6 +227,7 @@ impl MapView {
     /// Forgets the view; the next frame starts at the minimum zoom, centred.
     pub fn reset(&mut self) {
         self.transform = None;
+        self.drag_claimed = false;
         self.clear_hover();
     }
 
@@ -179,9 +237,11 @@ impl MapView {
         self.hovered_edge = None;
     }
 
-    /// Draws the view and handles pan and zoom. A primary or middle drag pans (Java's
-    /// default); a primary click is returned as the clicked map pixel for the active tool.
-    /// The overlay hook gets the pointer's screen position while it is over the view.
+    /// Draws the view and handles pan and zoom. A middle drag pans; a primary drag pans
+    /// unless `hooks` claims it at its start (Java's default mapping). A primary click is
+    /// returned as the clicked map pixel for the active tool. The hooks' overlay gets the
+    /// pointer's screen position while it is over the view.
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -189,8 +249,8 @@ impl MapView {
         geometry: MapGeometry,
         node_size: f64,
         map_texture: Option<egui::TextureId>,
-        overlay_hook: impl FnOnce(&egui::Painter, &ViewTransform, MapGeometry, Option<egui::Pos2>),
-    ) -> Option<(f64, f64)> {
+        hooks: &mut impl ViewHooks,
+    ) -> Option<MapPx> {
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let rect = response.rect;
@@ -204,7 +264,39 @@ impl MapView {
             .get_or_insert_with(|| ViewTransform::new(panel_center, panel_size));
         transform.set_panel(panel_center, panel_size);
 
-        if response.dragged_by(egui::PointerButton::Primary)
+        let primary = egui::PointerButton::Primary;
+        let pointer_map = || {
+            ui.input(|i| i.pointer.interact_pos())
+                .map(|p| transform.screen_to_map(f64::from(p.x), f64::from(p.y)))
+        };
+        if response.drag_started_by(primary) {
+            // The press position, not where egui decided it is a drag.
+            let origin = ui.input(|i| i.pointer.press_origin());
+            let node = origin.and_then(|p| {
+                let ns = look::node_px(node_size, transform.zoom);
+                let c = (f64::from(p.x), f64::from(p.y));
+                hover::node_at(net, geometry, transform, ns, c, &mut self.nodes)
+            });
+            self.drag_claimed = origin.is_some_and(|p| {
+                let at = transform.screen_to_map(f64::from(p.x), f64::from(p.y));
+                hooks.drag(DragEvent::Start { at, node })
+            });
+        }
+        if self.drag_claimed {
+            if response.dragged_by(primary)
+                && let Some(at) = pointer_map()
+            {
+                hooks.drag(DragEvent::Move { at });
+            } else if response.drag_stopped() {
+                self.drag_claimed = false;
+                // Without an end position nothing may commit.
+                hooks.drag(match pointer_map() {
+                    Some(at) => DragEvent::End { at },
+                    None => DragEvent::Cancel,
+                });
+            }
+        }
+        if (response.dragged_by(primary) && !self.drag_claimed)
             || response.dragged_by(egui::PointerButton::Middle)
         {
             let d = response.drag_delta();
@@ -238,18 +330,21 @@ impl MapView {
             self.icons = Some(Icons::load(ui.ctx()));
         }
         let ns = look::node_px(node_size, t.zoom);
+        let preview = hooks.preview();
+        // Hover tests stored positions, which a preview no longer shows: none while it lasts.
         let cursor = response
             .hover_pos()
+            .filter(|_| preview.is_none())
             .map(|p| (f64::from(p.x), f64::from(p.y)));
         self.hovered_node =
             cursor.and_then(|c| hover::node_at(net, geometry, &t, ns, c, &mut self.nodes));
         self.hovered_edge = cursor.and_then(|c| hover::edge_at(net, geometry, &t, c));
-        self.paint(&painter, net, geometry, node_size, map_texture, &t);
+        self.paint(&painter, net, geometry, node_size, map_texture, &t, preview);
         if let Some(id) = self.hovered_node {
-            self.paint_info_box(&painter, net, geometry, &t, ns, id, rect);
+            self.paint_info_box(&painter, net, geometry, &t, ns, id, rect, preview);
         }
         // Last, so tools draw on top of everything.
-        overlay_hook(&painter, &t, geometry, response.hover_pos());
+        hooks.paint(&painter, &t, geometry, response.hover_pos());
         clicked
     }
 
@@ -264,6 +359,7 @@ impl MapView {
         ns: i32,
         id: NodeId,
         panel: egui::Rect,
+        preview: Option<(NodeId, f64, f64)>,
     ) {
         let Some(node) = net.node(id) else {
             return;
@@ -292,7 +388,8 @@ impl MapView {
             .map(|g| g.size().y + 2.0 * BOX_PAD_PX)
             .collect();
         let size = egui::vec2(width, row_heights.iter().sum());
-        let (mx, my) = geometry.to_map(node.x, node.z);
+        let (x, z) = place(id, node, preview);
+        let (mx, my) = geometry.to_map(x, z);
         let (sx, sy) = t.map_to_screen(mx, my);
         let anchor = egui::pos2(sx as f32 + ns as f32 / 2.0, sy as f32);
         let boxed = hover::box_rect(anchor, size, panel);
@@ -315,6 +412,7 @@ impl MapView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn paint(
         &mut self,
         painter: &egui::Painter,
@@ -323,6 +421,7 @@ impl MapView {
         node_size: f64,
         map_texture: Option<egui::TextureId>,
         t: &ViewTransform,
+        preview: Option<(NodeId, f64, f64)>,
     ) {
         if let Some(id) = map_texture {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -365,21 +464,19 @@ impl MapView {
 
         let ns = look::node_px(node_size, t.zoom);
         let hovered = self.hovered_node;
+        let previewed = preview.map(|(id, _, _)| id);
 
         // All connections and arrowheads go into one mesh with per-vertex colour: one shape
         // instead of tens of thousands is what keeps the tessellation inside the frame budget.
         let half_width = 0.5_f32;
         let mut mesh = egui::Mesh::default();
-        net.edges_in_rect_into(x0, z0, x1, z1, &mut self.edges);
-        mesh.reserve_triangles(self.edges.len() * 3);
-        mesh.reserve_vertices(self.edges.len() * 7);
-        for e in &self.edges {
-            let start = to_screen(e.a[0], e.a[1]);
-            let end = to_screen(e.b[0], e.b[1]);
+        let push_edge = |mesh: &mut egui::Mesh, a: [f64; 2], b: [f64; 2], link: LinkLook| {
+            let start = to_screen(a[0], a[1]);
+            let end = to_screen(b[0], b[1]);
             let Some((from, to)) = look::line_ends(start, end, ns) else {
-                continue;
+                return;
             };
-            let colour = look::connection_colour(e.look.kind, e.look.from_flag.0, e.look.to_flag.0);
+            let colour = look::connection_colour(link.kind, link.from_flag.0, link.to_flag.0);
             // The normal comes from the full line; shortening can cross the ends on short lines.
             let len = (end.0 - start.0).hypot(end.1 - start.1);
             let nx = (-(end.1 - start.1) / len) as f32 * half_width;
@@ -399,13 +496,37 @@ impl MapView {
             }
             mesh.add_triangle(i, i + 1, i + 2);
             mesh.add_triangle(i, i + 2, i + 3);
-            let dual = e.look.kind == ConnectionKind::Dual;
+            let dual = link.kind == ConnectionKind::Dual;
             if let Some(tri) = look::arrow(start, end, ns, node_size, t.zoom, dual) {
                 let i = mesh.vertices.len() as u32;
                 for p in tri {
                     mesh.colored_vertex(egui::pos2(p.0 as f32, p.1 as f32), colour);
                 }
                 mesh.add_triangle(i, i + 1, i + 2);
+            }
+        };
+        net.edges_in_rect_into(x0, z0, x1, z1, &mut self.edges);
+        mesh.reserve_triangles(self.edges.len() * 3);
+        mesh.reserve_vertices(self.edges.len() * 7);
+        for e in &self.edges {
+            // The previewed node's connections are drawn below, from its preview position.
+            if previewed.is_some_and(|p| e.from == p || e.to == p) {
+                continue;
+            }
+            push_edge(&mut mesh, e.a, e.b, e.look);
+        }
+        // Every connection of the previewed node ends at its stored position, so a point
+        // query there finds them all, whether or not that position is in view.
+        self.preview_edges.clear();
+        if let Some((p, px, pz)) = preview
+            && let Some(n) = net.node(p)
+        {
+            net.edges_in_rect_into(n.x, n.z, n.x, n.z, &mut self.preview_edges);
+            let moved = |id: NodeId, end: [f64; 2]| if id == p { [px, pz] } else { end };
+            for e in &self.preview_edges {
+                if e.from == p || e.to == p {
+                    push_edge(&mut mesh, moved(e.from, e.a), moved(e.to, e.b), e.look);
+                }
             }
         }
         painter.add(egui::Shape::mesh(mesh));
@@ -415,26 +536,35 @@ impl MapView {
         let radius = ns as f32 / 2.0;
         let pad_px = f64::from(radius).max(OVERLAY_PAD_PX);
         let pad = pad_px / t.zoom * geometry.scale;
+        let screen_of = |id: NodeId, n: &Node| {
+            let (x, z) = place(id, n, preview);
+            to_screen(x, z)
+        };
         if f64::from(ns) >= MIN_NODE_PX {
             net.nodes_in_rect_into(x0 - pad, z0 - pad, x1 + pad, z1 + pad, &mut self.nodes);
+            let dot = |id: NodeId, n: &Node| {
+                let (sx, sy) = screen_of(id, n);
+                let centre = egui::pos2(sx as f32, sy as f32);
+                painter.circle_filled(centre, radius, look::node_colour(n.flag.0));
+                centre
+            };
             for &id in &self.nodes {
-                if Some(id) == hovered {
+                if Some(id) == hovered || Some(id) == previewed {
                     continue;
                 }
                 if let Some(n) = net.node(id) {
-                    let (sx, sy) = to_screen(n.x, n.z);
-                    painter.circle_filled(
-                        egui::pos2(sx as f32, sy as f32),
-                        radius,
-                        look::node_colour(n.flag.0),
-                    );
+                    dot(id, n);
                 }
             }
+            // The previewed node is drawn even when its stored position is out of view.
+            if let Some(id) = previewed.filter(|&p| Some(p) != hovered)
+                && let Some(n) = net.node(id)
+            {
+                dot(id, n);
+            }
             // On top of all other nodes, with a white ring.
-            if let Some(n) = hovered.and_then(|id| net.node(id)) {
-                let (sx, sy) = to_screen(n.x, n.z);
-                let centre = egui::pos2(sx as f32, sy as f32);
-                painter.circle_filled(centre, radius, look::node_colour(n.flag.0));
+            if let Some((id, n)) = hovered.and_then(|id| net.node(id).map(|n| (id, n))) {
+                let centre = dot(id, n);
                 painter.circle_stroke(
                     centre,
                     radius,
@@ -457,12 +587,13 @@ impl MapView {
             for id in net.nodes_without_height() {
                 if let Some(n) = net.node(id)
                     && overlay::has_height_warning(n.y)
-                    && n.x >= x0 - pad
-                    && n.x <= x1 + pad
-                    && n.z >= z0 - pad
-                    && n.z <= z1 + pad
+                    && let (x, z) = place(id, n, preview)
+                    && x >= x0 - pad
+                    && x <= x1 + pad
+                    && z >= z0 - pad
+                    && z <= z1 + pad
                 {
-                    let (sx, sy) = to_screen(n.x, n.z);
+                    let (sx, sy) = to_screen(x, z);
                     add_icon(&mut mesh, (sx as f32, sy as f32), icons::SMALL_PX);
                 }
             }
@@ -484,10 +615,11 @@ impl MapView {
                 let Some(n) = net.node(m.node) else {
                     continue;
                 };
-                if n.x < wx0 || n.x > wx1 || n.z < wz0 || n.z > wz1 {
+                let (x, z) = place(m.node, n, preview);
+                if x < wx0 || x > wx1 || z < wz0 || z > wz1 {
                     continue;
                 }
-                let (ax, az) = overlay::marker_anchor(n.x, n.z);
+                let (ax, az) = overlay::marker_anchor(x, z);
                 let anchor = to_screen(ax, az);
                 if let Some(mesh) = &mut icon_mesh {
                     add_icon(mesh, overlay::marker_icon_centre(anchor), icons::MARKER_PX);
@@ -628,7 +760,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
-            view.show(ui, net, geometry, node_size, texture, |_, _, _, _| {});
+            view.show(ui, net, geometry, node_size, texture, &mut ());
         });
         // No renderer here, so there is nothing to upload.
         out.textures_delta.clear();
@@ -1058,8 +1190,27 @@ mod tests {
         let ctx = egui::Context::default();
         let (net, _, _) = hover_net();
         let mut view = view_at(&ctx, &net, MapGeometry::new(1.0), 10.0);
+        struct Overlay {
+            marker: egui::Rect,
+            seen: std::cell::Cell<Option<(f64, MapGeometry)>>,
+        }
+        impl ViewHooks for Overlay {
+            fn paint(
+                &self,
+                painter: &egui::Painter,
+                t: &ViewTransform,
+                geometry: MapGeometry,
+                _cursor: Option<egui::Pos2>,
+            ) {
+                self.seen.set(Some((t.zoom, geometry)));
+                painter.rect_filled(self.marker, 0.0, egui::Color32::YELLOW);
+            }
+        }
         let marker = egui::Rect::from_min_size(egui::pos2(1.0, 2.0), egui::vec2(3.0, 4.0));
-        let mut seen = None;
+        let mut hooks = Overlay {
+            marker,
+            seen: std::cell::Cell::new(None),
+        };
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1070,18 +1221,13 @@ mod tests {
         };
         let g = MapGeometry::new(1.0);
         let mut out = ctx.run_ui(input, |ui| {
-            view.show(ui, &net, g, 2.0, None, |painter, t, geometry, _| {
-                seen = Some((t.zoom, geometry));
-                painter.rect_filled(marker, 0.0, egui::Color32::YELLOW);
-            });
+            view.show(ui, &net, g, 2.0, None, &mut hooks);
         });
         out.textures_delta.clear();
-        assert_eq!(seen, Some((10.0, g)));
+        assert_eq!(hooks.seen.get(), Some((10.0, g)));
         let last = out.shapes.last().expect("shapes");
         assert!(matches!(&last.shape, egui::Shape::Rect(r) if r.rect == marker));
     }
-
-    type MapPx = (f64, f64);
 
     /// Runs one frame per event list with `button` and returns what `show` reported in
     /// each, and the view centre after the last.
@@ -1089,10 +1235,20 @@ mod tests {
         button: egui::PointerButton,
         frames: Vec<Vec<egui::Event>>,
     ) -> (Vec<Option<MapPx>>, MapPx) {
+        pointer_frames_on(button, frames, &Network::new(), &mut ())
+    }
+
+    /// [`pointer_frames`] on `net` with `hooks`, at zoom 2 on a scale-1 map: screen
+    /// (512, 512) is map px (1024, 1024) and world (0, 0); 2 screen px are 1 map px.
+    fn pointer_frames_on(
+        button: egui::PointerButton,
+        frames: Vec<Vec<egui::Event>>,
+        net: &Network,
+        hooks: &mut impl ViewHooks,
+    ) -> (Vec<Option<MapPx>>, MapPx) {
         let ctx = egui::Context::default();
-        let net = Network::new();
         let g = MapGeometry::new(1.0);
-        let mut view = view_at(&ctx, &net, g, 2.0);
+        let mut view = view_at(&ctx, net, g, 2.0);
         let mut reported = Vec::new();
         for (i, events) in frames.into_iter().enumerate() {
             let events = events
@@ -1122,7 +1278,7 @@ mod tests {
                 ..Default::default()
             };
             let mut out = ctx.run_ui(input, |ui| {
-                reported.push(view.show(ui, &net, g, 2.0, None, |_, _, _, _| {}));
+                reported.push(view.show(ui, net, g, 2.0, None, hooks));
             });
             out.textures_delta.clear();
         }
@@ -1189,6 +1345,223 @@ mod tests {
         assert!(reported.iter().all(Option::is_none));
     }
 
+    /// Records drag events; claims a drag that starts on a node when `claim` is set.
+    #[derive(Default)]
+    struct Recorder {
+        claim: bool,
+        events: Vec<DragEvent>,
+        preview: Option<(NodeId, f64, f64)>,
+    }
+
+    impl ViewHooks for Recorder {
+        fn drag(&mut self, event: DragEvent) -> bool {
+            self.events.push(event);
+            self.claim && matches!(event, DragEvent::Start { node: Some(_), .. })
+        }
+
+        fn preview(&self) -> Option<(NodeId, f64, f64)> {
+            self.preview
+        }
+    }
+
+    /// A press at `a`, a move to `b` and the release there.
+    fn drag_frames(a: egui::Pos2, b: egui::Pos2) -> Vec<Vec<egui::Event>> {
+        vec![
+            vec![egui::Event::PointerMoved(a)],
+            vec![press(a, true)],
+            vec![egui::Event::PointerMoved(b)],
+            vec![press(b, false)],
+            vec![],
+        ]
+    }
+
+    #[test]
+    fn a_claimed_drag_does_not_pan_and_reports_its_events() {
+        let mut net = Network::new();
+        // World (-6, -6) is map px (1018, 1018), screen (500, 500).
+        let id = net.add_node(-6.0, 0.0, -6.0, NodeFlag::REGULAR);
+        let mut hooks = Recorder {
+            claim: true,
+            ..Recorder::default()
+        };
+        let (a, b) = (egui::pos2(500.0, 500.0), egui::pos2(560.0, 500.0));
+        let (reported, centre) = pointer_frames_on(
+            egui::PointerButton::Primary,
+            drag_frames(a, b),
+            &net,
+            &mut hooks,
+        );
+        assert!(reported.iter().all(Option::is_none));
+        assert_eq!(centre, (1024.0, 1024.0));
+        assert_eq!(
+            hooks.events,
+            [
+                DragEvent::Start {
+                    at: (1018.0, 1018.0),
+                    node: Some(id)
+                },
+                DragEvent::Move {
+                    at: (1048.0, 1018.0)
+                },
+                DragEvent::End {
+                    at: (1048.0, 1018.0)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unclaimed_drag_pans() {
+        let mut net = Network::new();
+        let id = net.add_node(-6.0, 0.0, -6.0, NodeFlag::REGULAR);
+        let mut hooks = Recorder::default();
+        let (a, b) = (egui::pos2(500.0, 500.0), egui::pos2(560.0, 500.0));
+        let (_, centre) = pointer_frames_on(
+            egui::PointerButton::Primary,
+            drag_frames(a, b),
+            &net,
+            &mut hooks,
+        );
+        assert_eq!(centre, (994.0, 1024.0));
+        assert_eq!(
+            hooks.events,
+            [DragEvent::Start {
+                at: (1018.0, 1018.0),
+                node: Some(id)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_drag_starting_off_a_node_is_offered_without_one() {
+        let mut net = Network::new();
+        net.add_node(-6.0, 0.0, -6.0, NodeFlag::REGULAR);
+        let mut hooks = Recorder {
+            claim: true,
+            ..Recorder::default()
+        };
+        // 40 px (20 map px) beside the node.
+        let (a, b) = (egui::pos2(540.0, 500.0), egui::pos2(600.0, 500.0));
+        let (_, centre) = pointer_frames_on(
+            egui::PointerButton::Primary,
+            drag_frames(a, b),
+            &net,
+            &mut hooks,
+        );
+        assert_eq!(centre, (994.0, 1024.0));
+        assert_eq!(
+            hooks.events,
+            [DragEvent::Start {
+                at: (1038.0, 1018.0),
+                node: None
+            }]
+        );
+    }
+
+    #[test]
+    fn a_middle_drag_is_never_offered() {
+        let mut net = Network::new();
+        net.add_node(-6.0, 0.0, -6.0, NodeFlag::REGULAR);
+        let mut hooks = Recorder {
+            claim: true,
+            ..Recorder::default()
+        };
+        let (a, b) = (egui::pos2(500.0, 500.0), egui::pos2(560.0, 500.0));
+        let (_, centre) = pointer_frames_on(
+            egui::PointerButton::Middle,
+            drag_frames(a, b),
+            &net,
+            &mut hooks,
+        );
+        assert_eq!(centre, (994.0, 1024.0));
+        assert!(hooks.events.is_empty());
+    }
+
+    /// Centres of the painted circles.
+    fn circle_centres(out: &egui::FullOutput) -> Vec<egui::Pos2> {
+        out.shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Circle(c) => Some(c.center),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_previewed_node_and_its_connections_are_drawn_at_the_preview() {
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        // Zoom 10 centred on world (0, 0): the view shows world ±51.2, so both nodes and
+        // their connection are out of view.
+        let mut net = Network::new();
+        let a = net.add_node(400.0, 0.0, 0.0, NodeFlag::REGULAR);
+        let b = net.add_node(500.0, 0.0, 0.0, NodeFlag::REGULAR);
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        let mut view = view_at(&ctx, &net, g, 10.0);
+        let run = |view: &mut MapView, hooks: &mut Recorder| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                view.show(ui, &net, g, 2.0, None, hooks);
+            });
+            out.textures_delta.clear();
+            out
+        };
+        let out = run(&mut view, &mut Recorder::default());
+        assert_eq!(count(&out), (0, 0));
+        // b previewed at world (10, 0): screen (612, 512).
+        let mut hooks = Recorder {
+            preview: Some((b, 10.0, 0.0)),
+            ..Recorder::default()
+        };
+        let out = run(&mut view, &mut hooks);
+        assert_eq!(count(&out), (1, 1));
+        assert_eq!(circle_centres(&out), [egui::pos2(612.0, 512.0)]);
+        // Previewing a moves the line's start, not a second line.
+        hooks.preview = Some((a, -10.0, 0.0));
+        let out = run(&mut view, &mut hooks);
+        assert_eq!(count(&out), (1, 1));
+        assert_eq!(circle_centres(&out), [egui::pos2(412.0, 512.0)]);
+    }
+
+    #[test]
+    fn nothing_is_hovered_while_a_preview_is_shown() {
+        let ctx = egui::Context::default();
+        let (mut net, a, b) = hover_net();
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        let g = MapGeometry::new(1.0);
+        let mut view = view_at(&ctx, &net, g, 10.0);
+        let mut hooks = Recorder {
+            preview: Some((b, 30.0, 0.0)),
+            ..Recorder::default()
+        };
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                // On node a.
+                events: vec![egui::Event::PointerMoved(egui::pos2(512.0, 512.0))],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                view.show(ui, &net, g, 2.0, None, &mut hooks);
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!((view.hovered_node, view.hovered_edge), (None, None));
+        hooks.preview = None;
+        let _ = hover_frame(&ctx, &mut view, &net, Some(egui::pos2(512.0, 512.0)));
+        assert_eq!(view.hovered_node, Some(a));
+    }
+
     /// Vertices of the meshes painted in the grid colour.
     fn grid_vertices(out: &egui::FullOutput) -> usize {
         let [r, g, b] = overlay::GRID_RGB;
@@ -1242,6 +1615,7 @@ mod tests {
         let cfg = ad_io::config_xml::load(&bytes).expect("loads");
         let net = &cfg.network;
         let geometry = MapGeometry::new(2.0);
+        let map = ad_core::map_context::MapContext::new(None, 2, 2.0, (2.0, 2.0));
         let size = egui::vec2(1920.0, 1080.0);
         let ctx = egui::Context::default();
         let texture = ctx
@@ -1288,19 +1662,9 @@ mod tests {
             let mut out = ctx.run_ui(input, |ui| {
                 let mut app = app.borrow_mut();
                 crate::ui::top_bar(&mut app, ui, &ctx);
-                let tool = app.tool.as_deref();
-                view.show(
-                    ui,
-                    net,
-                    geometry,
-                    2.0,
-                    Some(texture),
-                    |painter, t, g, cursor| {
-                        if let Some(tool) = tool {
-                            tool.paint(painter, t, g, cursor);
-                        }
-                    },
-                );
+                let mut hooks =
+                    crate::ui::ToolHooks::new(app.tool.as_deref_mut(), &map, net, false);
+                view.show(ui, net, geometry, 2.0, Some(texture), &mut hooks);
             });
             out.textures_delta.clear();
             let _prims = ctx.tessellate(out.shapes, out.pixels_per_point);

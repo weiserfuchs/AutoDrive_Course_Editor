@@ -116,6 +116,8 @@ mod tests {
                 x: 5.0,
                 z: 6.0,
                 map: &d.map,
+                net: &d.config.network,
+                snap: false,
             })
             .expect("a transaction")
     }

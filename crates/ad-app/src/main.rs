@@ -39,6 +39,8 @@ struct App {
     view_epoch: Option<u64>,
     /// The active tool, if any (AD-10).
     tool: Option<Box<dyn Tool>>,
+    /// Grid snap for the tools; session only. Shift inverts it while held.
+    snap: bool,
 }
 
 impl App {
@@ -58,6 +60,7 @@ impl App {
             view,
             view_epoch: None,
             tool: None,
+            snap: false,
         }
     }
 
@@ -101,27 +104,38 @@ impl App {
     fn run(&mut self, action: Action) {
         match action {
             Action::ToggleNodeId => self.view.show_node_id = !self.view.show_node_id,
+            Action::ToggleSnap => self.snap = !self.snap,
             Action::NodeTool if self.editable() => {
                 let next = tools::node::cycled(self.tool.as_deref());
                 self.set_tool(Some(Box::new(next)));
             }
+            Action::MoveTool if self.editable() => {
+                self.set_tool(Some(Box::new(tools::move_node::MoveTool::default())));
+            }
             Action::Undo if self.editable() => {
+                // A preview built on the old network must not commit afterwards.
+                if let Some(tool) = &mut self.tool {
+                    tool.cancel();
+                }
                 if let Some(doc) = &mut self.doc {
                     doc.undo();
                 }
             }
             Action::Redo if self.editable() => {
+                if let Some(tool) = &mut self.tool {
+                    tool.cancel();
+                }
                 if let Some(doc) = &mut self.doc {
                     doc.redo();
                 }
             }
-            Action::NodeTool | Action::Undo | Action::Redo => {}
+            Action::NodeTool | Action::MoveTool | Action::Undo | Action::Redo => {}
         }
     }
 
     /// Hands a primary click at map pixel `(px, py)` to the active tool and commits the
     /// transaction it returns. A read-only document gets no click.
-    fn click(&mut self, px: f64, py: f64) {
+    fn click(&mut self, px: f64, py: f64, snap: bool) {
         if !self.editable() {
             return;
         }
@@ -133,6 +147,8 @@ impl App {
             x,
             z,
             map: &doc.map,
+            net: &doc.config.network,
+            snap,
         }) else {
             return;
         };
@@ -224,8 +240,11 @@ mod tests {
     use ad_core::network::NodeFlag;
     use ad_io::{config_xml, map_image};
 
+    use ad_core::network::NodeId;
+
     use super::*;
     use crate::tools::node::NodeTool;
+    use crate::view::{DragEvent, ViewHooks};
 
     fn text(version: &str) -> String {
         format!(
@@ -280,13 +299,13 @@ mod tests {
     fn click_adds_a_node_and_undo_redo_run_through_actions() {
         let mut app = App::new(Settings::default());
         load(&mut app, "<version>3</version>");
-        app.click(1024.0, 1024.0);
+        app.click(1024.0, 1024.0, false);
         assert_eq!(nodes(&app), 1, "no tool, no node");
         app.run(Action::NodeTool);
         app.run(Action::NodeTool);
         assert_eq!(app.tool.as_ref().map(|t| t.name()), Some("Sub-prio node"));
         // Map pixel (1034, 1019) is world (10, -5) at scale 1.
-        app.click(1034.0, 1019.0);
+        app.click(1034.0, 1019.0, false);
         assert_eq!(nodes(&app), 2);
         let net = &app.doc.as_ref().expect("doc").config.network;
         let id = *net.order().last().expect("node");
@@ -308,10 +327,219 @@ mod tests {
         load(&mut app, "<markerID>1</markerID>");
         app.run(Action::NodeTool);
         assert!(app.tool.is_none());
+        app.run(Action::MoveTool);
+        assert!(app.tool.is_none());
         // Even a tool left active adds nothing.
         app.tool = Some(Box::new(NodeTool::new(NodeFlag::REGULAR)));
-        app.click(1024.0, 1024.0);
+        app.click(1024.0, 1024.0, false);
         assert_eq!(nodes(&app), 1);
         assert!(app.error.is_none());
+    }
+
+    /// Hands `event` to the active tool as the map panel does, and commits what it returns.
+    fn drag(app: &mut App, event: DragEvent, snap: bool) {
+        let doc = app.doc.as_mut().expect("doc");
+        let mut hooks =
+            ui::ToolHooks::new(app.tool.as_deref_mut(), &doc.map, &doc.config.network, snap);
+        hooks.drag(event);
+        if let Some(tx) = hooks.commit.take() {
+            doc.apply(tx).expect("applies");
+        }
+    }
+
+    /// The loaded node's (x, y, z) and whether there is anything to undo.
+    fn state(app: &App) -> ((f64, f64, f64), bool) {
+        let doc = app.doc.as_ref().expect("doc");
+        let net = &doc.config.network;
+        let n = net.node(net.order()[0]).expect("node");
+        ((n.x, n.y, n.z), doc.history.can_undo())
+    }
+
+    fn first(app: &App) -> NodeId {
+        app.doc.as_ref().expect("doc").config.network.order()[0]
+    }
+
+    #[test]
+    fn a_drag_commits_one_history_entry_and_undo_restores_the_start() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        app.run(Action::MoveTool);
+        let id = first(&app);
+        // The node is world (1, 2): map px (1025, 1026) at scale 1. Grab it 0.5 px off.
+        let start = DragEvent::Start {
+            at: (1025.5, 1026.0),
+            node: Some(id),
+        };
+        drag(&mut app, start, false);
+        drag(
+            &mut app,
+            DragEvent::Move {
+                at: (1040.5, 1030.0),
+            },
+            false,
+        );
+        drag(
+            &mut app,
+            DragEvent::Move {
+                at: (1050.5, 1010.0),
+            },
+            false,
+        );
+        assert_eq!(
+            state(&app),
+            ((1.0, 0.0, 2.0), false),
+            "only the release commits"
+        );
+        drag(
+            &mut app,
+            DragEvent::End {
+                at: (1060.5, 1000.0),
+            },
+            false,
+        );
+        assert_eq!(state(&app), ((36.0, 0.0, -24.0), true));
+        app.run(Action::Undo);
+        assert_eq!(state(&app), ((1.0, 0.0, 2.0), false), "one undo step");
+    }
+
+    #[test]
+    fn a_snapped_drag_lands_on_the_grid() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        let grid = app.doc.as_ref().expect("doc").map.grid;
+        app.run(Action::MoveTool);
+        let start = DragEvent::Start {
+            at: (1025.0, 1026.0),
+            node: Some(first(&app)),
+        };
+        drag(&mut app, start, true);
+        drag(
+            &mut app,
+            DragEvent::End {
+                at: (1036.3, 1013.2),
+            },
+            true,
+        );
+        let ((x, _, z), undoable) = state(&app);
+        assert!(undoable);
+        let on_grid = |v: f64, g: f64| ((v / g).round() * g - v).abs() < 1e-9;
+        assert!(
+            on_grid(x, grid.0) && on_grid(z, grid.1),
+            "({x}, {z}) on {grid:?}"
+        );
+        assert!((x - 12.3).abs() <= grid.0 / 2.0 && (z - -10.8).abs() <= grid.1 / 2.0);
+    }
+
+    #[test]
+    fn a_tool_switch_mid_drag_leaves_the_network_unchanged() {
+        for switch in [Action::MoveTool, Action::NodeTool] {
+            let mut app = App::new(Settings::default());
+            load(&mut app, "<version>3</version>");
+            app.run(Action::MoveTool);
+            let start = DragEvent::Start {
+                at: (1025.0, 1026.0),
+                node: Some(first(&app)),
+            };
+            drag(&mut app, start, false);
+            drag(
+                &mut app,
+                DragEvent::Move {
+                    at: (1100.0, 1100.0),
+                },
+                false,
+            );
+            app.run(switch);
+            assert!(app.tool.as_ref().is_some_and(|t| t.preview().is_none()));
+            // The rest of the drag reaches the new tool.
+            drag(
+                &mut app,
+                DragEvent::Move {
+                    at: (1110.0, 1100.0),
+                },
+                false,
+            );
+            drag(
+                &mut app,
+                DragEvent::End {
+                    at: (1110.0, 1100.0),
+                },
+                false,
+            );
+            assert_eq!(state(&app), ((1.0, 0.0, 2.0), false), "{switch:?}");
+        }
+    }
+
+    #[test]
+    fn a_press_and_release_without_moving_commits_nothing() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        app.run(Action::MoveTool);
+        // A press and release without a drag is a click; the move tool ignores it.
+        app.click(1025.0, 1026.0, false);
+        let start = DragEvent::Start {
+            at: (1025.0, 1026.0),
+            node: Some(first(&app)),
+        };
+        drag(&mut app, start, false);
+        drag(
+            &mut app,
+            DragEvent::End {
+                at: (1025.0, 1026.0),
+            },
+            false,
+        );
+        assert_eq!(state(&app), ((1.0, 0.0, 2.0), false));
+    }
+
+    #[test]
+    fn undo_or_redo_mid_drag_drops_the_drag() {
+        for action in [Action::Undo, Action::Redo] {
+            let mut app = App::new(Settings::default());
+            load(&mut app, "<version>3</version>");
+            app.run(Action::NodeTool);
+            // Map px (1034, 1019) is world (10, -5).
+            app.click(1034.0, 1019.0, false);
+            if action == Action::Redo {
+                app.run(Action::Undo);
+            }
+            app.run(Action::MoveTool);
+            // Undo removes the added node under the drag; redo re-adds it.
+            let net = &app.doc.as_ref().expect("doc").config.network;
+            let target = *net.order().last().expect("node");
+            let start = DragEvent::Start {
+                at: (1025.0, 1026.0),
+                node: Some(target),
+            };
+            drag(&mut app, start, false);
+            drag(
+                &mut app,
+                DragEvent::Move {
+                    at: (1100.0, 1100.0),
+                },
+                false,
+            );
+            app.run(action);
+            assert!(app.tool.as_ref().is_some_and(|t| t.preview().is_none()));
+            // `drag` panics on an apply error; the release must not commit at all.
+            drag(
+                &mut app,
+                DragEvent::End {
+                    at: (1100.0, 1100.0),
+                },
+                false,
+            );
+            let doc = app.doc.as_ref().expect("doc");
+            assert_eq!(state(&app).0, (1.0, 0.0, 2.0), "{action:?}");
+            assert_eq!(doc.history.can_redo(), action == Action::Undo, "{action:?}");
+            assert!(app.error.is_none());
+        }
+    }
+
+    #[test]
+    fn snap_toggles_with_s() {
+        let mut app = App::new(Settings::default());
+        assert!(!app.snap);
+        app.run(Action::ToggleSnap);
+        assert!(app.snap);
     }
 }
