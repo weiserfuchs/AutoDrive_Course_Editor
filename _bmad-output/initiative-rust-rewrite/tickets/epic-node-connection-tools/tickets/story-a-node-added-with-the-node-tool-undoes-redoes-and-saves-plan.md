@@ -3,14 +3,14 @@ title: 'A node added with the node tool undoes, redoes and saves'
 type: 'feature'
 ticket: '1'
 created: '2026-11-07'
-status: 'in-progress'
+status: 'built'
 baseline_revision: '1352f7866c887fc26155e1199d3ef8a3a2778659'
 route: 'full'
 route_source: 'auto'
 risk: 'high'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/initiative-rust-rewrite/architecture-rust-rewrite/architecture-rust-rewrite.md'
@@ -105,3 +105,9 @@ Java (MapPanel.java:908-917, EditorXML.java:69): by default the **left** button 
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 3 low patched; 1 false rejected.
+  - low, patch: N and F4 also fired with Shift or Alt held, because egui's logical matching ignores extra Shift/Alt. Every table entry now matches modifiers exactly (`consume_exact`); test `extra_modifiers_do_not_fire_n_or_f4` added.
+  - low, patch: the `replace_document` comment still said the tool preview is cleared there, while `App::poll_jobs` cancels the tool on an epoch change (as the Code Map planned). Comment corrected; replace_document is called only through `apply_result`, so no path skips the cancel.
+  - low, patch: the frame-time comment called (960, 540) the panel centre, which moved with the top bar. Comment corrected; measurement unchanged.
+  - false: "acceptance criterion 1 has no evidence". It is the hitl check run by the user on the fixture after the build, listed under Manual checks; not a code defect.
