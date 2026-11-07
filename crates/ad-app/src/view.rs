@@ -635,32 +635,94 @@ impl MapView {
                 mesh.add_triangle(i, i + 1, i + 2);
             }
         };
-        net.edges_in_rect_into(x0, z0, x1, z1, &mut self.edges);
+        // Which connections a preview needs: every connection of a previewed node ends at its
+        // stored position, and each end is placed at most `shift` (per axis) from where it is
+        // stored. So the box of the previewed stored positions finds them all, and so does the
+        // view widened by `shift`. Both come from one pass over the preview; no point query
+        // per previewed node (35,000 of them overran the frame budget).
+        type Rect = (f64, f64, f64, f64);
+        let mut stored: Option<Rect> = None;
+        let mut shift = (0.0_f64, 0.0_f64);
+        for (n, &(px, pz)) in preview
+            .into_iter()
+            .flatten()
+            .filter_map(|(&id, at)| net.node(id).map(|n| (n, at)))
+        {
+            stored = Some(stored.map_or((n.x, n.z, n.x, n.z), |(a, b, c, d)| {
+                (a.min(n.x), b.min(n.z), c.max(n.x), d.max(n.z))
+            }));
+            shift = (shift.0.max((px - n.x).abs()), shift.1.max((pz - n.z).abs()));
+        }
+        let (vx0, vx1, vz0, vz1) = (x0.min(x1), x0.max(x1), z0.min(z1), z0.max(z1));
+        // The batched pass's rule: a connection is drawn when its segment's box meets the view.
+        let in_view = |a: [f64; 2], b: [f64; 2]| {
+            a[0].min(b[0]) <= vx1
+                && a[0].max(b[0]) >= vx0
+                && a[1].min(b[1]) <= vz1
+                && a[1].max(b[1]) >= vz0
+        };
+        // A connection with a previewed end, drawn from its placed ends.
+        let push_moved = |mesh: &mut egui::Mesh,
+                          e: &EdgeSegment,
+                          from: Option<&(f64, f64)>,
+                          to: Option<&(f64, f64)>| {
+            let a = from.map_or(e.a, |&(x, z)| [x, z]);
+            let b = to.map_or(e.b, |&(x, z)| [x, z]);
+            if in_view(a, b) {
+                push_edge(mesh, a, b, e.look);
+            }
+        };
+        // The smallest of three ways to query: the widened view (a group moved a little, the
+        // whole network at minimum zoom included); the joint box of view and stored box; or
+        // the view and the stored box apart (one node dragged far from where it is stored).
+        let area = |(a, b, c, d): Rect| (c - a) * (d - b);
+        let view: Rect = (vx0, vz0, vx1, vz1);
+        let (query, apart) = match stored {
+            None => (view, None),
+            Some(s) => {
+                let widened = (vx0 - shift.0, vz0 - shift.1, vx1 + shift.0, vz1 + shift.1);
+                let joint = (s.0.min(vx0), s.1.min(vz0), s.2.max(vx1), s.3.max(vz1));
+                let (w, j, t) = (area(widened), area(joint), area(view) + area(s));
+                if w <= j && w <= t {
+                    (widened, None)
+                } else if j <= t {
+                    (joint, None)
+                } else {
+                    (view, Some(s))
+                }
+            }
+        };
+        net.edges_in_rect_into(query.0, query.1, query.2, query.3, &mut self.edges);
         mesh.reserve_triangles(self.edges.len() * 3);
         mesh.reserve_vertices(self.edges.len() * 7);
-        for e in &self.edges {
-            // The previewed nodes' connections are drawn below, from their preview positions.
-            if preview.is_some_and(|p| p.contains_key(&e.from) || p.contains_key(&e.to)) {
-                continue;
+        match preview {
+            // The view query alone: the R-tree already keeps only connections in view.
+            None => {
+                for e in &self.edges {
+                    push_edge(&mut mesh, e.a, e.b, e.look);
+                }
             }
-            push_edge(&mut mesh, e.a, e.b, e.look);
+            Some(pv) => {
+                for e in &self.edges {
+                    let (from, to) = (pv.get(&e.from), pv.get(&e.to));
+                    if from.is_none() && to.is_none() {
+                        // A widened or joint query also finds connections outside the view.
+                        if in_view(e.a, e.b) {
+                            push_edge(&mut mesh, e.a, e.b, e.look);
+                        }
+                    } else if apart.is_none() {
+                        push_moved(&mut mesh, e, from, to);
+                    }
+                    // Otherwise drawn below, from the query over the stored box.
+                }
+            }
         }
-        // Every connection of a previewed node ends at its stored position, so a point query
-        // there finds them all, whether or not that position is in view.
-        for &p in preview.into_iter().flat_map(|p| p.keys()) {
-            let Some(n) = net.node(p) else {
-                continue;
-            };
-            net.edges_in_rect_into(n.x, n.z, n.x, n.z, &mut self.preview_edges);
-            let moved = |id: NodeId, end: [f64; 2]| {
-                preview
-                    .and_then(|pv| pv.get(&id))
-                    .map_or(end, |&(x, z)| [x, z])
-            };
+        if let (Some(pv), Some((a, b, c, d))) = (preview, apart) {
+            net.edges_in_rect_into(a, b, c, d, &mut self.preview_edges);
             for e in &self.preview_edges {
-                // A connection between two previewed nodes is drawn once, from its start.
-                if e.from == p || (e.to == p && !previewed(e.from)) {
-                    push_edge(&mut mesh, moved(e.from, e.a), moved(e.to, e.b), e.look);
+                let (from, to) = (pv.get(&e.from), pv.get(&e.to));
+                if from.is_some() || to.is_some() {
+                    push_moved(&mut mesh, e, from, to);
                 }
             }
         }
@@ -703,9 +765,14 @@ impl MapView {
                     }
                 }
             }
-            // The previewed nodes are drawn even when their stored positions are out of view.
-            for &id in preview.into_iter().flat_map(|p| p.keys()) {
+            // The previewed nodes are drawn even when their stored positions are out of view,
+            // and culled at their preview positions by the rectangle the others are queried in.
+            for (&id, &(x, z)) in preview.into_iter().flatten() {
                 if Some(id) != hovered
+                    && x >= x0 - pad
+                    && x <= x1 + pad
+                    && z >= z0 - pad
+                    && z <= z1 + pad
                     && let Some(n) = net.node(id)
                 {
                     let centre = dot(id, n);
@@ -722,6 +789,8 @@ impl MapView {
             // Nodes too small to draw: a fixed-size white square marks each selected one in
             // view, all in one mesh.
             let mut mesh = egui::Mesh::default();
+            mesh.reserve_vertices(selection.len() * 4);
+            mesh.reserve_triangles(selection.len() * 2);
             for &id in selection {
                 if let Some(n) = net.node(id)
                     && let (x, z) = place(id, n, preview)
@@ -1523,6 +1592,7 @@ mod tests {
         events: Vec<DragEvent>,
         selects: Vec<SelectEvent>,
         preview: Option<Preview>,
+        selection: Option<BTreeSet<NodeId>>,
     }
 
     impl ViewHooks for Recorder {
@@ -1533,6 +1603,10 @@ mod tests {
         fn drag(&mut self, event: DragEvent) -> bool {
             self.events.push(event);
             self.claim && matches!(event, DragEvent::Start { node: Some(_), .. })
+        }
+
+        fn selection(&self) -> Option<&BTreeSet<NodeId>> {
+            self.selection.as_ref()
         }
 
         fn preview(&self) -> Option<&Preview> {
@@ -1979,6 +2053,99 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_draws_exactly_what_the_moved_network_draws() {
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        // Zoom 10 centred on world (0, 0): the view shows ±51.2. c, e and f are out of view;
+        // e links into the view, once with a reverse link that d does not list. At zoom 1
+        // (±512) nodes are too small to draw and f (x = 900) is still out of view.
+        let mut net = Network::new();
+        let a = net.add_node(30.0, 0.0, -30.0, NodeFlag::REGULAR);
+        let b = net.add_node(40.0, 0.0, -30.0, NodeFlag::REGULAR);
+        let c = net.add_node(100.0, 0.0, -30.0, NodeFlag::REGULAR);
+        let d = net.add_node(0.0, 0.0, 40.0, NodeFlag::REGULAR);
+        let e = net.add_node(-200.0, 0.0, 0.0, NodeFlag::SUB_PRIO);
+        let f = net.add_node(900.0, 0.0, 0.0, NodeFlag::REGULAR);
+        for (from, to, shape) in [
+            (a, b, ConnectionShape::OneWay),
+            (b, c, ConnectionShape::Dual),
+            (a, d, ConnectionShape::OneWay),
+            (e, a, ConnectionShape::OneWay),
+            (e, d, ConnectionShape::Reverse),
+            (c, f, ConnectionShape::OneWay),
+        ] {
+            net.connect(from, to, shape).expect("ok");
+        }
+        // An id the network does not hold, previewed in view and selected: never drawn.
+        let ghost = net.clone().add_node(0.0, 0.0, 0.0, NodeFlag::REGULAR);
+        // Every node selected, so rings (zoom 10) and selection marks (zoom 1) are drawn.
+        let selection: BTreeSet<NodeId> = [a, b, c, d, e, f, ghost].into_iter().collect();
+        let draw = |net: &Network, preview: Option<Preview>, zoom: f64| {
+            let mut view = view_at(&ctx, net, g, zoom);
+            let mut hooks = Recorder {
+                preview,
+                selection: Some(selection.clone()),
+                ..Recorder::default()
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                view.show(ui, net, g, 2.0, None, &mut hooks);
+            });
+            out.textures_delta.clear();
+            let mut verts: Vec<(i64, i64, [u8; 4])> = Vec::new();
+            for s in &out.shapes {
+                if let egui::Shape::Mesh(m) = &s.shape {
+                    verts.extend(m.vertices.iter().map(|v| {
+                        let p = |c: f32| (f64::from(c) * 1e3).round() as i64;
+                        (p(v.pos.x), p(v.pos.y), v.color.to_array())
+                    }));
+                }
+            }
+            verts.sort_unstable();
+            let mut centres: Vec<_> = circle_centres(&out)
+                .iter()
+                .map(|p| (p.x as i64, p.y as i64))
+                .collect();
+            centres.sort_unstable();
+            (verts, centres)
+        };
+        // At zoom 10 each preview takes one of the paint path's three queries: the view
+        // widened by the shift, the joint box of view and stored positions, and the two apart.
+        let cases: [&[(NodeId, (f64, f64))]; 3] = [
+            &[
+                (a, (25.0, -27.0)),
+                (b, (35.0, -27.0)),
+                (c, (95.0, -27.0)),
+                (d, (-5.0, 43.0)),
+            ],
+            &[(a, (-30.0, -30.0)), (b, (-20.0, -30.0)), (d, (-60.0, 40.0))],
+            &[(c, (10.0, 0.0)), (f, (20.0, 20.0))],
+        ];
+        for zoom in [10.0, 1.0] {
+            for moves in cases {
+                let mut moved = net.clone();
+                for &(id, (x, z)) in moves {
+                    moved.move_node(id, x, 0.0, z).expect("ok");
+                }
+                let want = draw(&moved, None, zoom);
+                let mut preview: Preview = moves.iter().copied().collect();
+                preview.insert(ghost, (5.0, 5.0));
+                let got = draw(&net, Some(preview), zoom);
+                assert!(!want.0.is_empty());
+                // Dots and rings at zoom 10, none at zoom 1.
+                assert_eq!(want.1.is_empty(), zoom < 2.0);
+                assert_eq!(got, want, "zoom {zoom}, {moves:?}");
+            }
+        }
+    }
+
+    #[test]
     fn nothing_is_hovered_while_a_preview_is_shown() {
         let ctx = egui::Context::default();
         let (mut net, a, b) = hover_net();
@@ -2103,6 +2270,26 @@ mod tests {
         let (none_selected, every_node): (BTreeSet<NodeId>, BTreeSet<NodeId>) =
             (BTreeSet::new(), net.order().iter().copied().collect());
         let all_selected = std::cell::Cell::new(false);
+        // Every node inside the map, for the whole-network drags (story 4.3): the fixture's node
+        // far outside the map (x = -9626) is left out, as it pins the group's offset on its
+        // axis (story 4.2 rule). `west` is the part of it with x < 0. While `group_selected`
+        // holds a set, the view gets that selection.
+        let half = crate::tools::move_node::half_extent(geometry);
+        let inside: BTreeSet<NodeId> = net
+            .order()
+            .iter()
+            .copied()
+            .filter(|id| {
+                net.node(*id)
+                    .is_some_and(|n| n.x.abs() <= half && n.z.abs() <= half)
+            })
+            .collect();
+        let west: BTreeSet<NodeId> = inside
+            .iter()
+            .copied()
+            .filter(|id| net.node(*id).is_some_and(|n| n.x < 0.0))
+            .collect();
+        let group_selected: std::cell::Cell<Option<&BTreeSet<NodeId>>> = std::cell::Cell::new(None);
         // One timed frame: tessellation included.
         let timed = |view: &mut MapView, pointer: Option<egui::Pos2>| {
             let start = std::time::Instant::now();
@@ -2114,7 +2301,9 @@ mod tests {
             let mut out = ctx.run_ui(input, |ui| {
                 let mut app = app.borrow_mut();
                 crate::ui::top_bar(&mut app, ui, &ctx);
-                let selection = if all_selected.get() {
+                let selection = if let Some(group) = group_selected.get() {
+                    group
+                } else if all_selected.get() {
                     &every_node
                 } else {
                     &none_selected
@@ -2385,6 +2574,78 @@ mod tests {
                 .as_deref()
                 .and_then(|t| t.preview())
                 .is_some()
+        );
+
+        // Story 4.3: a group selected and dragged with the move tool by one of its nodes with
+        // the pointer triangle of the drags above, rings and preview drawn, the view given the
+        // tool's selection. The group stops where its outermost node meets the map edge (story
+        // 4.2 clamp).
+        // `west_half` picks `west`, else `inside`.
+        let group_case = |name: &str, west_half: bool, grabbed: NodeId, steps: f64| {
+            let set = if west_half { &west } else { &inside };
+            assert!(set.contains(&grabbed));
+            let origin = net.node(grabbed).map(|n| (n.x, n.z)).expect("node");
+            let (min_x, max_x) = set
+                .iter()
+                .filter_map(|id| net.node(*id))
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), n| {
+                    (lo.min(n.x), hi.max(n.x))
+                });
+            let (lo, hi) = (-half - min_x, half - max_x);
+            println!("{name}: x offset range {lo:.1} .. {hi:.1} world units");
+            let ctx = |x, z| crate::tools::ToolContext {
+                x,
+                z,
+                map: &map,
+                net,
+                selection: set,
+                snap: false,
+                hovered_node: None,
+                hovered_edge: None,
+            };
+            let begin = |v: &mut MapView| {
+                at(geometry.to_map(origin.0, origin.1), steps)(v);
+                let mut tool = crate::tools::move_node::MoveTool::default();
+                let tool_ref: &mut dyn crate::tools::Tool = &mut tool;
+                assert!(tool_ref.on_drag_start(&ctx(origin.0, origin.1), Some(grabbed)));
+                app.borrow_mut().tool = Some(Box::new(tool));
+            };
+            let step = |v: &mut MapView, i: usize| {
+                let zoom = v.transform.as_ref().expect("set").zoom;
+                let dx = drag_px(i) / zoom * geometry.scale;
+                let mut app = app.borrow_mut();
+                let tool = app.tool.as_deref_mut().expect("move tool");
+                tool.on_drag(&ctx(origin.0 + dx, origin.1));
+                // Every selected node is previewed, and the grabbed one follows the pointer up
+                // to the group's edge clamp.
+                let preview = tool.preview().expect("preview");
+                assert_eq!(preview.len(), set.len());
+                assert!((preview[&grabbed].0 - (origin.0 + dx.clamp(lo, hi))).abs() < 1e-9);
+            };
+            group_selected.set(Some(set));
+            report(name, true, &begin, &step, false);
+            group_selected.set(None);
+        };
+        group_case(
+            "drag: min zoom, whole network selected",
+            false,
+            dragged,
+            0.0,
+        );
+        group_case(
+            "drag: max zoom, whole network selected",
+            false,
+            dragged,
+            100.0,
+        );
+        // Half the network moves hundreds of world units at minimum zoom, so the preview's
+        // shift is large: the paint path's joint (whole-map) or offset query, not the widened one.
+        let west_grabbed = *west.first().expect("a node west of x = 0");
+        group_case(
+            "drag: min zoom, west half selected",
+            true,
+            west_grabbed,
+            0.0,
         );
     }
 }
