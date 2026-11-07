@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ad_core::command::{AddNodes, Command, Connect, DeleteNodes, EditMarker, Transaction};
+use ad_core::heightmap::{Heightmap, sample_height};
 use ad_core::history::History;
+use ad_core::map_context::MapContext;
 use ad_core::network::{ConnectionKind, ConnectionShape, Network, NodeFlag, NodeId};
 use ad_io::config_xml::{GameVersion, load, save_to};
 
@@ -103,15 +106,23 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .take(2)
         .collect();
 
+    // The node tool's height: sampled from a small generated heightmap (AD-7).
+    let mut map = MapContext::new(None, 1, 2.0, (2.0, 2.0));
+    let raw: Vec<u16> = (0..16 * 16).map(|i| 1000 + 37 * i).collect();
+    map.heightmap = Some(Arc::new(Heightmap::new(16, 16, raw).ok_or("heightmap")?));
+    let (x, z) = (12.5, -40.125);
+    let y = sample_height(&map, x, z).ok_or("no height")?;
+    assert!(y > 0.0);
+
     let mut history = History::default();
     // The add runs in its own transaction because `Connect` needs the new node's id.
     history.apply(
         &mut cfg.network,
         Transaction::new(vec![Command::AddNodes(AddNodes::new(vec![(
-            12.5,
-            3.25,
-            -40.125,
-            NodeFlag(0),
+            x,
+            y,
+            z,
+            NodeFlag::REGULAR,
         )]))]),
     )?;
     let added = *cfg.network.order().last().ok_or("empty")?;
@@ -167,6 +178,7 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
     assert_eq!(named(&format!("{old_name} renamed")), 1);
     assert_eq!(named(&old_name), 0);
     assert!(net.markers().iter().any(|m| m.node == new_last));
+    assert_eq!(net.node(new_last).ok_or("added")?.y, y);
     let kinds: Vec<_> = net
         .node(new_last)
         .ok_or("added")?
