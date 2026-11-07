@@ -3,7 +3,7 @@ title: 'Dragging the whole network selected stays within the frame budget'
 type: 'feature'
 ticket: '3'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '5acae5990e74f606526140dfc77f93d07ddd3799'
 route: 'full'
 route_source: 'auto'

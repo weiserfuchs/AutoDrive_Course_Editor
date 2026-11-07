@@ -38,13 +38,24 @@ risk = "high"
 notes = ["Beyond its criteria: the case also asserts that every preview position moved, so a frozen preview cannot pass."]
 
 [[entry]]
+id = 11
+type = "bug"
+title = "Zoomed out, a drag on a selection mark grabs the selection"
+description = "At zoom levels where nodes are too small to hit (story 2.9 rule), selected nodes show only a mark (story 4.1), so a move drag could not start on the selection. A primary press within the mark (half its size plus 2 px) of a selected node now offers that node to the tool, so the move tool drags the selection; unselected nodes stay unhittable at that size. Found by the user in the story 4.3 hand check."
+verify = "A view test shows a press on and next to a mark grabs the selected node, while a press farther away, on an unselected node or with no selection grabs none; the user drags a selection at minimum zoom."
+covers = ["R2"]
+after = [3]
+hitl = true
+risk = "low"
+
+[[entry]]
 id = 4
 type = "story"
 title = "A lasso selects the nodes inside a drawn outline"
 description = "A toolbar switch picks rectangle or lasso for the right drag; the lasso toggles the nodes inside the drawn outline: the screen outline is converted to world coordinates and queried with Network::in_polygon (AD-5). The outline is drawn while dragging."
 verify = "Tests show the polygon pick on a concave outline and the switch."
 covers = ["R1"]
-after = [3]
+after = [11]
 hitl = false
 risk = "low"
 
@@ -113,3 +124,5 @@ covers = []
 after = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 hitl = false
 risk = "low"
+
+
