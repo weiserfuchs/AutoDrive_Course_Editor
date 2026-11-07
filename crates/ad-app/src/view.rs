@@ -1,6 +1,7 @@
 //! The map view: map pixel <-> screen transform, culling, painting and input.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 
 use eframe::egui;
 
@@ -17,6 +18,10 @@ const OVERLAY_PAD_PX: f64 = 60.0;
 const NAME_FONT_SIZE: f32 = 12.0;
 /// Padding around the text of an info box row, in px.
 const BOX_PAD_PX: f32 = 2.0;
+/// Dash and gap length of the selection rectangle, in px.
+const SELECT_DASH_PX: f32 = 4.0;
+/// Side of the mark of a selected node while nodes are too small to draw, in px.
+const SELECTED_MARK_PX: f32 = 3.0;
 
 /// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
 /// centre is in map px. The panel is the screen rectangle the map is shown in.
@@ -143,9 +148,26 @@ pub enum DragEvent {
     Cancel,
 }
 
-/// What the caller of [`MapView::show`] plugs in: drag handling, a moved-node preview and
-/// an overlay. All default to nothing.
+/// A secondary-button selection gesture on the view (AD-15), whichever tool is active.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SelectEvent {
+    /// A right drag released; `a` is the press and `b` the release position, in map px.
+    Rect { a: MapPx, b: MapPx },
+    /// A right click, on `node` if one was under it.
+    Click { node: Option<NodeId> },
+}
+
+/// What the caller of [`MapView::show`] plugs in: drag handling, selection, a moved-node
+/// preview and an overlay. All default to nothing.
 pub trait ViewHooks {
+    /// A secondary-button selection gesture.
+    fn select(&mut self, _event: SelectEvent) {}
+
+    /// The selected nodes, drawn with the selection ring.
+    fn selection(&self) -> Option<&BTreeSet<NodeId>> {
+        None
+    }
+
     /// A primary drag event. For `Start`, true claims the drag: it does not pan, and its
     /// `Move` and `End` events follow. The return value of other events is ignored.
     fn drag(&mut self, _event: DragEvent) -> bool {
@@ -194,6 +216,8 @@ pub struct MapView {
     preview_edges: Vec<EdgeSegment>,
     /// Whether the hooks claimed the primary drag in progress.
     drag_claimed: bool,
+    /// Press position, in map px, of the selection rectangle being dragged.
+    select_start: Option<MapPx>,
     /// Loaded on the first frame, once per app run.
     icons: Option<Icons>,
     pub show_grid: bool,
@@ -217,6 +241,7 @@ impl Default for MapView {
             edges: Vec::new(),
             preview_edges: Vec::new(),
             drag_claimed: false,
+            select_start: None,
             icons: None,
             show_grid: false,
             show_marker_icons: true,
@@ -234,7 +259,14 @@ impl MapView {
     pub fn reset(&mut self) {
         self.transform = None;
         self.drag_claimed = false;
+        self.select_start = None;
         self.clear_hover();
+    }
+
+    /// The view's transform, once a frame has created it.
+    #[cfg(test)]
+    pub fn transform_mut(&mut self) -> Option<&mut ViewTransform> {
+        self.transform.as_mut()
     }
 
     /// Nothing is hovered, e.g. while there is no document.
@@ -245,8 +277,9 @@ impl MapView {
 
     /// Draws the view and handles pan and zoom. A middle drag pans; a primary drag pans
     /// unless `hooks` claims it at its start (Java's default mapping). A primary click is
-    /// returned as the clicked map pixel for the active tool. The hooks' overlay gets the
-    /// pointer's screen position while it is over the view.
+    /// returned as the clicked map pixel for the active tool. A secondary drag or click is
+    /// reported to `hooks` as a [`SelectEvent`]. The hooks' overlay gets the pointer's
+    /// screen position while it is over the view.
     #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
@@ -302,6 +335,29 @@ impl MapView {
                 });
             }
         }
+        // The secondary button selects whichever tool is active, and never pans (AD-15).
+        // The press is kept in map px, so a wheel zoom mid-drag keeps the rectangle's corner.
+        let secondary = egui::PointerButton::Secondary;
+        if response.drag_started_by(secondary) {
+            self.select_start = ui
+                .input(|i| i.pointer.press_origin())
+                .map(|p| transform.screen_to_map(f64::from(p.x), f64::from(p.y)));
+        }
+        if response.drag_stopped_by(secondary)
+            && let Some(a) = self.select_start.take()
+            && let Some(b) = pointer_map()
+        {
+            hooks.select(SelectEvent::Rect { a, b });
+        }
+        // A press and release within egui's click tolerance is a click, not a rectangle.
+        if response.clicked_by(secondary)
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let ns = look::node_px(node_size, transform.zoom);
+            let c = (f64::from(p.x), f64::from(p.y));
+            let node = hover::node_at(net, geometry, transform, ns, c, &mut self.nodes);
+            hooks.select(SelectEvent::Click { node });
+        }
         if (response.dragged_by(primary) && !self.drag_claimed)
             || response.dragged_by(egui::PointerButton::Middle)
         {
@@ -346,7 +402,17 @@ impl MapView {
             cursor.and_then(|c| hover::node_at(net, geometry, &t, ns, c, &mut self.nodes));
         self.hovered_edge =
             cursor.and_then(|c| hover::edge_at(net, geometry, &t, ns, self.hovered_node, c));
-        self.paint(&painter, net, geometry, node_size, map_texture, &t, preview);
+        let selection = hooks.selection().filter(|s| !s.is_empty());
+        self.paint(
+            &painter,
+            net,
+            geometry,
+            node_size,
+            map_texture,
+            &t,
+            preview,
+            selection,
+        );
         if let Some(id) = self.hovered_node {
             self.paint_info_box(&painter, net, geometry, &t, ns, id, rect, preview);
         }
@@ -360,6 +426,27 @@ impl MapView {
             });
         // Last, so tools draw on top of everything.
         hooks.paint(&painter, &t, geometry, response.hover_pos(), hovered_edge);
+        if response.dragged_by(secondary)
+            && let Some((mx, my)) = self.select_start
+            && let Some(b) = ui.input(|i| i.pointer.interact_pos())
+        {
+            let (sx, sy) = t.map_to_screen(mx, my);
+            let r = egui::Rect::from_two_pos(egui::pos2(sx as f32, sy as f32), b);
+            let corners = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            let stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+            painter.extend(egui::Shape::dashed_line(
+                &corners,
+                stroke,
+                SELECT_DASH_PX,
+                SELECT_DASH_PX,
+            ));
+        }
         clicked
     }
 
@@ -437,6 +524,7 @@ impl MapView {
         map_texture: Option<egui::TextureId>,
         t: &ViewTransform,
         preview: Option<(NodeId, f64, f64)>,
+        selection: Option<&BTreeSet<NodeId>>,
     ) {
         if let Some(id) = map_texture {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -563,28 +651,61 @@ impl MapView {
                 painter.circle_filled(centre, radius, look::node_colour(n.flag.0));
                 centre
             };
+            // The hover ring, also drawn around every selected node.
+            let ring = |centre: egui::Pos2| {
+                painter.circle_stroke(
+                    centre,
+                    radius,
+                    egui::Stroke::new(HOVER_RING_FACTOR * ns as f32, egui::Color32::WHITE),
+                );
+            };
+            let selected = |id: NodeId| selection.is_some_and(|s| s.contains(&id));
             for &id in &self.nodes {
                 if Some(id) == hovered || Some(id) == previewed {
                     continue;
                 }
                 if let Some(n) = net.node(id) {
-                    dot(id, n);
+                    let centre = dot(id, n);
+                    if selected(id) {
+                        ring(centre);
+                    }
                 }
             }
             // The previewed node is drawn even when its stored position is out of view.
             if let Some(id) = previewed.filter(|&p| Some(p) != hovered)
                 && let Some(n) = net.node(id)
             {
-                dot(id, n);
+                let centre = dot(id, n);
+                if selected(id) {
+                    ring(centre);
+                }
             }
             // On top of all other nodes, with a white ring.
             if let Some((id, n)) = hovered.and_then(|id| net.node(id).map(|n| (id, n))) {
-                let centre = dot(id, n);
-                painter.circle_stroke(
-                    centre,
-                    radius,
-                    egui::Stroke::new(HOVER_RING_FACTOR * ns as f32, egui::Color32::WHITE),
-                );
+                ring(dot(id, n));
+            }
+        } else if let Some(selection) = selection {
+            // Nodes too small to draw: a fixed-size white square marks each selected one in
+            // view, all in one mesh.
+            let mut mesh = egui::Mesh::default();
+            for &id in selection {
+                if let Some(n) = net.node(id)
+                    && let (x, z) = place(id, n, preview)
+                    && x >= x0 - pad
+                    && x <= x1 + pad
+                    && z >= z0 - pad
+                    && z <= z1 + pad
+                {
+                    let (sx, sy) = to_screen(x, z);
+                    let rect = egui::Rect::from_center_size(
+                        egui::pos2(sx as f32, sy as f32),
+                        egui::Vec2::splat(SELECTED_MARK_PX),
+                    );
+                    mesh.add_colored_rect(rect, egui::Color32::WHITE);
+                }
+            }
+            if !mesh.is_empty() {
+                painter.add(egui::Shape::mesh(mesh));
             }
         }
 
@@ -1366,10 +1487,15 @@ mod tests {
     struct Recorder {
         claim: bool,
         events: Vec<DragEvent>,
+        selects: Vec<SelectEvent>,
         preview: Option<(NodeId, f64, f64)>,
     }
 
     impl ViewHooks for Recorder {
+        fn select(&mut self, event: SelectEvent) {
+            self.selects.push(event);
+        }
+
         fn drag(&mut self, event: DragEvent) -> bool {
             self.events.push(event);
             self.claim && matches!(event, DragEvent::Start { node: Some(_), .. })
@@ -1491,6 +1617,219 @@ mod tests {
         );
         assert_eq!(centre, (994.0, 1024.0));
         assert!(hooks.events.is_empty());
+    }
+
+    #[test]
+    fn a_right_drag_reports_a_rect_and_does_not_pan() {
+        let mut net = Network::new();
+        net.add_node(-6.0, 0.0, -6.0, NodeFlag::REGULAR);
+        // Claiming hooks must not see the drag either: it is not a primary drag.
+        let mut hooks = Recorder {
+            claim: true,
+            ..Recorder::default()
+        };
+        let (a, b) = (egui::pos2(500.0, 500.0), egui::pos2(560.0, 440.0));
+        let (reported, centre) = pointer_frames_on(
+            egui::PointerButton::Secondary,
+            drag_frames(a, b),
+            &net,
+            &mut hooks,
+        );
+        assert!(reported.iter().all(Option::is_none));
+        assert_eq!(centre, (1024.0, 1024.0));
+        assert!(hooks.events.is_empty());
+        assert_eq!(
+            hooks.selects,
+            [SelectEvent::Rect {
+                a: (1018.0, 1018.0),
+                b: (1048.0, 988.0)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_right_click_reports_the_node_under_it_or_none() {
+        let mut net = Network::new();
+        let id = net.add_node(-6.0, 0.0, -6.0, NodeFlag::REGULAR);
+        for (p, node) in [
+            (egui::pos2(500.0, 500.0), Some(id)),
+            (egui::pos2(600.0, 500.0), None),
+        ] {
+            let mut hooks = Recorder::default();
+            // A 4 px wobble stays within egui's click tolerance: still a click.
+            let q = p + egui::vec2(4.0, 0.0);
+            let (reported, centre) = pointer_frames_on(
+                egui::PointerButton::Secondary,
+                vec![
+                    vec![egui::Event::PointerMoved(p)],
+                    vec![press(p, true)],
+                    vec![egui::Event::PointerMoved(q)],
+                    vec![egui::Event::PointerMoved(p)],
+                    vec![press(p, false)],
+                    vec![],
+                ],
+                &net,
+                &mut hooks,
+            );
+            assert!(reported.iter().all(Option::is_none));
+            assert_eq!(centre, (1024.0, 1024.0));
+            assert_eq!(hooks.selects, [SelectEvent::Click { node }], "{p:?}");
+        }
+    }
+
+    #[test]
+    fn a_primary_drag_still_pans_and_selects_nothing() {
+        let mut hooks = Recorder::default();
+        let (a, b) = (egui::pos2(500.0, 500.0), egui::pos2(560.0, 500.0));
+        let (_, centre) = pointer_frames_on(
+            egui::PointerButton::Primary,
+            drag_frames(a, b),
+            &Network::new(),
+            &mut hooks,
+        );
+        assert_eq!(centre, (994.0, 1024.0));
+        assert!(hooks.selects.is_empty());
+    }
+
+    /// Hooks that hand the view a fixed selection.
+    struct Selected(BTreeSet<NodeId>);
+
+    impl ViewHooks for Selected {
+        fn selection(&self) -> Option<&BTreeSet<NodeId>> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn selected_nodes_are_drawn_with_the_ring() {
+        let ctx = egui::Context::default();
+        let (net, _, b) = hover_net();
+        let g = MapGeometry::new(1.0);
+        let mut view = view_at(&ctx, &net, g, 10.0);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 1024.0),
+            )),
+            ..Default::default()
+        };
+        let mut hooks = Selected(BTreeSet::from([b]));
+        let mut out = ctx.run_ui(input, |ui| {
+            view.show(ui, &net, g, 2.0, None, &mut hooks);
+        });
+        out.textures_delta.clear();
+        let rings: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Circle(c) if c.stroke.width > 0.0 => Some(*c),
+                _ => None,
+            })
+            .collect();
+        // Only b, at screen (712, 512), with the hover ring's look.
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].center, egui::pos2(712.0, 512.0));
+        assert_eq!(rings[0].stroke.color, egui::Color32::WHITE);
+        assert!((rings[0].stroke.width - 1.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn selected_nodes_too_small_to_draw_get_a_mark() {
+        let ctx = egui::Context::default();
+        let (net, _, b) = hover_net();
+        let g = MapGeometry::new(1.0);
+        // At zoom 0.5 nodes are 1 px: no dots.
+        assert!(f64::from(look::node_px(2.0, 0.5)) < MIN_NODE_PX);
+        let mut view = view_at(&ctx, &net, g, 0.5);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 1024.0),
+            )),
+            ..Default::default()
+        };
+        let mut hooks = Selected(BTreeSet::from([b]));
+        let mut out = ctx.run_ui(input, |ui| {
+            view.show(ui, &net, g, 2.0, None, &mut hooks);
+        });
+        out.textures_delta.clear();
+        let marks: Vec<egui::Rect> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(m)
+                    if m.texture_id == egui::TextureId::default()
+                        && m.vertices.iter().all(|v| v.color == egui::Color32::WHITE) =>
+                {
+                    Some(m.vertices.chunks(4).map(|quad| {
+                        let mut r = egui::Rect::NOTHING;
+                        for v in quad {
+                            r.extend_with(v.pos);
+                        }
+                        r
+                    }))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        // Only b, at screen (522, 512); a is unselected and gets none.
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].center(), egui::pos2(522.0, 512.0));
+        assert_eq!(marks[0].size(), egui::Vec2::splat(SELECTED_MARK_PX));
+    }
+
+    #[test]
+    fn the_rectangle_is_drawn_while_right_dragging() {
+        let ctx = egui::Context::default();
+        let net = Network::new();
+        let g = MapGeometry::new(1.0);
+        let mut view = view_at(&ctx, &net, g, 2.0);
+        let (a, b) = (egui::pos2(500.0, 500.0), egui::pos2(560.0, 440.0));
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut dashes = Vec::new();
+        for (i, events) in [
+            vec![egui::Event::PointerMoved(a)],
+            vec![button(a, true)],
+            vec![egui::Event::PointerMoved(b)],
+            vec![button(b, false)],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                time: Some(i as f64 * 0.016),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                view.show(ui, &net, g, 2.0, None, &mut ());
+            });
+            out.textures_delta.clear();
+            let mut bounds = egui::Rect::NOTHING;
+            for s in &out.shapes {
+                if let egui::Shape::LineSegment { points, stroke } = &s.shape
+                    && stroke.color == egui::Color32::WHITE
+                {
+                    bounds.extend_with(points[0]);
+                    bounds.extend_with(points[1]);
+                }
+            }
+            dashes.push(bounds);
+        }
+        // Only while the right button drags; the dashes span press to pointer.
+        assert!(!dashes[0].is_positive() && !dashes[1].is_positive());
+        assert_eq!(dashes[2], egui::Rect::from_two_pos(a, b));
+        assert!(!dashes[3].is_positive());
     }
 
     /// Centres of the painted circles.
@@ -1667,6 +2006,10 @@ mod tests {
         app.borrow_mut().tool = Some(Box::new(crate::tools::node::NodeTool::new(
             ad_core::network::NodeFlag::REGULAR,
         )));
+        // The selection the hooks hand the view: none, or every node while `all_selected`.
+        let (none_selected, every_node): (BTreeSet<NodeId>, BTreeSet<NodeId>) =
+            (BTreeSet::new(), net.order().iter().copied().collect());
+        let all_selected = std::cell::Cell::new(false);
         // One timed frame: tessellation included.
         let timed = |view: &mut MapView, pointer: Option<egui::Pos2>| {
             let start = std::time::Instant::now();
@@ -1678,8 +2021,13 @@ mod tests {
             let mut out = ctx.run_ui(input, |ui| {
                 let mut app = app.borrow_mut();
                 crate::ui::top_bar(&mut app, ui, &ctx);
+                let selection = if all_selected.get() {
+                    &every_node
+                } else {
+                    &none_selected
+                };
                 let mut hooks =
-                    crate::ui::ToolHooks::new(app.tool.as_deref_mut(), &map, net, false);
+                    crate::ui::ToolHooks::new(app.tool.as_deref_mut(), &map, net, selection, false);
                 view.show(ui, net, geometry, 2.0, Some(texture), &mut hooks);
             });
             out.textures_delta.clear();
@@ -1778,6 +2126,22 @@ mod tests {
         };
         let none = |_: &mut MapView, _: usize| {};
         report("static: min zoom", true, &at(centre, 0.0), &none, false);
+        all_selected.set(true);
+        report(
+            "static: min zoom, all selected",
+            true,
+            &at(centre, 0.0),
+            &none,
+            false,
+        );
+        report(
+            "static: mid zoom, dense, all selected",
+            true,
+            &at(dense, 6.0),
+            &none,
+            false,
+        );
+        all_selected.set(false);
         report(
             "static: mid zoom, dense",
             true,

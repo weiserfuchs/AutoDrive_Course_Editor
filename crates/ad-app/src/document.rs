@@ -1,11 +1,12 @@
-//! The open document: config, history, path and epoch (AD-9, AD-18).
+//! The open document: config, history, selection, path and epoch (AD-9, AD-15, AD-18).
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use ad_core::command::Transaction;
 use ad_core::history::{EntryId, History};
 use ad_core::map_context::MapContext;
-use ad_core::network::NetworkError;
+use ad_core::network::{NetworkError, NodeId};
 use ad_io::config_xml::LoadedConfig;
 use ad_io::map_image::MapImage;
 
@@ -20,6 +21,9 @@ pub struct Document {
     pub map_texture: Option<eframe::egui::TextureHandle>,
     /// A warning about the map image, shown until the next document loads.
     pub notice: Option<String>,
+    /// Selected nodes, kept outside the history and pruned to existing ids after every
+    /// apply, undo and redo (AD-15). A new document starts with none (AD-18).
+    pub selection: BTreeSet<NodeId>,
 }
 
 impl Document {
@@ -49,21 +53,34 @@ impl Document {
             map_image: Some(map_image),
             map_texture: None,
             notice,
+            selection: BTreeSet::new(),
         }
     }
 
     pub fn apply(&mut self, tx: Transaction) -> Result<EntryId, NetworkError> {
-        self.history.apply(&mut self.config.network, tx)
+        let result = self.history.apply(&mut self.config.network, tx);
+        self.prune_selection();
+        result
     }
 
     /// Returns false when there is nothing to undo or the history is read-only.
     pub fn undo(&mut self) -> bool {
-        self.history.undo(&mut self.config.network)
+        let done = self.history.undo(&mut self.config.network);
+        self.prune_selection();
+        done
     }
 
     /// Returns false when there is nothing to redo or the history is read-only.
     pub fn redo(&mut self) -> bool {
-        self.history.redo(&mut self.config.network)
+        let done = self.history.redo(&mut self.config.network);
+        self.prune_selection();
+        done
+    }
+
+    /// Drops selected ids whose node no longer exists (AD-15).
+    fn prune_selection(&mut self) {
+        let net = &self.config.network;
+        self.selection.retain(|&id| net.node(id).is_some());
     }
 
     /// Whether tools, Undo and Redo may change this document (AD-11).
@@ -121,6 +138,43 @@ mod tests {
                 hovered_edge: None,
             })
             .expect("a transaction")
+    }
+
+    fn delete_tx(id: NodeId) -> Transaction {
+        use ad_core::command::{Command, DeleteNodes};
+        Transaction::new(vec![Command::DeleteNodes(DeleteNodes::new(vec![id]))])
+    }
+
+    #[test]
+    fn undo_prunes_a_selected_node_the_edit_added() {
+        let mut d = doc("<version>3</version>");
+        let tx = node_tx(&d);
+        d.apply(tx).expect("applies");
+        let first = d.config.network.order()[0];
+        let added = *d.config.network.order().last().expect("node");
+        d.selection.extend([first, added]);
+        assert!(d.undo());
+        assert_eq!(d.selection.iter().copied().collect::<Vec<_>>(), [first]);
+        // Redo brings the node back, not its selection.
+        assert!(d.redo());
+        assert_eq!(d.selection.iter().copied().collect::<Vec<_>>(), [first]);
+    }
+
+    #[test]
+    fn delete_prunes_the_selection_and_undo_does_not_reselect_it() {
+        let mut d = doc("<version>3</version>");
+        let id = d.config.network.order()[0];
+        d.selection.insert(id);
+        d.apply(delete_tx(id)).expect("applies");
+        assert!(d.selection.is_empty());
+        assert!(d.undo());
+        assert!(d.config.network.node(id).is_some());
+        assert!(d.selection.is_empty());
+    }
+
+    #[test]
+    fn a_new_document_starts_with_no_selection() {
+        assert!(doc("<version>3</version>").selection.is_empty());
     }
 
     #[test]

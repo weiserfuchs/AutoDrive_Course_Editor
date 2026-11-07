@@ -462,6 +462,16 @@ mod tests {
     }
 
     #[test]
+    fn a_new_document_starts_with_an_empty_selection() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        let id = first(&app);
+        app.doc.as_mut().expect("doc").selection.insert(id);
+        load(&mut app, "<version>3</version>");
+        assert!(app.doc.as_ref().expect("doc").selection.is_empty());
+    }
+
+    #[test]
     fn a_failed_load_keeps_the_tool() {
         let mut app = App::new(Settings::default());
         load(&mut app, "<version>3</version>");
@@ -520,8 +530,13 @@ mod tests {
     /// Hands `event` to the active tool as the map panel does, and commits what it returns.
     fn drag(app: &mut App, event: DragEvent, snap: bool) {
         let doc = app.doc.as_mut().expect("doc");
-        let mut hooks =
-            ui::ToolHooks::new(app.tool.as_deref_mut(), &doc.map, &doc.config.network, snap);
+        let mut hooks = ui::ToolHooks::new(
+            app.tool.as_deref_mut(),
+            &doc.map,
+            &doc.config.network,
+            &doc.selection,
+            snap,
+        );
         hooks.drag(event);
         if let Some(tx) = hooks.commit.take() {
             doc.apply(tx).expect("applies");
