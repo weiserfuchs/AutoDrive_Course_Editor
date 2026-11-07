@@ -3,7 +3,7 @@ title: 'The delete tool removes the node or connection under the cursor'
 type: 'feature'
 ticket: '4'
 created: '2026-11-07'
-status: 'in-review'
+status: 'built'
 baseline_revision: '65daebe026896c27dd3722c5670c6e23947aa62f'
 route: 'full'
 route_source: 'auto'
@@ -95,3 +95,11 @@ context:
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 1 low patched; 1 low, 1 low and 2 false rejected.
+  - low, patch: the edge hit area was a capsule reaching EDGE_HIT_PX past each drawn end, so with small nodes a cursor behind a node or on its centre (ns < 2) hit the connection, against the frozen "drawn part only" rule. The projection must now fall within the drawn segment; test `small_nodes_leave_no_end_caps_to_hit`.
+  - false: "acceptance criterion 1 is not tested on the fixture". It is the user's hand check on the fixture; the app test covers the logic, `golden_edited` the saved removal.
+  - low, reject: Ctrl+Z and Delete pressed in the same frame could delete a node an undone move took away from the cursor. Needs both keys in one frame; a fix adds per-frame re-hover logic.
+  - false: "the frame-time result rests on the plan's note". The release run was repeated after the patch: every case under 16 ms.
+  - low, reject: the Delete-mid-drag test sets the hover by hand, a state the app does not reach because nothing is hovered during a preview. That matches the matrix ("nothing without a hovered node"); the test still proves the cancel path.
+- deferred-work.md: the implementer had removed the hovered_edge entry; it was restored (the file is append-only). This story settles it.
