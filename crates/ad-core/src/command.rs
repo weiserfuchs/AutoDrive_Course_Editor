@@ -111,6 +111,24 @@ impl EditMarker {
     }
 }
 
+/// Sets a node's flag; revert restores the flag it had, whatever its file value (AD-3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetFlag {
+    pub node: NodeId,
+    pub flag: NodeFlag,
+    old: Option<NodeFlag>,
+}
+
+impl SetFlag {
+    pub fn new(node: NodeId, flag: NodeFlag) -> Self {
+        Self {
+            node,
+            flag,
+            old: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     AddNodes(AddNodes),
@@ -119,6 +137,7 @@ pub enum Command {
     Disconnect(Disconnect),
     MoveNodes(MoveNodes),
     EditMarker(EditMarker),
+    SetFlag(SetFlag),
 }
 
 fn move_to(net: &mut Network, id: NodeId, p: Position) -> Result<(), NetworkError> {
@@ -185,6 +204,15 @@ impl Command {
                 };
                 Ok(())
             }
+            Command::SetFlag(c) => {
+                let old = net
+                    .node(c.node)
+                    .ok_or(NetworkError::UnknownNode(c.node))?
+                    .flag;
+                net.set_flag(c.node, c.flag)?;
+                c.old = Some(old);
+                Ok(())
+            }
         }
     }
 
@@ -221,6 +249,10 @@ impl Command {
                 net.revert_marker(&c.delta);
                 Ok(())
             }
+            Command::SetFlag(c) => match c.old {
+                Some(old) => net.set_flag(c.node, old),
+                None => Ok(()),
+            },
         }
     }
 }
@@ -380,6 +412,35 @@ pub(crate) mod tests {
         round_trip(n, one(Command::DeleteNodes(DeleteNodes::new(vec![b]))));
         let (n, ids) = linked();
         round_trip(n, one(Command::DeleteNodes(DeleteNodes::new(ids.to_vec()))));
+    }
+
+    #[test]
+    fn round_trip_set_flag_restores_any_file_value() {
+        let (mut n, [a, ..]) = linked();
+        n.set_flag(a, NodeFlag(4)).expect("flag");
+        let (n, _) = round_trip(
+            n,
+            one(Command::SetFlag(SetFlag::new(a, NodeFlag::SUB_PRIO))),
+        );
+        assert_eq!(n.node(a).map(|x| x.flag), Some(NodeFlag::SUB_PRIO));
+        let mut tx = one(Command::SetFlag(SetFlag::new(a, NodeFlag::REGULAR)));
+        let mut n = n;
+        tx.apply(&mut n).expect("apply");
+        tx.revert(&mut n).expect("revert");
+        assert_eq!(n.node(a).map(|x| x.flag), Some(NodeFlag::SUB_PRIO));
+    }
+
+    #[test]
+    fn set_flag_on_a_missing_node_fails_and_changes_nothing() {
+        let (mut n, [a, ..]) = linked();
+        let removed = n.remove_node(a).expect("remove");
+        let before = snap(&n);
+        let mut tx = one(Command::SetFlag(SetFlag::new(
+            removed.id(),
+            NodeFlag::SUB_PRIO,
+        )));
+        assert!(tx.apply(&mut n).is_err());
+        assert_eq!(snap(&n), before);
     }
 
     #[test]

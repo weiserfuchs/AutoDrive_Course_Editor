@@ -11,6 +11,7 @@ pub(crate) enum Action {
     MoveTool,
     /// Selects the regular connect tool, then cycles regular, dual, reverse.
     ConnectTool,
+    PriorityTool,
     ToggleSnap,
     /// Continuous connections: after a commit the end node starts the next link.
     ToggleContinuous,
@@ -23,7 +24,7 @@ pub(crate) enum Action {
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 10] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 11] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -43,6 +44,10 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 10] = [
     (
         Action::ConnectTool,
         KeyboardShortcut::new(Modifiers::NONE, Key::L),
+    ),
+    (
+        Action::PriorityTool,
+        KeyboardShortcut::new(Modifiers::NONE, Key::P),
     ),
     (
         Action::ToggleSnap,
@@ -139,6 +144,7 @@ mod tests {
         assert_eq!(press(CTRL.plus(Modifiers::SHIFT), Key::Z), [Action::Redo]);
         assert_eq!(press(Modifiers::NONE, Key::F4), [Action::ToggleNodeId]);
         assert_eq!(press(Modifiers::NONE, Key::M), [Action::MoveTool]);
+        assert_eq!(press(Modifiers::NONE, Key::P), [Action::PriorityTool]);
         assert_eq!(press(Modifiers::NONE, Key::S), [Action::ToggleSnap]);
         assert_eq!(press(Modifiers::NONE, Key::Delete), [Action::DeleteHovered]);
         assert_eq!(press(Modifiers::NONE, Key::L), [Action::ConnectTool]);

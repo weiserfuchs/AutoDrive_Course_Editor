@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ad_core::command::{
-    AddNodes, Command, Connect, DeleteNodes, Disconnect, EditMarker, MoveNodes, Transaction,
+    AddNodes, Command, Connect, DeleteNodes, Disconnect, EditMarker, MoveNodes, SetFlag,
+    Transaction,
 };
 use ad_core::heightmap::{Heightmap, sample_height};
 use ad_core::history::History;
@@ -236,6 +237,27 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         cfg.network.connection_kind(rev_a, rev_b),
         ConnectionKind::Reverse
     );
+    // The priority tool: one node on no other edit swaps regular and sub-priority.
+    let flagged = *free
+        .iter()
+        .find(|id| ![rev_a, rev_b].contains(*id))
+        .ok_or("fixture has no free node for the flag")?;
+    let old_flag = cfg.network.node(flagged).ok_or("flag node")?.flag;
+    let new_flag = if old_flag == NodeFlag::SUB_PRIO {
+        NodeFlag::REGULAR
+    } else {
+        NodeFlag::SUB_PRIO
+    };
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::SetFlag(SetFlag::new(flagged, new_flag))]),
+    )?;
+    let flagged_index = cfg
+        .network
+        .order()
+        .iter()
+        .position(|id| *id == flagged)
+        .ok_or("flag node")?;
     let shaped_kind = cfg.network.connection_kind(shape_a, shape_b);
     assert_ne!(shaped_kind, old_kind);
     let index_of = |id: NodeId| cfg.network.order().iter().position(|n| *n == id);
@@ -301,5 +323,11 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
     let (va, vb) = (net.order()[reverse.0], net.order()[reverse.1]);
     assert_eq!(net.connection_kind(va, vb), ConnectionKind::Reverse);
     assert_eq!(net.connection_kind(vb, va), ConnectionKind::None);
+    assert_eq!(
+        net.node(net.order()[flagged_index])
+            .ok_or("flag node")?
+            .flag,
+        new_flag
+    );
     Ok(())
 }

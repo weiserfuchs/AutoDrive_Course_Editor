@@ -5,6 +5,7 @@ pub mod connect;
 pub mod delete;
 pub mod move_node;
 pub mod node;
+pub mod priority;
 
 use eframe::egui;
 
