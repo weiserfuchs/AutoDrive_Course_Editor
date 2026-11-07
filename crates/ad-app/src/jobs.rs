@@ -225,7 +225,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use ad_core::command::{AddNode, Command, Transaction};
+    use ad_core::command::{AddNodes, Command, Transaction};
     use ad_core::heightmap::sample_height;
     use ad_core::history::History;
     use ad_core::network::{NetworkError, NodeFlag};
@@ -261,12 +261,12 @@ mod tests {
     }
 
     fn edit() -> Transaction {
-        Transaction::new(vec![Command::AddNode(AddNode::new(
+        Transaction::new(vec![Command::AddNodes(AddNodes::new(vec![(
             1.0,
             0.0,
             2.0,
             NodeFlag::REGULAR,
-        ))])
+        )]))])
     }
 
     fn loaded(doc: &mut Option<Document>, counter: &mut u64) {

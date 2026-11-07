@@ -199,16 +199,16 @@ mod tests {
 
     use super::*;
     use crate::command::tests::{linked, snap};
-    use crate::command::{AddNode, Command, Connect, DeleteNodes, Disconnect};
+    use crate::command::{AddNodes, Command, Connect, DeleteNodes, Disconnect};
     use crate::network::{ConnectionShape, NodeFlag, NodeId};
 
     fn add(x: f64) -> Transaction {
-        Transaction::new(vec![Command::AddNode(AddNode::new(
+        Transaction::new(vec![Command::AddNodes(AddNodes::new(vec![(
             x,
             0.0,
             0.0,
             NodeFlag::REGULAR,
-        ))])
+        )]))])
     }
 
     #[test]
@@ -292,7 +292,7 @@ mod tests {
         let before = snap(&n);
         let mut h = History::default();
         let tx = Transaction::new(vec![
-            Command::AddNode(AddNode::new(1.0, 1.0, 1.0, NodeFlag(0))),
+            Command::AddNodes(AddNodes::new(vec![(1.0, 1.0, 1.0, NodeFlag(0))])),
             Command::Connect(Connect::new(a, ghost, ConnectionShape::OneWay)),
         ]);
         assert_eq!(h.apply(&mut n, tx), Err(NetworkError::UnknownNode(ghost)));

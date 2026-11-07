@@ -11,32 +11,27 @@ use crate::network::{
 /// A node position as `(x, y, z)`.
 pub type Position = (f64, f64, f64);
 
-/// Adds one unconnected node. A redo reinserts it under the id of the first apply.
+/// Adds unconnected nodes in the given order, each as `(x, y, z, flag)`. A redo reinserts
+/// each node under the id of the first apply.
 #[derive(Debug, Clone, PartialEq)]
-pub struct AddNode {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-    pub flag: NodeFlag,
-    id: Option<NodeId>,
-    removed: Option<RemovedNode>,
+pub struct AddNodes {
+    pub nodes: Vec<(f64, f64, f64, NodeFlag)>,
+    ids: Vec<NodeId>,
+    removed: Vec<RemovedNode>,
 }
 
-impl AddNode {
-    pub fn new(x: f64, y: f64, z: f64, flag: NodeFlag) -> Self {
+impl AddNodes {
+    pub fn new(nodes: Vec<(f64, f64, f64, NodeFlag)>) -> Self {
         Self {
-            x,
-            y,
-            z,
-            flag,
-            id: None,
-            removed: None,
+            nodes,
+            ids: Vec::new(),
+            removed: Vec::new(),
         }
     }
 
-    /// The id of the added node, known after the first apply.
-    pub fn id(&self) -> Option<NodeId> {
-        self.id
+    /// The ids of the added nodes in order, known after the first apply.
+    pub fn ids(&self) -> &[NodeId] {
+        &self.ids
     }
 }
 
@@ -118,7 +113,7 @@ impl EditMarker {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    AddNode(AddNode),
+    AddNodes(AddNodes),
     DeleteNodes(DeleteNodes),
     Connect(Connect),
     Disconnect(Disconnect),
@@ -134,15 +129,19 @@ impl Command {
     /// Applies the command. On error the network is unchanged.
     pub fn apply(&mut self, net: &mut Network) -> Result<(), NetworkError> {
         match self {
-            Command::AddNode(c) => {
-                c.id = Some(match c.removed.take() {
-                    Some(removed) => {
-                        let id = removed.id();
+            Command::AddNodes(c) => {
+                if c.removed.is_empty() {
+                    c.ids = c
+                        .nodes
+                        .iter()
+                        .map(|&(x, y, z, flag)| net.add_node(x, y, z, flag))
+                        .collect();
+                } else {
+                    // Revert pushed the nodes last first, so popping reinserts them in order.
+                    while let Some(removed) = c.removed.pop() {
                         net.reinsert(removed);
-                        id
                     }
-                    None => net.add_node(c.x, c.y, c.z, c.flag),
-                });
+                }
                 Ok(())
             }
             Command::DeleteNodes(c) => {
@@ -192,9 +191,9 @@ impl Command {
     /// Undoes a successful `apply`.
     pub fn revert(&mut self, net: &mut Network) -> Result<(), NetworkError> {
         match self {
-            Command::AddNode(c) => {
-                if let Some(id) = c.id {
-                    c.removed = Some(net.remove_node(id)?);
+            Command::AddNodes(c) => {
+                for id in c.ids.iter().rev() {
+                    c.removed.push(net.remove_node(*id)?);
                 }
                 Ok(())
             }
@@ -364,15 +363,15 @@ pub(crate) mod tests {
         let (n, _) = linked();
         let (n, tx) = round_trip(
             n,
-            one(Command::AddNode(AddNode::new(
+            one(Command::AddNodes(AddNodes::new(vec![(
                 5.0,
                 0.0,
                 5.0,
                 NodeFlag::REGULAR,
-            ))),
+            )]))),
         );
         assert_eq!(n.len(), 5);
-        assert!(matches!(&tx.0[0], Command::AddNode(a) if a.id().is_some()));
+        assert!(matches!(&tx.0[0], Command::AddNodes(a) if a.ids().len() == 1));
     }
 
     #[test]
@@ -481,10 +480,15 @@ pub(crate) mod tests {
     #[test]
     fn add_redo_keeps_id_and_ids_are_not_reused() {
         let (mut n, _) = linked();
-        let mut tx = one(Command::AddNode(AddNode::new(1.0, 1.0, 1.0, NodeFlag(0))));
+        let mut tx = one(Command::AddNodes(AddNodes::new(vec![(
+            1.0,
+            1.0,
+            1.0,
+            NodeFlag(0),
+        )])));
         tx.apply(&mut n).expect("apply");
         let id = match &tx.0[0] {
-            Command::AddNode(a) => a.id().expect("id"),
+            Command::AddNodes(a) => *a.ids().first().expect("id"),
             _ => return,
         };
         tx.revert(&mut n).expect("revert");
@@ -495,6 +499,33 @@ pub(crate) mod tests {
         tx.revert(&mut n).expect("revert");
         let fresh = n.add_node(2.0, 2.0, 2.0, NodeFlag(0));
         assert!(fresh > id);
+    }
+
+    #[test]
+    fn add_several_redo_keeps_ids_and_order() {
+        let (mut n, [a, b, c, d]) = linked();
+        let nodes = vec![
+            (1.0, 1.0, 1.0, NodeFlag::REGULAR),
+            (2.0, 2.0, 2.0, NodeFlag::SUB_PRIO),
+            (3.0, 3.0, 3.0, NodeFlag(2)),
+        ];
+        let mut tx = one(Command::AddNodes(AddNodes::new(nodes.clone())));
+        tx.apply(&mut n).expect("apply");
+        let ids = match &tx.0[0] {
+            Command::AddNodes(add) => add.ids().to_vec(),
+            _ => return,
+        };
+        tx.revert(&mut n).expect("revert");
+        let (n, tx) = round_trip(n, tx);
+        let Command::AddNodes(add) = &tx.0[0] else {
+            return;
+        };
+        assert_eq!(add.ids(), ids.as_slice());
+        assert_eq!(n.order(), &[a, b, c, d, ids[0], ids[1], ids[2]]);
+        for (id, (x, y, z, flag)) in ids.iter().zip(nodes) {
+            let node = n.node(*id).expect("added node");
+            assert_eq!(((node.x, node.y, node.z), node.flag), ((x, y, z), flag));
+        }
     }
 
     #[test]
@@ -509,7 +540,7 @@ pub(crate) mod tests {
             other.order()[49]
         };
         let mut tx = Transaction::new(vec![
-            Command::AddNode(AddNode::new(9.0, 9.0, 9.0, NodeFlag(0))),
+            Command::AddNodes(AddNodes::new(vec![(9.0, 9.0, 9.0, NodeFlag(0))])),
             Command::Disconnect(Disconnect::new(a, b)),
             Command::Connect(Connect::new(a, ghost, ConnectionShape::OneWay)),
         ]);
