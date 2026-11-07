@@ -3,14 +3,14 @@ title: 'A right-drag rectangle selects nodes and the selection survives undo'
 type: 'feature'
 ticket: '1'
 created: '2026-11-07'
-status: 'in-progress'
+status: 'built'
 baseline_revision: '676660f3115afebccbd99221992c750bf374374a'
 route: 'full'
 route_source: 'auto'
 risk: 'high'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/initiative-rust-rewrite/architecture-rust-rewrite/architecture-rust-rewrite.md'
@@ -93,3 +93,10 @@ context:
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 1 medium and 2 low patched; 1 low rejected.
+  - medium, patch: the selection ring was drawn only where nodes are drawn, so at minimum zoom (where the view opens) a selection was invisible. Selected nodes in view now get a 3 px white mark there (`SELECTED_MARK_PX`, one mesh, the selection set filtered by the padded view); test `selected_nodes_too_small_to_draw_get_a_mark`.
+  - low, patch: the "min zoom, all selected" frame-time case drew no rings, so it timed nothing new. It now draws the marks, and "mid zoom, dense, all selected" measures ring drawing.
+  - low, patch: "left-button behaviour unchanged" with a selection was untested through `ToolHooks`; test `the_left_button_is_unchanged_while_nodes_are_selected`.
+  - low, reject: a selected node looks like the hovered node (both the white ring). The plan chose Java's white ring; the user judges it in the hand check.
+- Verification re-run after the patches: fmt, clippy, workspace tests and the release frame-time test pass (min zoom all selected max 5.9 ms, mid zoom dense all selected max 1.8 ms).
