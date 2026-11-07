@@ -3,14 +3,14 @@ title: 'Unsaved changes show in the title and closing asks first'
 type: 'feature'
 ticket: '8'
 created: '2026-11-07'
-status: 'in-progress'
+status: 'built'
 baseline_revision: '8d41deb4859cb64952e406a68256757b03372023'
 route: 'full'
 route_source: 'auto'
 risk: 'low'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -97,3 +97,9 @@ Java offers only Yes/No on close and none on open; Cancel and the open prompt ar
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 1 low patched, 1 test gap patched; 1 low rejected.
+  - low, patch: Cancel cleared only the prompt, so after Save → second close → Cancel the earlier pending close still ran when the save succeeded. Cancel now also drops `pending`; test `cancel_drops_a_close_waiting_for_a_running_save`.
+  - low, patch: the real close interception had no test. Moved unchanged into `App::intercept_close`; test `a_window_close_is_cancelled_only_while_dirty` runs a frame with `ViewportEvent::Close` and checks `CancelClose` and the prompt for a dirty document, neither for a clean one.
+  - low, reject: the Save → pending path through the native file dialog is untested; the dialog cannot run in a test. Covered by the user's hand check.
+- Verification re-run after the patches: fmt, clippy, workspace tests (ad-app 146) and the release frame-time test pass.
