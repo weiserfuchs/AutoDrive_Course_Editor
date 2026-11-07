@@ -3,14 +3,14 @@ title: 'Dragging a node moves it with grid snap in one undo step'
 type: 'feature'
 ticket: '2'
 created: '2026-11-07'
-status: 'in-progress'
+status: 'built'
 baseline_revision: '5d8bcc79dfa9da6e4dbb40d19f9db864c12691cc'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/initiative-rust-rewrite/tickets/epic-node-connection-tools/tickets/story-a-node-added-with-the-node-tool-undoes-redoes-and-saves-plan.md'
@@ -104,3 +104,12 @@ Java (MoveWidget.java:147-230): the move offset is clamped to ±1024·mapScale a
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 1 medium and 4 low patched; 1 false rejected.
+  - medium, patch: Ctrl+Z / Ctrl+Shift+Z during a claimed drag changed the network under it, so the release committed a MoveNodes with a stale `before` or on a removed node (UnknownNode). Undo and Redo now cancel the tool's preview first; test `undo_or_redo_mid_drag_drops_the_drag`.
+  - low, patch: a drag stopped without a pointer position sent neither End nor cancel, leaving a stuck preview. The view now sends `DragEvent::Cancel`; untested, egui offers no way to produce that event in a test.
+  - low, patch: snap-then-clamp put a snapped target at the map edge off the grid (1023.9, grid 5 → 1024). It now takes the nearest in-bounds grid multiple (1020); test expectation corrected.
+  - low, patch: the node tool drew its preview at the raw cursor while the click landed on the snapped point. `Tool::paint` gets the resolved snap grid; test `the_snapped_preview_sits_where_the_click_lands`.
+  - low, patch: hover was hit-tested at stored positions during a drag, so other nodes or the dragged node's old spot showed the ring and info box. No hover while a preview is active; test `nothing_is_hovered_while_a_preview_is_shown`.
+  - false: "the node tool snap is not clamped to the map bounds". The frozen matrix keeps Java's behaviour: a click outside the map adds the node at the clicked position.
+- Verification re-run after the patches: fmt, clippy, workspace tests (ad-app 98) and the release frame-time test (worst max 4.3 ms) pass.
