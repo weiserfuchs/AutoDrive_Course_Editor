@@ -3,7 +3,7 @@ title: 'Connect tools create regular, dual and reverse connections'
 type: 'feature'
 ticket: '5'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: '05beeaf1399af66329db10576d9754745ffefbe4'
 route: 'full'
 route_source: 'auto'
