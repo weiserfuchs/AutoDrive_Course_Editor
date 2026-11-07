@@ -250,6 +250,9 @@ impl App {
                 if let Some(doc) = &mut self.doc {
                     doc.undo();
                 }
+                // The hover belongs to the old network; the next frame recomputes it, so a
+                // Delete in the same frame cannot hit a node the undo moved away.
+                self.view.clear_hover();
             }
             Action::Redo if self.editable() => {
                 if let Some(tool) = &mut self.tool {
@@ -258,6 +261,7 @@ impl App {
                 if let Some(doc) = &mut self.doc {
                     doc.redo();
                 }
+                self.view.clear_hover();
             }
             Action::DeleteHovered if self.editable() => self.delete_hovered(),
             Action::NodeTool
@@ -772,6 +776,33 @@ mod tests {
         app.click(1025.0, 1026.0, false);
         assert_eq!(nodes(&app), 1);
         assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn undo_and_delete_in_one_frame_delete_nothing() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        let id = first(&app);
+        let doc = app.doc.as_mut().expect("doc");
+        let before = doc
+            .config
+            .network
+            .node(id)
+            .map(|n| (n.x, n.y, n.z))
+            .expect("node");
+        let after = (before.0 + 50.0, before.1, before.2 + 50.0);
+        doc.apply(Transaction::new(vec![Command::MoveNodes(
+            ad_core::command::MoveNodes {
+                moves: vec![(id, before, after)],
+            },
+        )]))
+        .expect("move");
+        // The hover was computed on the moved network; Undo and Delete arrive in one frame.
+        app.view.hovered_node = Some(id);
+        app.run(Action::Undo);
+        app.run(Action::DeleteHovered);
+        assert_eq!(nodes(&app), 1);
     }
 
     #[test]
