@@ -3,7 +3,7 @@ title: 'The complete view meets the frame budget on the fixture'
 type: 'feature'
 ticket: '7'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: '44d21be8f585e1d07943917c4012ddb0aba78693'
 route: 'full'
 route_source: 'auto'

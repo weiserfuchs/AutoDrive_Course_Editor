@@ -3,7 +3,7 @@ title: "Nodes and connections draw in the Java editor's look"
 type: 'feature'
 ticket: '4'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: '8e3be97b2a8c0c4c9af1bf2dbda077078ecc2f62'
 route: 'full'
 route_source: 'auto'

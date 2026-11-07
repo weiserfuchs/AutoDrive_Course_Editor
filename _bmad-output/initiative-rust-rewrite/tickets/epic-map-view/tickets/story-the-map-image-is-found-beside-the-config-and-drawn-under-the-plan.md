@@ -3,7 +3,7 @@ title: 'The map image is found beside the config and drawn under the network'
 type: 'feature'
 ticket: '3'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: '6b7b431591d407a4dc908918f30436350007d183'
 route: 'full'
 route_source: 'auto'

@@ -3,7 +3,7 @@ title: 'Height for new nodes comes from the heightmap'
 type: 'feature'
 ticket: '6'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: '13047d9b7c8c2f3bf7c017dd6934810f2ee1b444'
 route: 'full'
 route_source: 'auto'

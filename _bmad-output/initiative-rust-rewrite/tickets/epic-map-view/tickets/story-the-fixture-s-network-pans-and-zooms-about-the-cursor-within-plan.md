@@ -3,7 +3,7 @@ title: "The fixture's network pans and zooms about the cursor within the frame b
 type: 'feature'
 ticket: '2'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: '267bfe4fe2f7809d6397a3d6835f02dd8cb55d1f'
 route: 'full'
 route_source: 'auto'

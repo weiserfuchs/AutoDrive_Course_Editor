@@ -3,7 +3,7 @@ title: 'Markers, parking and warning icons, marker names and the grid draw'
 type: 'feature'
 ticket: '5'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: 'b27a46218fcf140b07c569f43ce083e4d32c3738'
 route: 'full'
 route_source: 'auto'

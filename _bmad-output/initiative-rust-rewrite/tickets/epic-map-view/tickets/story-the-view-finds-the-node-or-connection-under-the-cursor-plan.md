@@ -3,7 +3,7 @@ title: 'The view finds the node or connection under the cursor'
 type: 'feature'
 ticket: '9'
 created: '2026-11-06'
-status: 'built'
+status: done
 baseline_revision: 'a6477e5c0e3bd47540fb615d6b1d702becec268a'
 route: 'full'
 route_source: 'auto'
