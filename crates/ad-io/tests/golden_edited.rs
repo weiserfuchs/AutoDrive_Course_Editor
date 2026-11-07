@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ad_core::command::{
-    AddNodes, Command, Connect, DeleteNodes, EditMarker, MoveNodes, Transaction,
+    AddNodes, Command, Connect, DeleteNodes, Disconnect, EditMarker, MoveNodes, Transaction,
 };
 use ad_core::heightmap::{Heightmap, sample_height};
 use ad_core::history::History;
@@ -115,6 +115,15 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .ok_or("node")?;
     // Values the writer's three decimals hold exactly; y stays (the move tool keeps it).
     let after = (100.25, before.1, -200.5);
+    // An existing link between two nodes no other edit touches, removed by the delete tool.
+    let touched = [reverse_target, marked, renamed, keep[0], keep[1], keep[2]];
+    let (cut_a, cut_b) = order
+        .iter()
+        .filter(|id| !touched.contains(id))
+        .filter_map(|a| cfg.network.node(*a).map(|n| (*a, n)))
+        .flat_map(|(a, n)| n.outgoing().iter().map(move |t| (a, *t)))
+        .find(|(_, t)| !touched.contains(t))
+        .ok_or("fixture has no untouched link")?;
 
     // The node tool's height: sampled from a small generated heightmap (AD-7).
     let mut map = MapContext::new(None, 1, 2.0, (2.0, 2.0));
@@ -164,8 +173,18 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
             Command::MoveNodes(MoveNodes {
                 moves: vec![(moved, before, after)],
             }),
+            Command::Disconnect(Disconnect::new(cut_a, cut_b)),
         ]),
     )?;
+    assert_eq!(
+        cfg.network.connection_kind(cut_a, cut_b),
+        ConnectionKind::None
+    );
+    let index_of = |id: NodeId| cfg.network.order().iter().position(|n| *n == id);
+    let cut = (
+        index_of(cut_a).ok_or("cut node")?,
+        index_of(cut_b).ok_or("cut node")?,
+    );
     let moved_index = cfg
         .network
         .order()
@@ -208,5 +227,8 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .map(|t| net.connection_kind(new_last, *t))
         .collect();
     assert_eq!(kinds, [ConnectionKind::Dual, ConnectionKind::Regular]);
+    let (ra, rb) = (net.order()[cut.0], net.order()[cut.1]);
+    assert_eq!(net.connection_kind(ra, rb), ConnectionKind::None);
+    assert_eq!(net.connection_kind(rb, ra), ConnectionKind::None);
     Ok(())
 }

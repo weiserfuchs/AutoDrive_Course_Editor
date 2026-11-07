@@ -118,6 +118,8 @@ mod tests {
                 map: &d.map,
                 net: &d.config.network,
                 snap: false,
+                hovered_node: None,
+                hovered_edge: None,
             })
             .expect("a transaction")
     }

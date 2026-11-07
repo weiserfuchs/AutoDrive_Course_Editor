@@ -7,6 +7,7 @@ use ad_core::geometry::MapGeometry;
 use ad_core::network::{Network, Node, NodeId};
 
 use crate::lod::EDGE_HIT_PX;
+use crate::look;
 use crate::overlay;
 use crate::view::ViewTransform;
 
@@ -55,41 +56,68 @@ pub fn node_at(
     best.map(|(_, id)| id)
 }
 
-/// The connection nearest to `cursor` (screen px) within `EDGE_HIT_PX`; ties go to the
-/// lowest `(from, to)`.
+/// The connection nearest to `cursor` (screen px) within `EDGE_HIT_PX` of its drawn part
+/// ([`drawn_segment`]), measured across it: a cursor beyond either drawn end misses. Ties go to the lowest `(from, to)`. A node under the cursor wins:
+/// with `hovered` set (the result of [`node_at`]) no connection is hit.
 pub fn edge_at(
     net: &Network,
     geometry: MapGeometry,
     t: &ViewTransform,
+    ns: i32,
+    hovered: Option<NodeId>,
     cursor: Pt,
 ) -> Option<(NodeId, NodeId)> {
+    if hovered.is_some() {
+        return None;
+    }
     let (mx, my) = t.screen_to_map(cursor.0, cursor.1);
     let (wx, wz) = geometry.to_world(mx, my);
-    // Screen px -> map px -> world units.
+    // Screen px -> map px -> world units. The full segment contains the drawn part, so the
+    // query finds every candidate; the screen test below decides.
     let reach = EDGE_HIT_PX / t.zoom * geometry.scale;
     let mut best: Option<(f64, (NodeId, NodeId))> = None;
     // `edges_near` is sorted, so the first of equal distances is the lowest pair.
-    for (from, to) in net.edges_near(wx, wz, reach) {
-        let (Some(a), Some(b)) = (net.node(from), net.node(to)) else {
+    for pair in net.edges_near(wx, wz, reach) {
+        let Some(d) = drawn_segment(net, geometry, t, ns, pair)
+            .and_then(|(a, b)| segment_distance(cursor, a, b))
+        else {
             continue;
         };
-        let d = segment_distance((wx, wz), (a.x, a.z), (b.x, b.z));
-        if best.is_none_or(|(bd, _)| d < bd) {
-            best = Some((d, (from, to)));
+        if d <= EDGE_HIT_PX && best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, pair));
         }
     }
     best.map(|(_, pair)| pair)
 }
 
-fn segment_distance(p: Pt, a: Pt, b: Pt) -> f64 {
+/// The screen segment the view draws for the connection `(from, to)`: shortened by `ns / 2`
+/// at each end, `None` when it is not drawn (shorter than `MIN_EDGE_PX` on screen).
+pub fn drawn_segment(
+    net: &Network,
+    geometry: MapGeometry,
+    t: &ViewTransform,
+    ns: i32,
+    (from, to): (NodeId, NodeId),
+) -> Option<(Pt, Pt)> {
+    let screen = |n: &Node| {
+        let (mx, my) = geometry.to_map(n.x, n.z);
+        t.map_to_screen(mx, my)
+    };
+    look::line_ends(screen(net.node(from)?), screen(net.node(to)?), ns)
+}
+
+/// The perpendicular distance from `p` to the segment `a`-`b`, or `None` when `p` projects
+/// outside it (no end caps) or the segment has no length.
+fn segment_distance(p: Pt, a: Pt, b: Pt) -> Option<f64> {
     let (vx, vz) = (b.0 - a.0, b.1 - a.1);
     let len2 = vx * vx + vz * vz;
-    let s = if len2 == 0.0 {
-        0.0
-    } else {
-        (((p.0 - a.0) * vx + (p.1 - a.1) * vz) / len2).clamp(0.0, 1.0)
-    };
-    (p.0 - (a.0 + s * vx)).hypot(p.1 - (a.1 + s * vz))
+    if len2 == 0.0 {
+        return None;
+    }
+    let s = ((p.0 - a.0) * vx + (p.1 - a.1) * vz) / len2;
+    (0.0..=1.0)
+        .contains(&s)
+        .then(|| (p.0 - (a.0 + s * vx)).hypot(p.1 - (a.1 + s * vz)))
 }
 
 /// One line of the info box.
@@ -207,7 +235,7 @@ mod tests {
         let b = net.add_node(10.0, 0.0, 0.0, NodeFlag::REGULAR);
         net.connect(a, b, ConnectionShape::OneWay).expect("ok");
         let g = MapGeometry::new(1.0);
-        let at = |c: Pt| edge_at(&net, g, &view(10.0), c);
+        let at = |c: Pt| edge_at(&net, g, &view(10.0), 11, None, c);
         assert_eq!(at((500.0, 403.0)), Some((a, b)));
         assert_eq!(at((500.0, 405.0)), None);
         // Past the end of the segment.
@@ -224,8 +252,95 @@ mod tests {
         net.connect(a, b, ConnectionShape::OneWay).expect("ok");
         net.connect(c, d, ConnectionShape::OneWay).expect("ok");
         // 3 px above and 2 px below the cursor.
-        let got = edge_at(&net, MapGeometry::new(1.0), &view(10.0), (500.0, 400.0));
+        let got = edge_at(
+            &net,
+            MapGeometry::new(1.0),
+            &view(10.0),
+            11,
+            None,
+            (500.0, 400.0),
+        );
         assert_eq!(got, Some((c, d)));
+    }
+
+    /// The node or, failing that, the connection under `cursor`, as the view resolves them.
+    fn hit_any(net: &Network, zoom: f64, cursor: Pt) -> (Option<NodeId>, Option<(NodeId, NodeId)>) {
+        let ns = crate::look::node_px(2.0, zoom);
+        let node = hit(net, zoom, cursor);
+        let edge = edge_at(net, MapGeometry::new(1.0), &view(zoom), ns, node, cursor);
+        (node, edge)
+    }
+
+    #[test]
+    fn a_node_under_the_cursor_wins_over_a_connection() {
+        let mut net = Network::new();
+        let a = net.add_node(-10.0, 0.0, 0.0, NodeFlag::REGULAR);
+        let b = net.add_node(10.0, 0.0, 0.0, NodeFlag::REGULAR);
+        // A node on the a-b connection, not linked to it.
+        let c = net.add_node(0.0, 0.0, 0.0, NodeFlag::REGULAR);
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        assert_eq!(hit_any(&net, 10.0, (500.0, 400.0)), (Some(c), None));
+        // Beside the node, the connection is hit.
+        assert_eq!(hit_any(&net, 10.0, (520.0, 400.0)), (None, Some((a, b))));
+    }
+
+    #[test]
+    fn the_end_covered_by_a_node_hits_the_node() {
+        let mut net = Network::new();
+        let a = net.add_node(-10.0, 0.0, 0.0, NodeFlag::REGULAR);
+        let b = net.add_node(10.0, 0.0, 0.0, NodeFlag::REGULAR);
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        // Zoom 10 gives ns 11: a is at screen x 400 and its square ends at 405.5.
+        assert_eq!(hit_any(&net, 10.0, (403.0, 400.0)), (Some(a), None));
+        // The drawn part starts at 405.5.
+        assert_eq!(hit_any(&net, 10.0, (406.0, 400.0)), (None, Some((a, b))));
+    }
+
+    #[test]
+    fn only_the_drawn_part_of_a_connection_is_hit() {
+        let mut net = Network::new();
+        let a = net.add_node(-10.0, 0.0, 0.0, NodeFlag::REGULAR);
+        let b = net.add_node(10.0, 0.0, 0.0, NodeFlag::REGULAR);
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        let (g, t) = (MapGeometry::new(1.0), view(10.0));
+        // With ns 21 and no node hit, the drawn part runs from x 410.5 to 589.5.
+        assert_eq!(edge_at(&net, g, &t, 21, None, (400.0, 400.0)), None);
+        assert_eq!(edge_at(&net, g, &t, 21, None, (407.0, 400.0)), None);
+        assert_eq!(edge_at(&net, g, &t, 21, None, (411.0, 403.0)), Some((a, b)));
+    }
+
+    #[test]
+    fn small_nodes_leave_no_end_caps_to_hit() {
+        let mut net = Network::new();
+        let a = net.add_node(-10.0, 0.0, 0.0, NodeFlag::REGULAR);
+        let b = net.add_node(10.0, 0.0, 0.0, NodeFlag::REGULAR);
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        let (g, t) = (MapGeometry::new(1.0), view(10.0));
+        // a's centre is at x 400 and b's at 600; ns 2 draws 401..599, ns 1 draws 400.5..599.5.
+        for ns in [2, 1] {
+            let at = |c: Pt| edge_at(&net, g, &t, ns, None, c);
+            assert_eq!(at((400.0, 400.0)), None, "ns {ns}: a's centre");
+            assert_eq!(at((600.0, 400.0)), None, "ns {ns}: b's centre");
+            assert_eq!(at((398.0, 400.0)), None, "ns {ns}: past a's end");
+            assert_eq!(at((602.0, 401.0)), None, "ns {ns}: past b's end");
+            assert_eq!(at((500.0, 403.0)), Some((a, b)), "ns {ns}: across");
+        }
+    }
+
+    #[test]
+    fn a_connection_too_short_to_draw_is_not_hit() {
+        let mut net = Network::new();
+        // 0.5 world units apart: 0.5 screen px at zoom 1, under MIN_EDGE_PX.
+        let a = net.add_node(0.0, 0.0, 0.0, NodeFlag::REGULAR);
+        let b = net.add_node(0.5, 0.0, 0.0, NodeFlag::REGULAR);
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        let g = MapGeometry::new(1.0);
+        assert_eq!(edge_at(&net, g, &view(1.0), 1, None, (500.2, 400.0)), None);
+        // Zoomed in, the same connection is drawn and hit.
+        assert_eq!(
+            edge_at(&net, g, &view(10.0), 1, None, (502.5, 400.0)),
+            Some((a, b))
+        );
     }
 
     #[test]

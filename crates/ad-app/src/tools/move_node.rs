@@ -122,6 +122,7 @@ impl Tool for MoveTool {
         _geometry: MapGeometry,
         _cursor: Option<egui::Pos2>,
         _snap_grid: Option<(f64, f64)>,
+        _hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     ) {
     }
 
@@ -161,6 +162,8 @@ mod tests {
             map,
             net,
             snap,
+            hovered_node: None,
+            hovered_edge: None,
         }
     }
 
