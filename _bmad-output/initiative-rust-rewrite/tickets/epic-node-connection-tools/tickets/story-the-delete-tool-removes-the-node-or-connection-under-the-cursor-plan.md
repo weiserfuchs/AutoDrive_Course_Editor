@@ -3,14 +3,14 @@ title: 'The delete tool removes the node or connection under the cursor'
 type: 'feature'
 ticket: '4'
 created: '2026-11-07'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: '65daebe026896c27dd3722c5670c6e23947aa62f'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/initiative-rust-rewrite/tickets/epic-node-connection-tools/tickets/story-dragging-a-node-moves-it-with-grid-snap-in-one-undo-step-plan.md'
@@ -84,13 +84,13 @@ context:
 
 ## Implementation Notes
 
-- **Edge hit-test rule (story 3.7 reuses it).** `hover::edge_at(net, geometry, t, ns, hovered, cursor)` returns `None` when `hovered` (the result of `node_at`) is set. Otherwise it tests each candidate against its *drawn* screen segment, `hover::drawn_segment`. That function is `look::line_ends` on the two node centres: each end is pulled in by `ns / 2`, and the result is `None` below `MIN_EDGE_PX`. So it is exactly what the view draws. A connection is hit within `EDGE_HIT_PX` (inclusive) of that segment. The nearest one wins, and ties go to the lowest `(from, to)`. `edges_near` on the full world segment still preselects candidates; it is a superset because the drawn part lies inside the full segment. When nodes are too small to hit (`ns < 2`), the segment is still shortened by `ns / 2`. A dual link hovers as either direction; `Disconnect` removes both.
+- **Edge hit-test rule (story 3.7 reuses it).** `hover::edge_at(net, geometry, t, ns, hovered, cursor)` returns `None` when `hovered` (the result of `node_at`) is set. Otherwise it tests each candidate against its *drawn* screen segment, `hover::drawn_segment`. That function is `look::line_ends` on the two node centres: each end is pulled in by `ns / 2`, and the result is `None` below `MIN_EDGE_PX`. So it is exactly what the view draws. A connection is hit when the cursor projects onto that segment (parameter in [0, 1], no end caps) within `EDGE_HIT_PX` (inclusive) of it. The nearest one wins, and ties go to the lowest `(from, to)`. `edges_near` on the full world segment still preselects candidates; it is a superset because the drawn part lies inside the full segment. When nodes are too small to hit (`ns < 2`), the segment is still shortened by `ns / 2`. A dual link hovers as either direction; `Disconnect` removes both.
 - **Hover to tools.** `ToolContext` gained `hovered_node` and `hovered_edge`. `App::click` fills them from the view's hover of the same frame, and drag contexts leave them `None` (a drag gets its node in `on_drag_start`). `Tool::paint` and `ViewHooks::paint` gained `hovered_edge: Option<(Pos2, Pos2)>`. It is the drawn screen segment, which the view computes, so tools need neither the network nor `ns` to paint it. `DeleteTool::paint` draws it 3 px wide in `visuals.warn_fg_color`. The delete tool claims no drags, so a left drag still pans.
 - **Delete key.** `Action::DeleteHovered` sits on Delete with no modifiers; the delete tool has no key. `App::delete_hovered` uses `view.hovered_node` only when the view last showed this document (`view_epoch == doc.epoch`) and the node still exists. A just-loaded document, or an Undo in the same frame, therefore cannot delete a stale id. It cancels the tool's preview first, then applies `DeleteNodes`. In the running app no node is hovered while a move preview is shown (story 3.2), so Delete does nothing mid-drag. The mid-drag test sets the hover by hand to cover the cancel path.
 - **Toolbar.** A "Delete" button sits after "Move"; like the other tools, it is disabled for read-only documents.
 - **Tests.** hover: node wins, hidden end, only the drawn part (large ns), too short (and hit once zoomed in). delete: node with its links and marker (revert restores the snapshot), node wins over edge, connection both ways with nodes kept (revert restores Dual), empty click. input: Delete, Ctrl+Delete does nothing. main: Delete key and undo, a hover from another document is ignored, read-only ignores key and tool, Delete mid-drag cancels the drag, the delete tool removes a connection and a node and two undos restore the snapshot (acceptance 1). golden_edited: a `Disconnect` of an untouched fixture link reloads with no link either way.
 - **Frame-time (release).** Every case is under 16 ms. The worst max is 3.05 ms in the best round and 5.56 ms in a single round.
-- Closed deferred-work.md entry "Decide in epic-node-connection-tools whether `hovered_edge` should test the drawn segment…" (removed).
+- Settles deferred-work.md entry "Decide in epic-node-connection-tools whether `hovered_edge` should test the drawn segment…"; the entry stays (the file is append-only).
 
 ## Plan Change Log
 
