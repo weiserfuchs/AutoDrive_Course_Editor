@@ -25,6 +25,33 @@ use jobs::JobResult;
 use tools::Tool;
 use view::MapView;
 
+/// What waits for the document to be saved or discarded (R7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    Close,
+    Open,
+}
+
+/// The user's answer to the unsaved-changes prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Choice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// The window title: the open file's path, and ` *` while the document is dirty.
+fn window_title(doc: Option<&Document>) -> String {
+    match doc {
+        None => "AutoDrive Course Editor".to_owned(),
+        Some(doc) => format!(
+            "AutoDrive Course Editor - {}{}",
+            doc.path.display(),
+            if doc.is_dirty() { " *" } else { "" }
+        ),
+    }
+}
+
 struct App {
     doc: Option<Document>,
     /// Epoch of the newest document; each new document takes the next value (AD-18).
@@ -44,6 +71,14 @@ struct App {
     snap: bool,
     /// Continuous connections for the connect tools; session only (Java default off).
     continuous: bool,
+    /// The action that continues once the save started from the prompt has finished.
+    pending: Option<Pending>,
+    /// The action whose unsaved-changes prompt is shown.
+    prompt: Option<Pending>,
+    /// Set once closing was agreed; the next close request is not intercepted.
+    allow_close: bool,
+    /// The title last sent to the window.
+    title: String,
 }
 
 impl App {
@@ -65,6 +100,75 @@ impl App {
             tool: None,
             snap: false,
             continuous: false,
+            pending: None,
+            prompt: None,
+            allow_close: false,
+            title: window_title(None),
+        }
+    }
+
+    fn dirty(&self) -> bool {
+        self.doc.as_ref().is_some_and(Document::is_dirty)
+    }
+
+    /// Runs `action` at once, or first asks Save, Discard or Cancel while the document is dirty.
+    fn request(&mut self, action: Pending, ctx: &egui::Context) {
+        if self.dirty() {
+            self.prompt = Some(action);
+        } else {
+            self.proceed(action, ctx);
+        }
+    }
+
+    /// Applies the user's answer to the prompt shown.
+    fn choose(&mut self, choice: Choice, ctx: &egui::Context) {
+        let Some(action) = self.prompt.take() else {
+            return;
+        };
+        match choice {
+            // The action continues only after this save has succeeded (see `resume`).
+            Choice::Save => {
+                if self.save(ctx) {
+                    self.pending = Some(action);
+                }
+            }
+            Choice::Discard => self.proceed(action, ctx),
+            // Also drops an action still waiting for an earlier save.
+            Choice::Cancel => self.pending = None,
+        }
+    }
+
+    /// Continues the pending action once its save has finished. A failed save cleared it in
+    /// `poll_jobs`; a save that left the document dirty (edits made while saving) asks again.
+    fn resume(&mut self, ctx: &egui::Context) {
+        if self.saving {
+            return;
+        }
+        let Some(action) = self.pending.take() else {
+            return;
+        };
+        if self.dirty() {
+            self.prompt = Some(action);
+        } else {
+            self.proceed(action, ctx);
+        }
+    }
+
+    /// Cancels a window close while the document is dirty and asks first.
+    fn intercept_close(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.prompt = Some(Pending::Close);
+        }
+    }
+
+    fn proceed(&mut self, action: Pending, ctx: &egui::Context) {
+        match action {
+            Pending::Close => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Pending::Open => self.open(ctx),
         }
     }
 
@@ -73,7 +177,13 @@ impl App {
         while let Ok(result) = self.rx.try_recv() {
             match &result {
                 JobResult::Loaded { .. } => self.loading = false,
-                JobResult::Saved { .. } => self.saving = false,
+                JobResult::Saved { result, .. } => {
+                    self.saving = false;
+                    // A failed save keeps the document and the window.
+                    if result.is_err() {
+                        self.pending = None;
+                    }
+                }
             }
             let before = self.doc.as_ref().map(|d| d.epoch);
             if let Some(message) = jobs::apply_result(
@@ -233,12 +343,13 @@ impl App {
         );
     }
 
-    fn save(&mut self, ctx: &egui::Context) {
+    /// Asks for a target and starts the save. Returns false when no save started.
+    fn save(&mut self, ctx: &egui::Context) -> bool {
         let Some(doc) = &self.doc else {
-            return;
+            return false;
         };
         if doc.config.read_only().is_some() {
-            return;
+            return false;
         }
         let mut dialog = rfd::FileDialog::new().add_filter("XML", &["xml"]);
         if let Some(dir) = doc.path.parent() {
@@ -248,7 +359,7 @@ impl App {
             dialog = dialog.set_file_name(name.to_string_lossy());
         }
         let Some(target) = dialog.save_file() else {
-            return;
+            return false;
         };
         self.saving = true;
         let ctx = ctx.clone();
@@ -260,6 +371,7 @@ impl App {
             self.tx.clone(),
             move || ctx.request_repaint(),
         );
+        true
     }
 }
 
@@ -267,10 +379,21 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_jobs();
         let ctx = ui.ctx().clone();
-        input::handle_shortcuts(self, &ctx);
+        self.resume(&ctx);
+        self.intercept_close(&ctx);
+        let title = window_title(self.doc.as_ref());
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+        // The prompt is modal: no shortcut reaches the map while it is shown.
+        if self.prompt.is_none() {
+            input::handle_shortcuts(self, &ctx);
+        }
         ui::top_bar(self, ui, &ctx);
         egui::CentralPanel::default().show(ui, |ui| ui::map_panel(self, ui));
         ui::error_window(self, &ctx);
+        ui::unsaved_prompt(self, &ctx);
     }
 }
 
@@ -917,6 +1040,209 @@ mod tests {
         app.click(0.0, 0.0, false);
         assert_eq!(kind(&app), (ConnectionKind::None, ConnectionKind::None));
         assert!(app.error.is_none());
+    }
+
+    /// Adds one node through the node tool: one history entry.
+    fn edit(app: &mut App) {
+        app.run(Action::NodeTool);
+        app.click(1034.0, 1019.0, false);
+        app.set_tool(None);
+    }
+
+    fn title(app: &App) -> String {
+        window_title(app.doc.as_ref())
+    }
+
+    #[test]
+    fn the_title_shows_the_path_and_a_star_while_dirty() {
+        let mut app = App::new(Settings::default());
+        assert_eq!(title(&app), "AutoDrive Course Editor");
+        load(&mut app, "<version>3</version>");
+        assert_eq!(title(&app), "AutoDrive Course Editor - a.xml");
+        edit(&mut app);
+        assert_eq!(title(&app), "AutoDrive Course Editor - a.xml *");
+        app.run(Action::Undo);
+        assert_eq!(title(&app), "AutoDrive Course Editor - a.xml");
+        app.run(Action::Redo);
+        let doc = app.doc.as_ref().expect("doc");
+        let saved = JobResult::Saved {
+            epoch: doc.epoch,
+            point: doc.history.save_point(),
+            target: PathBuf::from("b.xml"),
+            result: Ok(()),
+        };
+        app.tx.send(saved).expect("send");
+        app.poll_jobs();
+        assert_eq!(title(&app), "AutoDrive Course Editor - b.xml");
+    }
+
+    #[test]
+    fn closing_a_clean_document_needs_no_prompt() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        app.request(Pending::Close, &ctx);
+        assert!(app.prompt.is_none());
+        assert!(app.allow_close);
+    }
+
+    #[test]
+    fn closing_a_dirty_document_asks_and_cancel_keeps_everything() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        edit(&mut app);
+        let before = snapshot(&app);
+        app.request(Pending::Close, &ctx);
+        assert_eq!(app.prompt, Some(Pending::Close));
+        assert!(!app.allow_close);
+        app.choose(Choice::Cancel, &ctx);
+        assert!(app.prompt.is_none() && app.pending.is_none());
+        assert!(!app.allow_close);
+        assert_eq!(snapshot(&app), before);
+        assert!(app.dirty());
+    }
+
+    #[test]
+    fn discard_closes_a_dirty_document() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        edit(&mut app);
+        app.request(Pending::Close, &ctx);
+        app.choose(Choice::Discard, &ctx);
+        assert!(app.prompt.is_none());
+        assert!(app.allow_close);
+    }
+
+    #[test]
+    fn opening_over_a_dirty_document_asks_first() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        edit(&mut app);
+        app.request(Pending::Open, &ctx);
+        assert_eq!(app.prompt, Some(Pending::Open));
+        app.choose(Choice::Cancel, &ctx);
+        assert!(app.prompt.is_none() && !app.loading);
+    }
+
+    #[test]
+    fn a_dirty_read_only_document_asks_and_save_does_nothing() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        // A read-only load resets no flags, so force the dirty state the prompt guards.
+        app.doc.as_mut().expect("doc").history.mark_unsaved();
+        app.request(Pending::Close, &ctx);
+        assert_eq!(app.prompt, Some(Pending::Close));
+        // Save is not offered; even if chosen, no save starts and nothing waits for it.
+        app.choose(Choice::Save, &ctx);
+        assert!(!app.saving && app.pending.is_none() && !app.allow_close);
+    }
+
+    #[test]
+    fn a_failed_save_clears_the_pending_close() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        edit(&mut app);
+        // As if Save in the prompt had started a save.
+        app.pending = Some(Pending::Close);
+        app.saving = true;
+        app.resume(&ctx);
+        assert_eq!(app.pending, Some(Pending::Close), "waits for the save");
+        let doc = app.doc.as_ref().expect("doc");
+        let failed = JobResult::Saved {
+            epoch: doc.epoch,
+            point: doc.history.save_point(),
+            target: PathBuf::from("b.xml"),
+            result: Err("disk full".to_owned()),
+        };
+        app.tx.send(failed).expect("send");
+        app.poll_jobs();
+        app.resume(&ctx);
+        assert!(app.pending.is_none() && app.prompt.is_none());
+        assert!(!app.allow_close);
+        assert!(app.error.is_some() && app.dirty());
+    }
+
+    #[test]
+    fn a_successful_save_continues_the_close() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        edit(&mut app);
+        app.pending = Some(Pending::Close);
+        app.saving = true;
+        let doc = app.doc.as_ref().expect("doc");
+        let saved = JobResult::Saved {
+            epoch: doc.epoch,
+            point: doc.history.save_point(),
+            target: PathBuf::from("b.xml"),
+            result: Ok(()),
+        };
+        app.tx.send(saved).expect("send");
+        app.poll_jobs();
+        app.resume(&ctx);
+        assert!(app.pending.is_none());
+        assert!(app.allow_close);
+    }
+
+    #[test]
+    fn cancel_drops_a_close_waiting_for_a_running_save() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        edit(&mut app);
+        // Save was picked earlier; the save runs, and a second close is answered Cancel.
+        app.pending = Some(Pending::Close);
+        app.saving = true;
+        app.request(Pending::Close, &ctx);
+        app.choose(Choice::Cancel, &ctx);
+        let doc = app.doc.as_ref().expect("doc");
+        let saved = JobResult::Saved {
+            epoch: doc.epoch,
+            point: doc.history.save_point(),
+            target: PathBuf::from("b.xml"),
+            result: Ok(()),
+        };
+        app.tx.send(saved).expect("send");
+        app.poll_jobs();
+        app.resume(&ctx);
+        assert!(app.pending.is_none() && app.prompt.is_none());
+        assert!(!app.allow_close);
+    }
+
+    /// Runs one frame with a close request for the root viewport through `intercept_close`;
+    /// returns whether the frame sent `CancelClose`.
+    fn close_frame(app: &mut App) -> bool {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let mut output = ctx.run_ui(input, |ui| app.intercept_close(ui.ctx()));
+        // No painter applies the font texture here; epaint asserts it was handled.
+        output.textures_delta.clear();
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose))
+    }
+
+    #[test]
+    fn a_window_close_is_cancelled_only_while_dirty() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        assert!(!close_frame(&mut app));
+        assert!(app.prompt.is_none());
+        edit(&mut app);
+        assert!(close_frame(&mut app));
+        assert_eq!(app.prompt, Some(Pending::Close));
     }
 
     #[test]

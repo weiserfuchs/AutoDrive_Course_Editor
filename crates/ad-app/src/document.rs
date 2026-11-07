@@ -71,7 +71,6 @@ impl Document {
         self.config.read_only().is_none()
     }
 
-    #[allow(dead_code)] // used by tests until the UI shows dirty state
     pub fn is_dirty(&self) -> bool {
         self.history.is_dirty()
     }
