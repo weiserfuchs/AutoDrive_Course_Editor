@@ -129,6 +129,9 @@ impl App {
             Action::PriorityTool if self.editable() => {
                 self.set_tool(Some(Box::new(tools::priority::PriorityTool)));
             }
+            Action::FlipTool if self.editable() => {
+                self.set_tool(Some(Box::new(tools::flip::FlipTool)));
+            }
             Action::Undo if self.editable() => {
                 // A preview built on the old network must not commit afterwards.
                 if let Some(tool) = &mut self.tool {
@@ -151,6 +154,7 @@ impl App {
             | Action::MoveTool
             | Action::ConnectTool
             | Action::PriorityTool
+            | Action::FlipTool
             | Action::Undo
             | Action::Redo
             | Action::DeleteHovered => {}
@@ -792,6 +796,50 @@ mod tests {
         assert_ne!(flag(&app), before);
         app.run(Action::Undo);
         assert_eq!(flag(&app), before);
+    }
+
+    #[test]
+    fn f_flips_the_clicked_connection_and_undo_restores_it() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        app.run(Action::NodeTool);
+        app.click(1034.0, 1019.0, false);
+        let [a, b] = app.doc.as_ref().expect("doc").config.network.order()[..] else {
+            panic!("two nodes");
+        };
+        app.run(Action::ConnectTool);
+        for id in [a, b] {
+            app.view.hovered_node = Some(id);
+            app.click(0.0, 0.0, false);
+        }
+        let kind = |app: &App, x, y| {
+            app.doc
+                .as_ref()
+                .expect("doc")
+                .config
+                .network
+                .connection_kind(x, y)
+        };
+        assert_eq!(kind(&app, a, b), ConnectionKind::Regular);
+        app.run(Action::FlipTool);
+        assert_eq!(active(&app), Some("Flip"));
+        app.view.hovered_node = None;
+        app.view.hovered_edge = Some((a, b));
+        app.click(0.0, 0.0, false);
+        assert_eq!(kind(&app, b, a), ConnectionKind::Regular);
+        assert_eq!(kind(&app, a, b), ConnectionKind::None);
+        app.run(Action::Undo);
+        assert_eq!(kind(&app, a, b), ConnectionKind::Regular);
+        assert_eq!(kind(&app, b, a), ConnectionKind::None);
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_flip_tool() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        app.run(Action::FlipTool);
+        assert!(app.tool.is_none());
     }
 
     #[test]

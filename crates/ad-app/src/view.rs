@@ -157,6 +157,11 @@ pub trait ViewHooks {
         None
     }
 
+    /// Whether the hovered connection `(from, to)` is handed to `paint` for highlighting.
+    fn highlights_edge(&self, _edge: (NodeId, NodeId)) -> bool {
+        true
+    }
+
     /// Draws on top of the view; `cursor` is the pointer while it is over the view.
     /// `hovered_edge` is the drawn screen segment of the hovered connection.
     fn paint(
@@ -347,6 +352,7 @@ impl MapView {
         }
         let hovered_edge = self
             .hovered_edge
+            .filter(|e| hooks.highlights_edge(*e))
             .and_then(|e| hover::drawn_segment(net, geometry, &t, ns, e))
             .map(|(a, b)| {
                 let p = |(x, y): (f64, f64)| egui::pos2(x as f32, y as f32);
