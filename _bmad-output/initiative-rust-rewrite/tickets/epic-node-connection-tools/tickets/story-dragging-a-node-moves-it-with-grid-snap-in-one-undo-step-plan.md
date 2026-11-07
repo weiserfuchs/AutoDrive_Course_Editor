@@ -3,7 +3,7 @@ title: 'Dragging a node moves it with grid snap in one undo step'
 type: 'feature'
 ticket: '2'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: '5d8bcc79dfa9da6e4dbb40d19f9db864c12691cc'
 route: 'full'
 route_source: 'auto'
