@@ -3,7 +3,7 @@ title: 'The delete tool removes the node or connection under the cursor'
 type: 'feature'
 ticket: '4'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: '65daebe026896c27dd3722c5670c6e23947aa62f'
 route: 'full'
 route_source: 'auto'
