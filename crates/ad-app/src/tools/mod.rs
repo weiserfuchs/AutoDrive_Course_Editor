@@ -1,6 +1,7 @@
 //! Editing tools (AD-10): stateful controllers that turn input into one transaction and
 //! draw their preview on top of the map view. Exactly one tool is active at a time.
 
+pub mod delete;
 pub mod move_node;
 pub mod node;
 
@@ -21,6 +22,10 @@ pub struct ToolContext<'a> {
     pub map: &'a MapContext,
     pub net: &'a Network,
     pub snap: bool,
+    /// The node under the pointer for a click (a drag gets its node in `on_drag_start`).
+    pub hovered_node: Option<NodeId>,
+    /// The connection under the pointer for a click; never set while a node is hovered.
+    pub hovered_edge: Option<(NodeId, NodeId)>,
 }
 
 /// (x, z) rounded to the nearest multiple of the grid spacing per axis (Java
@@ -59,6 +64,7 @@ pub trait Tool {
 
     /// Draws the preview on top of the map view; `cursor` is the pointer over the view.
     /// `snap_grid` is the grid spacing when snap applies this frame (Shift already resolved).
+    /// `hovered_edge` is the drawn screen segment of the hovered connection.
     fn paint(
         &self,
         painter: &egui::Painter,
@@ -66,6 +72,7 @@ pub trait Tool {
         geometry: MapGeometry,
         cursor: Option<egui::Pos2>,
         snap_grid: Option<(f64, f64)>,
+        hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     );
 
     /// Drops any uncommitted preview; nothing commits.

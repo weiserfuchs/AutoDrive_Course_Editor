@@ -10,6 +10,7 @@ use ad_core::network::{Network, NodeFlag, NodeId};
 
 use crate::App;
 use crate::input::{self, Action};
+use crate::tools::delete::DeleteTool;
 use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
 use crate::tools::{Tool, ToolContext};
@@ -62,10 +63,11 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
 fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
     let active = app.tool.as_ref().map(|t| t.name());
-    let tools: [Box<dyn Tool>; 3] = [
+    let tools: [Box<dyn Tool>; 4] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
+        Box::new(DeleteTool),
     ];
     for tool in tools {
         let selected = active == Some(tool.name());
@@ -136,6 +138,8 @@ impl ViewHooks for ToolHooks<'_> {
                 map: self.map,
                 net: self.net,
                 snap: self.snap,
+                hovered_node: None,
+                hovered_edge: None,
             }
         };
         match event {
@@ -165,10 +169,11 @@ impl ViewHooks for ToolHooks<'_> {
         t: &ViewTransform,
         geometry: MapGeometry,
         cursor: Option<egui::Pos2>,
+        hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     ) {
         if let Some(tool) = self.tool.as_deref() {
             let snap_grid = self.snap.then_some(self.map.grid);
-            tool.paint(painter, t, geometry, cursor, snap_grid);
+            tool.paint(painter, t, geometry, cursor, snap_grid, hovered_edge);
         }
     }
 }

@@ -158,12 +158,14 @@ pub trait ViewHooks {
     }
 
     /// Draws on top of the view; `cursor` is the pointer while it is over the view.
+    /// `hovered_edge` is the drawn screen segment of the hovered connection.
     fn paint(
         &self,
         _painter: &egui::Painter,
         _t: &ViewTransform,
         _geometry: MapGeometry,
         _cursor: Option<egui::Pos2>,
+        _hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     ) {
     }
 }
@@ -196,8 +198,7 @@ pub struct MapView {
     pub show_node_id: bool,
     /// The node under the pointer, recomputed every frame.
     pub hovered_node: Option<NodeId>,
-    /// The connection under the pointer, recomputed every frame; the tools epic reads it.
-    #[allow(dead_code)]
+    /// The connection under the pointer, recomputed every frame; none while a node is.
     pub hovered_edge: Option<(NodeId, NodeId)>,
     /// Grid spacing in world units, from the map's settings.
     pub grid: (f64, f64),
@@ -338,13 +339,21 @@ impl MapView {
             .map(|p| (f64::from(p.x), f64::from(p.y)));
         self.hovered_node =
             cursor.and_then(|c| hover::node_at(net, geometry, &t, ns, c, &mut self.nodes));
-        self.hovered_edge = cursor.and_then(|c| hover::edge_at(net, geometry, &t, c));
+        self.hovered_edge =
+            cursor.and_then(|c| hover::edge_at(net, geometry, &t, ns, self.hovered_node, c));
         self.paint(&painter, net, geometry, node_size, map_texture, &t, preview);
         if let Some(id) = self.hovered_node {
             self.paint_info_box(&painter, net, geometry, &t, ns, id, rect, preview);
         }
+        let hovered_edge = self
+            .hovered_edge
+            .and_then(|e| hover::drawn_segment(net, geometry, &t, ns, e))
+            .map(|(a, b)| {
+                let p = |(x, y): (f64, f64)| egui::pos2(x as f32, y as f32);
+                (p(a), p(b))
+            });
         // Last, so tools draw on top of everything.
-        hooks.paint(&painter, &t, geometry, response.hover_pos());
+        hooks.paint(&painter, &t, geometry, response.hover_pos(), hovered_edge);
         clicked
     }
 
@@ -1201,6 +1210,7 @@ mod tests {
                 t: &ViewTransform,
                 geometry: MapGeometry,
                 _cursor: Option<egui::Pos2>,
+                _hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
             ) {
                 self.seen.set(Some((t.zoom, geometry)));
                 painter.rect_filled(self.marker, 0.0, egui::Color32::YELLOW);
@@ -1852,6 +1862,8 @@ mod tests {
             map: &map,
             net,
             snap: false,
+            hovered_node: None,
+            hovered_edge: None,
         };
         let offset = std::cell::Cell::new(0.0);
         // The view is centred on the dragged node, so it stays on screen at maximum zoom.

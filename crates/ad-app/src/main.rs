@@ -17,6 +17,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use eframe::egui;
 
+use ad_core::command::{Command, DeleteNodes, Transaction};
 use ad_io::settings::Settings;
 use document::Document;
 use input::Action;
@@ -129,7 +130,35 @@ impl App {
                     doc.redo();
                 }
             }
-            Action::NodeTool | Action::MoveTool | Action::Undo | Action::Redo => {}
+            Action::DeleteHovered if self.editable() => self.delete_hovered(),
+            Action::NodeTool
+            | Action::MoveTool
+            | Action::Undo
+            | Action::Redo
+            | Action::DeleteHovered => {}
+        }
+    }
+
+    /// Deletes the hovered node, if any, after cancelling the tool's preview (as Undo does).
+    fn delete_hovered(&mut self) {
+        let Some(doc) = &mut self.doc else {
+            return;
+        };
+        // The hover belongs to the document the view last showed, and must still exist.
+        let Some(id) = self
+            .view
+            .hovered_node
+            .filter(|_| self.view_epoch == Some(doc.epoch))
+            .filter(|&id| doc.config.network.node(id).is_some())
+        else {
+            return;
+        };
+        if let Some(tool) = &mut self.tool {
+            tool.cancel();
+        }
+        let tx = Transaction::new(vec![Command::DeleteNodes(DeleteNodes::new(vec![id]))]);
+        if let Err(e) = doc.apply(tx) {
+            self.error = Some(e.to_string());
         }
     }
 
@@ -149,6 +178,8 @@ impl App {
             map: &doc.map,
             net: &doc.config.network,
             snap,
+            hovered_node: self.view.hovered_node,
+            hovered_edge: self.view.hovered_edge,
         }) else {
             return;
         };
@@ -237,7 +268,8 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use ad_core::network::NodeFlag;
+    use ad_core::command::Connect;
+    use ad_core::network::{ConnectionKind, ConnectionShape, NodeFlag};
     use ad_io::{config_xml, map_image};
 
     use ad_core::network::NodeId;
@@ -533,6 +565,142 @@ mod tests {
             assert_eq!(doc.history.can_redo(), action == Action::Undo, "{action:?}");
             assert!(app.error.is_none());
         }
+    }
+
+    /// Marks the view as showing the open document, as the map panel does each frame.
+    fn shown(app: &mut App) {
+        app.view_epoch = app.doc.as_ref().map(|d| d.epoch);
+    }
+
+    /// Order, positions, links and markers of the open document.
+    fn snapshot(app: &App) -> String {
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        let nodes: Vec<_> = net
+            .order()
+            .iter()
+            .map(|id| {
+                let n = net.node(*id).expect("node");
+                let links = (n.outgoing().to_vec(), n.incoming().to_vec());
+                (*id, n.x, n.y, n.z, n.flag, links)
+            })
+            .collect();
+        format!("{nodes:?} {:?}", net.markers())
+    }
+
+    #[test]
+    fn the_delete_key_deletes_the_hovered_node_and_undo_restores_it() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        let before = snapshot(&app);
+        app.run(Action::DeleteHovered);
+        assert_eq!(nodes(&app), 1, "nothing without a hovered node");
+        app.view.hovered_node = Some(first(&app));
+        app.run(Action::DeleteHovered);
+        assert_eq!(nodes(&app), 0);
+        assert!(app.error.is_none());
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+    }
+
+    #[test]
+    fn the_delete_key_ignores_a_hover_from_another_document() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        app.view.hovered_node = Some(first(&app));
+        // A new document whose view has not been shown yet.
+        load(&mut app, "<version>3</version>");
+        app.run(Action::DeleteHovered);
+        assert_eq!(nodes(&app), 1);
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_delete_key_and_tool() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        shown(&mut app);
+        app.view.hovered_node = Some(first(&app));
+        app.run(Action::DeleteHovered);
+        app.tool = Some(Box::new(tools::delete::DeleteTool));
+        app.click(1025.0, 1026.0, false);
+        assert_eq!(nodes(&app), 1);
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn the_delete_key_mid_drag_cancels_the_drag() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        app.run(Action::MoveTool);
+        let id = first(&app);
+        let start = DragEvent::Start {
+            at: (1025.0, 1026.0),
+            node: Some(id),
+        };
+        drag(&mut app, start, false);
+        drag(
+            &mut app,
+            DragEvent::Move {
+                at: (1100.0, 1100.0),
+            },
+            false,
+        );
+        app.view.hovered_node = Some(id);
+        app.run(Action::DeleteHovered);
+        assert!(app.tool.as_ref().is_some_and(|t| t.preview().is_none()));
+        assert_eq!(nodes(&app), 0);
+        // `drag` panics on an apply error; the release must not commit a move.
+        drag(
+            &mut app,
+            DragEvent::End {
+                at: (1100.0, 1100.0),
+            },
+            false,
+        );
+        app.run(Action::Undo);
+        assert_eq!(state(&app), ((1.0, 0.0, 2.0), false));
+    }
+
+    #[test]
+    fn the_delete_tool_removes_a_node_and_a_connection_and_two_undos_restore_them() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        let a = first(&app);
+        // Two more nodes: map px (1034, 1019) and (1044, 1019).
+        app.run(Action::NodeTool);
+        app.click(1034.0, 1019.0, false);
+        app.click(1044.0, 1019.0, false);
+        let doc = app.doc.as_mut().expect("doc");
+        let [_, b, c] = doc.config.network.order()[..] else {
+            panic!("three nodes");
+        };
+        for (from, to) in [(a, b), (b, c)] {
+            let connect = Connect::new(from, to, ConnectionShape::Dual);
+            doc.apply(Transaction::new(vec![Command::Connect(connect)]))
+                .expect("connects");
+        }
+        let before = snapshot(&app);
+        app.set_tool(Some(Box::new(tools::delete::DeleteTool)));
+        // The click itself does not hit-test: the view's hover decides.
+        app.view.hovered_edge = Some((b, a));
+        app.click(0.0, 0.0, false);
+        app.view.hovered_edge = None;
+        app.view.hovered_node = Some(c);
+        app.click(0.0, 0.0, false);
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        assert_eq!(net.order(), [a, b]);
+        assert_eq!(net.connection_kind(a, b), ConnectionKind::None);
+        app.view.hovered_node = None;
+        app.click(0.0, 0.0, false);
+        assert_eq!(nodes(&app), 2, "an empty click does nothing");
+        app.run(Action::Undo);
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert!(app.error.is_none());
     }
 
     #[test]

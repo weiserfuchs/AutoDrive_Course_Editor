@@ -85,6 +85,7 @@ impl Tool for NodeTool {
         geometry: MapGeometry,
         cursor: Option<egui::Pos2>,
         snap_grid: Option<(f64, f64)>,
+        _hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     ) {
         if let Some(p) = cursor {
             let p = preview_at(p, t, geometry, snap_grid);
@@ -127,6 +128,8 @@ mod tests {
                 map,
                 net: &net,
                 snap,
+                hovered_node: None,
+                hovered_edge: None,
             })
             .expect("a transaction");
         tx.apply(&mut net).expect("applies");

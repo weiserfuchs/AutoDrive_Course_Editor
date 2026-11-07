@@ -13,11 +13,13 @@ pub(crate) enum Action {
     Undo,
     Redo,
     ToggleNodeId,
+    /// Deletes the hovered node, whichever tool is active (Java's Delete key).
+    DeleteHovered,
 }
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 6] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 7] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -41,6 +43,10 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 6] = [
     (
         Action::ToggleNodeId,
         KeyboardShortcut::new(Modifiers::NONE, Key::F4),
+    ),
+    (
+        Action::DeleteHovered,
+        KeyboardShortcut::new(Modifiers::NONE, Key::Delete),
     ),
 ];
 
@@ -117,6 +123,7 @@ mod tests {
         assert_eq!(press(Modifiers::NONE, Key::F4), [Action::ToggleNodeId]);
         assert_eq!(press(Modifiers::NONE, Key::M), [Action::MoveTool]);
         assert_eq!(press(Modifiers::NONE, Key::S), [Action::ToggleSnap]);
+        assert_eq!(press(Modifiers::NONE, Key::Delete), [Action::DeleteHovered]);
     }
 
     #[test]
@@ -143,5 +150,6 @@ mod tests {
         // Ctrl+S stays free for saving.
         assert!(press(CTRL, Key::S).is_empty());
         assert!(press(Modifiers::SHIFT, Key::M).is_empty());
+        assert!(press(CTRL, Key::Delete).is_empty());
     }
 }
