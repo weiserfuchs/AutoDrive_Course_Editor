@@ -3,7 +3,7 @@ title: 'Dragging a node stays within the frame budget'
 type: 'feature'
 ticket: '3'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: '3ea8268072a80a246560d9f9ddeebf545865fa46'
 route: 'oneshot'
 route_source: 'auto'
