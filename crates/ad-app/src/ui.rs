@@ -14,6 +14,7 @@ use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
 use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
+use crate::tools::priority::PriorityTool;
 use crate::tools::{Tool, ToolContext};
 use crate::view::{DragEvent, MapPx, ViewHooks, ViewTransform};
 
@@ -65,11 +66,12 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
-    let tools: [Box<dyn Tool>; 7] = [
+    let tools: [Box<dyn Tool>; 8] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
         Box::new(DeleteTool),
+        Box::new(PriorityTool),
         Box::new(ConnectTool::new(ConnectionShape::OneWay, continuous)),
         Box::new(ConnectTool::new(ConnectionShape::Dual, continuous)),
         Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous)),

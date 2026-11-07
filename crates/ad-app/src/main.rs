@@ -126,6 +126,9 @@ impl App {
             Action::MoveTool if self.editable() => {
                 self.set_tool(Some(Box::new(tools::move_node::MoveTool::default())));
             }
+            Action::PriorityTool if self.editable() => {
+                self.set_tool(Some(Box::new(tools::priority::PriorityTool)));
+            }
             Action::Undo if self.editable() => {
                 // A preview built on the old network must not commit afterwards.
                 if let Some(tool) = &mut self.tool {
@@ -147,6 +150,7 @@ impl App {
             Action::NodeTool
             | Action::MoveTool
             | Action::ConnectTool
+            | Action::PriorityTool
             | Action::Undo
             | Action::Redo
             | Action::DeleteHovered => {}
@@ -766,6 +770,41 @@ mod tests {
         app.view.hovered_node = Some(b);
         app.click(0.0, 0.0, false);
         assert_eq!(snapshot(&app), before);
+    }
+
+    #[test]
+    fn p_swaps_the_clicked_node_and_undo_restores_it() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        app.run(Action::PriorityTool);
+        assert_eq!(active(&app), Some("Priority"));
+        let id = first(&app);
+        let flag = |app: &App| {
+            app.doc
+                .as_ref()
+                .and_then(|d| d.config.network.node(id))
+                .map(|n| n.flag)
+        };
+        let before = flag(&app);
+        app.view.hovered_node = Some(id);
+        app.click(0.0, 0.0, false);
+        assert_ne!(flag(&app), before);
+        app.run(Action::Undo);
+        assert_eq!(flag(&app), before);
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_priority_tool() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        app.run(Action::PriorityTool);
+        assert!(app.tool.is_none());
+        app.tool = Some(Box::new(tools::priority::PriorityTool));
+        app.view.hovered_node = Some(first(&app));
+        app.click(0.0, 0.0, false);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        assert!(app.error.is_none());
     }
 
     #[test]
