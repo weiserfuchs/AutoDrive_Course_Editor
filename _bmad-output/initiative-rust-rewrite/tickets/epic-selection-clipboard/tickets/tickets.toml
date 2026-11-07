@@ -1,0 +1,115 @@
+# Stories of epic-selection-clipboard in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "A right-drag rectangle selects nodes and the selection survives undo"
+description = "Tracer (AD-15): adds Document.selection (a set of NodeId outside the history), pruned to existing ids after every apply, undo and redo (its share of R3), and cleared when a document is replaced (AD-18). A right drag draws an inclusive rectangle (AD-5) and toggles the nodes it covers; a right click on a node toggles it; a right click on empty map clears the selection. Selected nodes are drawn highlighted in the Java look. A right drag never pans and works whichever tool is active. The person's step: select parts of the fixture by rectangle and click, undo a deletion of a selected node, and see the selection pruned."
+verify = "Tests show the inclusive rectangle picks nodes on its edges, toggling, clear, and pruning after apply/undo/redo; the user selects on the fixture and sees the highlight."
+covers = ["R1", "R3"]
+after = ["epic-node-connection-tools"]
+hitl = true
+risk = "high"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-15--selection-and-clipboard", "research-editing-tools-and-change-history/research-editing-tools-and-change-history.md#4-how-do-selection-and-alignment-tools-work"]
+notes = ["Beyond its criteria: the frame-time test still passes with the whole network selected and highlighted (static view)."]
+
+[[entry]]
+id = 2
+type = "story"
+title = "The move tool drags the whole selection in one undo step"
+description = "A move drag that starts on a selected node moves every selected node by the same offset; grid snap applies to the grabbed node; the shared offset is clamped so no selected node leaves ±1024·map scale and the group keeps its shape. Release commits one MoveNodes with absolute positions. The view's single-node preview override becomes a set of (NodeId, x, z), drawing the moved nodes and their connections at the preview; story 6 (rotate) reuses this set. A drag on an unselected node moves that node alone, as before. The person's step: drag a selection on the fixture and undo it."
+verify = "Tests show one MoveNodes for the whole selection that undoes to the exact start positions, snap on the grabbed node, the clamped offset at the map edge, and the old single-node drag unchanged; the edited golden test saves a moved group; the user drags a selection and undoes it."
+covers = ["R2", "R3"]
+after = [1]
+hitl = true
+risk = "high"
+notes = ["Beyond its criteria: the existing single-node drag frame-time cases do not get slower."]
+
+[[entry]]
+id = 3
+type = "story"
+title = "Dragging the whole network selected stays within the frame budget"
+description = "Extends the headless frame-time test with a selection-drag case: every fixture node selected and dragged at minimum and maximum zoom, preview included, measured like the other cases. Fixes what the measurement shows is over budget. The person's step: select a large part of the fixture, drag it at both zoom ends and confirm it stays smooth."
+verify = "cargo test -p ad-app --release -- --ignored frame_time reports the selection-drag cases' best-round median and max under 16 ms at minimum and maximum zoom; the user confirms dragging a large selection stays smooth."
+covers = ["R4"]
+after = [2]
+hitl = true
+risk = "high"
+notes = ["Beyond its criteria: the case also asserts that every preview position moved, so a frozen preview cannot pass."]
+
+[[entry]]
+id = 4
+type = "story"
+title = "A lasso selects the nodes inside a drawn outline"
+description = "A toolbar switch picks rectangle or lasso for the right drag; the lasso toggles the nodes inside the drawn outline: the screen outline is converted to world coordinates and queried with Network::in_polygon (AD-5). The outline is drawn while dragging."
+verify = "Tests show the polygon pick on a concave outline and the switch."
+covers = ["R1"]
+after = [3]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Delete, priority and flip act on the selection"
+description = "A click with the delete, priority or flip tool on a selected node acts on the whole selection in one transaction: DeleteNodes of all selected nodes; SetFlag swapping each selected node; flipping every one-way or reverse connection whose both ends are selected (dual ones unchanged). The Delete key deletes the selection when there is one, else the hovered node. A click on an unselected node or connection acts on it alone, as before."
+verify = "Tests cover each tool on a selection with one undo restoring everything, the Delete key with and without a selection, and unchanged single-target behaviour; the edited golden test saves a deleted group."
+covers = ["R2", "R3"]
+after = [4]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "The rotate tool turns the selection about its centre"
+description = "The rotate tool (R) shows a handle at the selection's centre; dragging it rotates the selection in whole degrees, previewed through story 2's override set; release commits one MoveNodes with absolute positions (y kept). An empty selection does nothing. A frame-time case rotates the whole network selected at minimum and maximum zoom (R4). The person's step: rotate a fixture junction and undo it."
+verify = "Tests show positions after a 90-degree turn, whole-degree steps, one undo to the exact start, and nothing for an empty selection; the frame-time rotate cases stay under 16 ms; the user rotates a fixture junction and undoes it."
+covers = ["R2", "R3", "R4"]
+after = [2, 5]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Align tools line the selection up with a reference node"
+description = "Horizontal (Shift+X) copies the clicked reference node's z to every selected node, vertical (Shift+Y) its x, depth its y, in one MoveNodes with absolute before and after positions, so aligning to 0 undoes correctly (AD-13)."
+verify = "Tests cover each axis including a target of exactly 0 with undo restoring the old values; the edited golden test saves an aligned group."
+covers = ["R1", "R3"]
+after = [6]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Edit Location sets a node's x, y and z with undo"
+description = "An Edit Location tool opens a dialog for the clicked node's x, y and z (3 decimals); OK commits one MoveNodes, Cancel nothing; invalid numbers are refused in the dialog. Java's version has no undo (AD-13). The person's step: edit a fixture node's location and undo it."
+verify = "Tests show the dialog's parse and one undo restoring the old position; the user edits a fixture node and undoes it."
+covers = ["R1", "R3"]
+after = [7]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 9
+type = "story"
+title = "Copy, cut and paste to the view centre or the original place"
+description = "Ctrl+C copies the selection to an app-level clipboard of detached data: positions relative to the selection centre plus the centre itself, flags, markers, and links inside the selection by index (AD-15). Ctrl+X copies, then deletes the selection in one step. Ctrl+V pastes new nodes centred on the view, Shift+V at the original place, in one transaction with heights from sample_height, or the copied height when the map has no heightmap. The pasted nodes become the selection through the command's select_after, and undo of paste or cut restores the prior selection (AD-15). Paste repeats from the same clipboard; the clipboard survives opening another file (detached data, so pasting into another config works). The person's step: copy a junction on the fixture, paste it twice and undo."
+verify = "Tests cover copy/paste of a linked group with markers (only inner links kept), cut with one undo, both paste targets, repeated paste, heights from a heightmap, select_after and its undo, and paste after a document replacement; the edited golden test saves a pasted group; the user copies a junction on the fixture and pastes it twice."
+covers = ["R1", "R3"]
+after = [8]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 10
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred; scope is set at its start and limited to cleanup."
+verify = "CI is green and the golden, round-trip and frame-time tests still pass."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+hitl = false
+risk = "low"

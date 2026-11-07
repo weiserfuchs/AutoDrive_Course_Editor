@@ -213,6 +213,9 @@ graph TD
   - Paste losing external links. This is unchanged: paste keeps only the links inside the selection, as Java does.
   - Redo bound to Shift+Z. The default is Ctrl+Shift+Z, configurable.
   - The merge backup and autosave not touching the document path. This is kept (AD-16).
+  - Selection only while a tool allows multi-selection. Selection works whichever tool is active (epic-selection-clipboard, 2026-11-07).
+  - Tools acting at once on a drawn rectangle (Java's delete tool deletes it). Tools act on the selection only on a click, so a rectangle never deletes by accident (epic-selection-clipboard, 2026-11-07).
+  - A node landing at the end of a left-drag pan (Java adds a node on every left release). Only a click adds one (epic-node-connection-tools, 2026-11-07).
 
 ### AD-14 — MapContext is the single owner of map-level data
 

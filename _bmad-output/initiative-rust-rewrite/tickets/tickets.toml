@@ -28,7 +28,7 @@ id = 4
 slug = "epic-selection-clipboard"
 title = "Users select, align, copy and paste"
 description = "Rectangle, lasso and click selection, rotation, the multi-node variants of the epic 3 tools, axis alignment, location editing and copy/cut/paste work on the fixture and undo cleanly."
-covers = ["R4", "R6"]
+covers = ["R4", "R6", "R15"]
 after = [{ epic = 3, needs = "the Tool trait and core edit commands" }]
 
 [[epic]]
