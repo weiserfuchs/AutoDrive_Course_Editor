@@ -1,6 +1,8 @@
 //! Hit tests and the info box of the hovered node as pure functions (Java
 //! `MapPanel.getNodeAtScreenPosition`, `MapPanel` 399-569). Nothing here paints.
 
+use std::collections::BTreeSet;
+
 use eframe::egui::{Color32, Pos2, Rect, Vec2};
 
 use ad_core::geometry::MapGeometry;
@@ -46,6 +48,45 @@ pub fn node_at(
         let (sx, sy) = t.map_to_screen(mx, my);
         let (dx, dy) = (sx - cursor.0, sy - cursor.1);
         if dx.abs() >= half || dy.abs() >= half {
+            continue;
+        }
+        let d2 = dx * dx + dy * dy;
+        if best.is_none_or(|(b, bid)| d2 < b || (d2 == b && id < bid)) {
+            best = Some((d2, id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// The selected node whose mark lies within `reach` screen px of `cursor` (square test),
+/// nearest first, lowest id on a tie. Used when nodes are too small to hit with
+/// [`node_at`] but selected nodes are shown as marks. `buf` is a reused query buffer.
+pub fn selected_mark_at(
+    net: &Network,
+    geometry: MapGeometry,
+    t: &ViewTransform,
+    selection: &BTreeSet<NodeId>,
+    cursor: Pt,
+    reach: f64,
+    buf: &mut Vec<NodeId>,
+) -> Option<NodeId> {
+    let world = |dx: f64, dy: f64| {
+        let (mx, my) = t.screen_to_map(cursor.0 + dx, cursor.1 + dy);
+        geometry.to_world(mx, my)
+    };
+    // One px of slack: the inclusive test below decides, the query only has to include all.
+    let (x0, z0) = world(-reach - 1.0, -reach - 1.0);
+    let (x1, z1) = world(reach + 1.0, reach + 1.0);
+    net.nodes_in_rect_into(x0.min(x1), z0.min(z1), x0.max(x1), z0.max(z1), buf);
+    let mut best: Option<(f64, NodeId)> = None;
+    for &id in buf.iter().filter(|id| selection.contains(id)) {
+        let Some(n) = net.node(id) else {
+            continue;
+        };
+        let (mx, my) = geometry.to_map(n.x, n.z);
+        let (sx, sy) = t.map_to_screen(mx, my);
+        let (dx, dy) = (sx - cursor.0, sy - cursor.1);
+        if dx.abs() > reach || dy.abs() > reach {
             continue;
         }
         let d2 = dx * dx + dy * dy;

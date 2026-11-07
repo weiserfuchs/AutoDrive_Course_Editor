@@ -23,6 +23,8 @@ const BOX_PAD_PX: f32 = 2.0;
 const SELECT_DASH_PX: f32 = 4.0;
 /// Side of the mark of a selected node while nodes are too small to draw, in px.
 const SELECTED_MARK_PX: f32 = 3.0;
+/// Extra screen px around a selection mark that still grabs it, since the mark is tiny.
+const MARK_HIT_SLACK_PX: f64 = 2.0;
 
 /// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
 /// centre is in map px. The panel is the screen rectangle the map is shown in.
@@ -341,7 +343,24 @@ impl MapView {
             let node = origin.and_then(|p| {
                 let ns = look::node_px(node_size, transform.zoom);
                 let c = (f64::from(p.x), f64::from(p.y));
-                hover::node_at(net, geometry, transform, ns, c, &mut self.nodes)
+                hover::node_at(net, geometry, transform, ns, c, &mut self.nodes).or_else(|| {
+                    // Zoomed out, nodes are too small to hit, but selected ones show a mark:
+                    // a press on a mark grabs that node, so the selection can be dragged.
+                    let selection = hooks.selection().filter(|s| !s.is_empty())?;
+                    (f64::from(ns) < MIN_NODE_PX)
+                        .then(|| {
+                            hover::selected_mark_at(
+                                net,
+                                geometry,
+                                transform,
+                                selection,
+                                c,
+                                f64::from(SELECTED_MARK_PX) / 2.0 + MARK_HIT_SLACK_PX,
+                                &mut self.nodes,
+                            )
+                        })
+                        .flatten()
+                })
             });
             self.drag_claimed = origin.is_some_and(|p| {
                 let at = transform.screen_to_map(f64::from(p.x), f64::from(p.y));
@@ -1486,9 +1505,19 @@ mod tests {
         net: &Network,
         hooks: &mut impl ViewHooks,
     ) -> (Vec<Option<MapPx>>, MapPx) {
+        pointer_frames_zoomed(button, frames, net, hooks, 2.0)
+    }
+
+    fn pointer_frames_zoomed(
+        button: egui::PointerButton,
+        frames: Vec<Vec<egui::Event>>,
+        net: &Network,
+        hooks: &mut impl ViewHooks,
+        zoom: f64,
+    ) -> (Vec<Option<MapPx>>, MapPx) {
         let ctx = egui::Context::default();
         let g = MapGeometry::new(1.0);
-        let mut view = view_at(&ctx, net, g, 2.0);
+        let mut view = view_at(&ctx, net, g, zoom);
         let mut reported = Vec::new();
         for (i, events) in frames.into_iter().enumerate() {
             let events = events
@@ -1658,6 +1687,52 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn zoomed_out_a_press_on_a_selection_mark_grabs_that_node() {
+        let mut net = Network::new();
+        // Zoom 0.5: nodes are 1 px, too small to hit. World (-12, -12) is map px
+        // (1012, 1012), screen (506, 506); the other node is unselected.
+        let selected = net.add_node(-12.0, 0.0, -12.0, NodeFlag::REGULAR);
+        net.add_node(-40.0, 0.0, -12.0, NodeFlag::REGULAR);
+        let drag = |hooks: &mut Recorder, at: egui::Pos2| {
+            pointer_frames_zoomed(
+                egui::PointerButton::Primary,
+                drag_frames(at, egui::pos2(at.x + 60.0, at.y)),
+                &net,
+                hooks,
+                0.5,
+            );
+        };
+        let start_node = |hooks: &Recorder| match hooks.events.first() {
+            Some(DragEvent::Start { node, .. }) => *node,
+            _ => panic!("no drag start"),
+        };
+        // On the mark, and 3 px beside it (half mark 1.5 + slack 2): the selected node.
+        for at in [egui::pos2(506.0, 506.0), egui::pos2(509.0, 506.0)] {
+            let mut hooks = Recorder {
+                claim: true,
+                selection: Some(BTreeSet::from([selected])),
+                ..Recorder::default()
+            };
+            drag(&mut hooks, at);
+            assert_eq!(start_node(&hooks), Some(selected), "press at {at:?}");
+        }
+        // 5 px beside it, or on the unselected node, or with no selection: nothing.
+        for (at, selection) in [
+            (egui::pos2(511.0, 506.0), BTreeSet::from([selected])),
+            (egui::pos2(492.0, 506.0), BTreeSet::from([selected])),
+            (egui::pos2(506.0, 506.0), BTreeSet::new()),
+        ] {
+            let mut hooks = Recorder {
+                claim: true,
+                selection: Some(selection),
+                ..Recorder::default()
+            };
+            drag(&mut hooks, at);
+            assert_eq!(start_node(&hooks), None, "press at {at:?}");
+        }
     }
 
     #[test]
