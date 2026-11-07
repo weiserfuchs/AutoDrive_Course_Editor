@@ -6,10 +6,11 @@ use ad_core::command::Transaction;
 use ad_core::geometry::MapGeometry;
 use ad_core::history::History;
 use ad_core::map_context::MapContext;
-use ad_core::network::{Network, NodeFlag, NodeId};
+use ad_core::network::{ConnectionShape, Network, NodeFlag, NodeId};
 
 use crate::App;
 use crate::input::{self, Action};
+use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
 use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
@@ -63,11 +64,15 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
 fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
     let active = app.tool.as_ref().map(|t| t.name());
-    let tools: [Box<dyn Tool>; 4] = [
+    let continuous = app.continuous;
+    let tools: [Box<dyn Tool>; 7] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
         Box::new(DeleteTool),
+        Box::new(ConnectTool::new(ConnectionShape::OneWay, continuous)),
+        Box::new(ConnectTool::new(ConnectionShape::Dual, continuous)),
+        Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous)),
     ];
     for tool in tools {
         let selected = active == Some(tool.name());
@@ -76,6 +81,14 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
             // A click on the active tool turns it off.
             app.set_tool((!selected).then_some(tool));
         }
+    }
+    let mut continuous = app.continuous;
+    if ui
+        .checkbox(&mut continuous, "Continuous")
+        .on_hover_text("; (L cycles the connect tools)")
+        .changed()
+    {
+        app.run(Action::ToggleContinuous);
     }
     ui.checkbox(&mut app.snap, "Snap")
         .on_hover_text("S; hold Shift to invert");

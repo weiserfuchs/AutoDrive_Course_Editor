@@ -42,6 +42,8 @@ struct App {
     tool: Option<Box<dyn Tool>>,
     /// Grid snap for the tools; session only. Shift inverts it while held.
     snap: bool,
+    /// Continuous connections for the connect tools; session only (Java default off).
+    continuous: bool,
 }
 
 impl App {
@@ -62,6 +64,7 @@ impl App {
             view_epoch: None,
             tool: None,
             snap: false,
+            continuous: false,
         }
     }
 
@@ -106,6 +109,16 @@ impl App {
         match action {
             Action::ToggleNodeId => self.view.show_node_id = !self.view.show_node_id,
             Action::ToggleSnap => self.snap = !self.snap,
+            Action::ToggleContinuous => {
+                self.continuous = !self.continuous;
+                if let Some(tool) = &mut self.tool {
+                    tool.set_continuous(self.continuous);
+                }
+            }
+            Action::ConnectTool if self.editable() => {
+                let next = tools::connect::cycled(self.tool.as_deref(), self.continuous);
+                self.set_tool(Some(Box::new(next)));
+            }
             Action::NodeTool if self.editable() => {
                 let next = tools::node::cycled(self.tool.as_deref());
                 self.set_tool(Some(Box::new(next)));
@@ -133,6 +146,7 @@ impl App {
             Action::DeleteHovered if self.editable() => self.delete_hovered(),
             Action::NodeTool
             | Action::MoveTool
+            | Action::ConnectTool
             | Action::Undo
             | Action::Redo
             | Action::DeleteHovered => {}
@@ -700,6 +714,121 @@ mod tests {
         app.run(Action::Undo);
         app.run(Action::Undo);
         assert_eq!(snapshot(&app), before);
+        assert!(app.error.is_none());
+    }
+
+    fn active(app: &App) -> Option<&'static str> {
+        app.tool.as_ref().map(|t| t.name())
+    }
+
+    #[test]
+    fn l_selects_and_cycles_the_connect_tools() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        app.run(Action::NodeTool);
+        for name in ["Connect", "Dual", "Reverse", "Connect"] {
+            app.run(Action::ConnectTool);
+            assert_eq!(active(&app), Some(name));
+        }
+    }
+
+    #[test]
+    fn semicolon_toggles_continuous_for_the_session_and_the_active_tool() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        assert!(!app.continuous);
+        app.run(Action::ToggleContinuous);
+        assert!(app.continuous);
+        // A connect tool picked now starts continuous; toggling reaches the active one.
+        app.run(Action::NodeTool);
+        app.click(1034.0, 1019.0, false);
+        app.click(1044.0, 1019.0, false);
+        let [a, b, c] = app.doc.as_ref().expect("doc").config.network.order()[..] else {
+            panic!("three nodes");
+        };
+        app.run(Action::ConnectTool);
+        for id in [a, b, c] {
+            app.view.hovered_node = Some(id);
+            app.click(0.0, 0.0, false);
+        }
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        assert_eq!(net.connection_kind(a, b), ConnectionKind::Regular);
+        assert_eq!(net.connection_kind(b, c), ConnectionKind::Regular);
+        app.run(Action::ToggleContinuous);
+        assert!(!app.continuous);
+        app.view.hovered_node = Some(a);
+        app.click(0.0, 0.0, false);
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        assert_eq!(net.connection_kind(c, a), ConnectionKind::Regular);
+        // Not continuous any more: the next click picks a new start, nothing commits.
+        let before = snapshot(&app);
+        app.view.hovered_node = Some(b);
+        app.click(0.0, 0.0, false);
+        assert_eq!(snapshot(&app), before);
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_connect_tools() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        app.run(Action::ConnectTool);
+        assert!(app.tool.is_none());
+        app.tool = Some(Box::new(tools::connect::ConnectTool::new(
+            ConnectionShape::OneWay,
+            false,
+        )));
+        app.view.hovered_node = Some(first(&app));
+        app.click(0.0, 0.0, false);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn connect_reshape_and_remove_each_undo_in_one_step() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        app.run(Action::NodeTool);
+        app.click(1034.0, 1019.0, false);
+        let [a, b] = app.doc.as_ref().expect("doc").config.network.order()[..] else {
+            panic!("two nodes");
+        };
+        let connect = |app: &mut App, action_steps: usize| {
+            for _ in 0..action_steps {
+                app.run(Action::ConnectTool);
+            }
+            for id in [a, b] {
+                app.view.hovered_node = Some(id);
+                app.click(0.0, 0.0, false);
+            }
+        };
+        let kind = |app: &App| {
+            let net = &app.doc.as_ref().expect("doc").config.network;
+            (net.connection_kind(a, b), net.connection_kind(b, a))
+        };
+        // Regular a -> b, then dual (reshape), then dual again (remove).
+        connect(&mut app, 1);
+        assert_eq!(kind(&app), (ConnectionKind::Regular, ConnectionKind::None));
+        let regular = snapshot(&app);
+        connect(&mut app, 1);
+        assert_eq!(active(&app), Some("Dual"));
+        assert_eq!(kind(&app), (ConnectionKind::Dual, ConnectionKind::Dual));
+        let dual = snapshot(&app);
+        connect(&mut app, 0);
+        assert_eq!(kind(&app), (ConnectionKind::None, ConnectionKind::None));
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), dual);
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), regular);
+        // A pending start is dropped by Undo.
+        app.view.hovered_node = Some(a);
+        app.click(0.0, 0.0, false);
+        app.run(Action::Undo);
+        assert_eq!(kind(&app), (ConnectionKind::None, ConnectionKind::None));
+        app.view.hovered_node = Some(b);
+        app.click(0.0, 0.0, false);
+        assert_eq!(kind(&app), (ConnectionKind::None, ConnectionKind::None));
         assert!(app.error.is_none());
     }
 

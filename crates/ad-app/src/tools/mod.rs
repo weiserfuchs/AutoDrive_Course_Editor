@@ -1,6 +1,7 @@
 //! Editing tools (AD-10): stateful controllers that turn input into one transaction and
 //! draw their preview on top of the map view. Exactly one tool is active at a time.
 
+pub mod connect;
 pub mod delete;
 pub mod move_node;
 pub mod node;
@@ -74,6 +75,9 @@ pub trait Tool {
         snap_grid: Option<(f64, f64)>,
         hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     );
+
+    /// Continuous connections were turned on or off; only the connect tools use it.
+    fn set_continuous(&mut self, _on: bool) {}
 
     /// Drops any uncommitted preview; nothing commits.
     fn cancel(&mut self);

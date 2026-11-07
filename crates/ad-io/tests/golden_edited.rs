@@ -124,6 +124,42 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .flat_map(|(a, n)| n.outgoing().iter().map(move |t| (a, *t)))
         .find(|(_, t)| !touched.contains(t))
         .ok_or("fixture has no untouched link")?;
+    // The connect tools: a reshaped existing link and a new reverse link, both on nodes no
+    // other edit touches.
+    let touched = [&touched[..], &[cut_a, cut_b]].concat();
+    let (shape_a, shape_b) = order
+        .iter()
+        .filter(|id| !touched.contains(id))
+        .filter_map(|a| cfg.network.node(*a).map(|n| (*a, n)))
+        .flat_map(|(a, n)| n.outgoing().iter().map(move |t| (a, *t)))
+        .find(|(_, t)| !touched.contains(t))
+        .ok_or("fixture has no second untouched link")?;
+    let old_kind = cfg.network.connection_kind(shape_a, shape_b);
+    let reshaped = if old_kind == ConnectionKind::Dual {
+        ConnectionShape::OneWay
+    } else {
+        ConnectionShape::Dual
+    };
+    let touched = [&touched[..], &[shape_a, shape_b]].concat();
+    let linked = |a: NodeId, b: NodeId| {
+        cfg.network
+            .node(a)
+            .is_some_and(|n| n.outgoing().contains(&b) || n.incoming().contains(&b))
+            || cfg
+                .network
+                .node(b)
+                .is_some_and(|n| n.outgoing().contains(&a) || n.incoming().contains(&a))
+    };
+    let free: Vec<NodeId> = order
+        .iter()
+        .copied()
+        .filter(|id| !touched.contains(id))
+        .collect();
+    let (rev_a, rev_b) = free
+        .iter()
+        .flat_map(|a| free.iter().map(move |b| (*a, *b)))
+        .find(|(a, b)| a != b && !linked(*a, *b))
+        .ok_or("fixture has no unlinked untouched pair")?;
 
     // The node tool's height: sampled from a small generated heightmap (AD-7).
     let mut map = MapContext::new(None, 1, 2.0, (2.0, 2.0));
@@ -180,10 +216,40 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         cfg.network.connection_kind(cut_a, cut_b),
         ConnectionKind::None
     );
+    // One transaction per connect-tool click.
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![
+            Command::Disconnect(Disconnect::new(shape_a, shape_b)),
+            Command::Connect(Connect::new(shape_a, shape_b, reshaped)),
+        ]),
+    )?;
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::Connect(Connect::new(
+            rev_a,
+            rev_b,
+            ConnectionShape::Reverse,
+        ))]),
+    )?;
+    assert_eq!(
+        cfg.network.connection_kind(rev_a, rev_b),
+        ConnectionKind::Reverse
+    );
+    let shaped_kind = cfg.network.connection_kind(shape_a, shape_b);
+    assert_ne!(shaped_kind, old_kind);
     let index_of = |id: NodeId| cfg.network.order().iter().position(|n| *n == id);
     let cut = (
         index_of(cut_a).ok_or("cut node")?,
         index_of(cut_b).ok_or("cut node")?,
+    );
+    let shaped = (
+        index_of(shape_a).ok_or("reshaped node")?,
+        index_of(shape_b).ok_or("reshaped node")?,
+    );
+    let reverse = (
+        index_of(rev_a).ok_or("reverse node")?,
+        index_of(rev_b).ok_or("reverse node")?,
     );
     let moved_index = cfg
         .network
@@ -230,5 +296,10 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
     let (ra, rb) = (net.order()[cut.0], net.order()[cut.1]);
     assert_eq!(net.connection_kind(ra, rb), ConnectionKind::None);
     assert_eq!(net.connection_kind(rb, ra), ConnectionKind::None);
+    let (sa, sb) = (net.order()[shaped.0], net.order()[shaped.1]);
+    assert_eq!(net.connection_kind(sa, sb), shaped_kind);
+    let (va, vb) = (net.order()[reverse.0], net.order()[reverse.1]);
+    assert_eq!(net.connection_kind(va, vb), ConnectionKind::Reverse);
+    assert_eq!(net.connection_kind(vb, va), ConnectionKind::None);
     Ok(())
 }
