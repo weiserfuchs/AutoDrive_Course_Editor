@@ -3,7 +3,7 @@ title: 'A right-drag rectangle selects nodes and the selection survives undo'
 type: 'feature'
 ticket: '1'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: '676660f3115afebccbd99221992c750bf374374a'
 route: 'full'
 route_source: 'auto'
