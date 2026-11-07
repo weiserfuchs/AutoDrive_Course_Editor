@@ -3,7 +3,7 @@ title: 'The move tool drags the whole selection in one undo step'
 type: 'feature'
 ticket: '2'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: '0e3bb8ed42c4f485072d97faf06132766ae6ac60'
 route: 'full'
 route_source: 'auto'
