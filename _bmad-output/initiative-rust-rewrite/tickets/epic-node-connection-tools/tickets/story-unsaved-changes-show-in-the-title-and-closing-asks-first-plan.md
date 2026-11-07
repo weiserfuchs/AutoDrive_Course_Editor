@@ -3,7 +3,7 @@ title: 'Unsaved changes show in the title and closing asks first'
 type: 'feature'
 ticket: '8'
 created: '2026-11-07'
-status: 'built'
+status: done
 baseline_revision: '8d41deb4859cb64952e406a68256757b03372023'
 route: 'full'
 route_source: 'auto'
