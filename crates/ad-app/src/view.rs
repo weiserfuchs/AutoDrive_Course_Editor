@@ -20,6 +20,8 @@ const NAME_FONT_SIZE: f32 = 12.0;
 const BOX_PAD_PX: f32 = 2.0;
 /// Dash and gap length of the selection rectangle, in px.
 const SELECT_DASH_PX: f32 = 4.0;
+/// Side of the mark of a selected node while nodes are too small to draw, in px.
+const SELECTED_MARK_PX: f32 = 3.0;
 
 /// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
 /// centre is in map px. The panel is the screen rectangle the map is shown in.
@@ -259,6 +261,12 @@ impl MapView {
         self.drag_claimed = false;
         self.select_start = None;
         self.clear_hover();
+    }
+
+    /// The view's transform, once a frame has created it.
+    #[cfg(test)]
+    pub fn transform_mut(&mut self) -> Option<&mut ViewTransform> {
+        self.transform.as_mut()
     }
 
     /// Nothing is hovered, e.g. while there is no document.
@@ -675,6 +683,29 @@ impl MapView {
             // On top of all other nodes, with a white ring.
             if let Some((id, n)) = hovered.and_then(|id| net.node(id).map(|n| (id, n))) {
                 ring(dot(id, n));
+            }
+        } else if let Some(selection) = selection {
+            // Nodes too small to draw: a fixed-size white square marks each selected one in
+            // view, all in one mesh.
+            let mut mesh = egui::Mesh::default();
+            for &id in selection {
+                if let Some(n) = net.node(id)
+                    && let (x, z) = place(id, n, preview)
+                    && x >= x0 - pad
+                    && x <= x1 + pad
+                    && z >= z0 - pad
+                    && z <= z1 + pad
+                {
+                    let (sx, sy) = to_screen(x, z);
+                    let rect = egui::Rect::from_center_size(
+                        egui::pos2(sx as f32, sy as f32),
+                        egui::Vec2::splat(SELECTED_MARK_PX),
+                    );
+                    mesh.add_colored_rect(rect, egui::Color32::WHITE);
+                }
+            }
+            if !mesh.is_empty() {
+                painter.add(egui::Shape::mesh(mesh));
             }
         }
 
@@ -1703,6 +1734,52 @@ mod tests {
     }
 
     #[test]
+    fn selected_nodes_too_small_to_draw_get_a_mark() {
+        let ctx = egui::Context::default();
+        let (net, _, b) = hover_net();
+        let g = MapGeometry::new(1.0);
+        // At zoom 0.5 nodes are 1 px: no dots.
+        assert!(f64::from(look::node_px(2.0, 0.5)) < MIN_NODE_PX);
+        let mut view = view_at(&ctx, &net, g, 0.5);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 1024.0),
+            )),
+            ..Default::default()
+        };
+        let mut hooks = Selected(BTreeSet::from([b]));
+        let mut out = ctx.run_ui(input, |ui| {
+            view.show(ui, &net, g, 2.0, None, &mut hooks);
+        });
+        out.textures_delta.clear();
+        let marks: Vec<egui::Rect> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(m)
+                    if m.texture_id == egui::TextureId::default()
+                        && m.vertices.iter().all(|v| v.color == egui::Color32::WHITE) =>
+                {
+                    Some(m.vertices.chunks(4).map(|quad| {
+                        let mut r = egui::Rect::NOTHING;
+                        for v in quad {
+                            r.extend_with(v.pos);
+                        }
+                        r
+                    }))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        // Only b, at screen (522, 512); a is unselected and gets none.
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].center(), egui::pos2(522.0, 512.0));
+        assert_eq!(marks[0].size(), egui::Vec2::splat(SELECTED_MARK_PX));
+    }
+
+    #[test]
     fn the_rectangle_is_drawn_while_right_dragging() {
         let ctx = egui::Context::default();
         let net = Network::new();
@@ -2054,6 +2131,13 @@ mod tests {
             "static: min zoom, all selected",
             true,
             &at(centre, 0.0),
+            &none,
+            false,
+        );
+        report(
+            "static: mid zoom, dense, all selected",
+            true,
+            &at(dense, 6.0),
             &none,
             false,
         );

@@ -538,6 +538,53 @@ mod tests {
     }
 
     #[test]
+    fn the_left_button_is_unchanged_while_nodes_are_selected() {
+        let primary = egui::PointerButton::Primary;
+        // A left click with the node tool adds a node.
+        let ctx = egui::Context::default();
+        let mut clicker = app("<version>3</version>");
+        let id = clicker.doc.as_ref().expect("doc").config.network.order()[0];
+        clicker.doc.as_mut().expect("doc").selection.insert(id);
+        clicker.tool = Some(Box::new(NodeTool::new(NodeFlag::REGULAR)));
+        let p = egui::pos2(612.0, 412.0);
+        frames(
+            &ctx,
+            &mut clicker,
+            primary,
+            &[&[(p, None)], &[(p, Some(true))], &[(p, Some(false))], &[]],
+        );
+        let doc = clicker.doc.as_ref().expect("doc");
+        assert_eq!(doc.config.network.len(), 2);
+        assert_eq!(sorted(&doc.selection), [id]);
+
+        // A left drag with no tool pans; zoom 2 so the map can move.
+        let ctx = egui::Context::default();
+        let mut panner = app("<version>3</version>");
+        let id = panner.doc.as_ref().expect("doc").config.network.order()[0];
+        panner.doc.as_mut().expect("doc").selection.insert(id);
+        frames(&ctx, &mut panner, primary, &[&[]]);
+        panner.view.transform_mut().expect("set").zoom = 2.0;
+        let (a, b) = (egui::pos2(500.0, 500.0), egui::pos2(560.0, 500.0));
+        frames(
+            &ctx,
+            &mut panner,
+            primary,
+            &[
+                &[(a, None)],
+                &[(a, Some(true))],
+                &[(b, None)],
+                &[(b, Some(false))],
+                &[],
+            ],
+        );
+        let centre = panner.view.transform_mut().expect("set").center;
+        assert_eq!(centre, (994.0, 1024.0));
+        let doc = panner.doc.as_ref().expect("doc");
+        assert_eq!(doc.config.network.len(), 1);
+        assert_eq!(sorted(&doc.selection), [id]);
+    }
+
+    #[test]
     fn selection_works_on_a_read_only_document() {
         let mut app = app("<markerID>1</markerID>");
         assert!(!app.editable());
