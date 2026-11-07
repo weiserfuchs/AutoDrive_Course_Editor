@@ -38,6 +38,24 @@ pub fn cycled(active: Option<&dyn Tool>) -> NodeTool {
     }
 }
 
+/// Screen position of the preview dot for the pointer at `cursor`: the grid point a click
+/// there would use when `snap_grid` is set, the pointer itself otherwise.
+fn preview_at(
+    cursor: egui::Pos2,
+    t: &ViewTransform,
+    geometry: MapGeometry,
+    snap_grid: Option<(f64, f64)>,
+) -> egui::Pos2 {
+    let Some(grid) = snap_grid else {
+        return cursor;
+    };
+    let (mx, my) = t.screen_to_map(f64::from(cursor.x), f64::from(cursor.y));
+    let (x, z) = snap_to_grid(geometry.to_world(mx, my), grid);
+    let (mx, my) = geometry.to_map(x, z);
+    let (sx, sy) = t.map_to_screen(mx, my);
+    egui::pos2(sx as f32, sy as f32)
+}
+
 impl Tool for NodeTool {
     fn name(&self) -> &'static str {
         if self.flag == NodeFlag::SUB_PRIO {
@@ -63,11 +81,13 @@ impl Tool for NodeTool {
     fn paint(
         &self,
         painter: &egui::Painter,
-        _t: &ViewTransform,
-        _geometry: MapGeometry,
+        t: &ViewTransform,
+        geometry: MapGeometry,
         cursor: Option<egui::Pos2>,
+        snap_grid: Option<(f64, f64)>,
     ) {
         if let Some(p) = cursor {
+            let p = preview_at(p, t, geometry, snap_grid);
             painter.circle_filled(p, PREVIEW_RADIUS_PX, look::node_colour(self.flag.0));
         }
     }
@@ -155,6 +175,23 @@ mod tests {
             (4.0, -1.0, -5.0, NodeFlag::REGULAR)
         );
         assert_eq!(click_snapped(&mut tool, &map, 3.1, -7.4, false).0, 3.1);
+    }
+
+    #[test]
+    fn the_snapped_preview_sits_where_the_click_lands() {
+        // Zoom ~0.49 about map px (1024, 1024) on a scale-1 map.
+        let t = ViewTransform::new((500.0, 400.0), (1000.0, 800.0));
+        let g = MapGeometry::new(1.0);
+        let cursor = egui::pos2(503.0, 398.0);
+        assert_eq!(preview_at(cursor, &t, g, None), cursor);
+        let (mx, my) = t.screen_to_map(503.0, 398.0);
+        let (x, z) = snap_to_grid(g.to_world(mx, my), (2.0, 5.0));
+        let (sx, sy) = t.map_to_screen(g.to_map(x, z).0, g.to_map(x, z).1);
+        assert_eq!(
+            preview_at(cursor, &t, g, Some((2.0, 5.0))),
+            egui::pos2(sx as f32, sy as f32)
+        );
+        assert_ne!(preview_at(cursor, &t, g, Some((2.0, 5.0))), cursor);
     }
 
     #[test]

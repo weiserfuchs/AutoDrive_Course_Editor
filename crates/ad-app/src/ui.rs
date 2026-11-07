@@ -148,6 +148,10 @@ impl ViewHooks for ToolHooks<'_> {
                 self.commit = tool.on_drag_end(&ctx(at));
                 true
             }
+            DragEvent::Cancel => {
+                tool.cancel();
+                true
+            }
         }
     }
 
@@ -163,7 +167,8 @@ impl ViewHooks for ToolHooks<'_> {
         cursor: Option<egui::Pos2>,
     ) {
         if let Some(tool) = self.tool.as_deref() {
-            tool.paint(painter, t, geometry, cursor);
+            let snap_grid = self.snap.then_some(self.map.grid);
+            tool.paint(painter, t, geometry, cursor, snap_grid);
         }
     }
 }

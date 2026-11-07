@@ -58,12 +58,14 @@ pub trait Tool {
     }
 
     /// Draws the preview on top of the map view; `cursor` is the pointer over the view.
+    /// `snap_grid` is the grid spacing when snap applies this frame (Shift already resolved).
     fn paint(
         &self,
         painter: &egui::Painter,
         t: &ViewTransform,
         geometry: MapGeometry,
         cursor: Option<egui::Pos2>,
+        snap_grid: Option<(f64, f64)>,
     );
 
     /// Drops any uncommitted preview; nothing commits.

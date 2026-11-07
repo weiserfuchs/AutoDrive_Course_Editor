@@ -113,11 +113,18 @@ impl App {
                 self.set_tool(Some(Box::new(tools::move_node::MoveTool::default())));
             }
             Action::Undo if self.editable() => {
+                // A preview built on the old network must not commit afterwards.
+                if let Some(tool) = &mut self.tool {
+                    tool.cancel();
+                }
                 if let Some(doc) = &mut self.doc {
                     doc.undo();
                 }
             }
             Action::Redo if self.editable() => {
+                if let Some(tool) = &mut self.tool {
+                    tool.cancel();
+                }
                 if let Some(doc) = &mut self.doc {
                     doc.redo();
                 }
@@ -482,6 +489,50 @@ mod tests {
             false,
         );
         assert_eq!(state(&app), ((1.0, 0.0, 2.0), false));
+    }
+
+    #[test]
+    fn undo_or_redo_mid_drag_drops_the_drag() {
+        for action in [Action::Undo, Action::Redo] {
+            let mut app = App::new(Settings::default());
+            load(&mut app, "<version>3</version>");
+            app.run(Action::NodeTool);
+            // Map px (1034, 1019) is world (10, -5).
+            app.click(1034.0, 1019.0, false);
+            if action == Action::Redo {
+                app.run(Action::Undo);
+            }
+            app.run(Action::MoveTool);
+            // Undo removes the added node under the drag; redo re-adds it.
+            let net = &app.doc.as_ref().expect("doc").config.network;
+            let target = *net.order().last().expect("node");
+            let start = DragEvent::Start {
+                at: (1025.0, 1026.0),
+                node: Some(target),
+            };
+            drag(&mut app, start, false);
+            drag(
+                &mut app,
+                DragEvent::Move {
+                    at: (1100.0, 1100.0),
+                },
+                false,
+            );
+            app.run(action);
+            assert!(app.tool.as_ref().is_some_and(|t| t.preview().is_none()));
+            // `drag` panics on an apply error; the release must not commit at all.
+            drag(
+                &mut app,
+                DragEvent::End {
+                    at: (1100.0, 1100.0),
+                },
+                false,
+            );
+            let doc = app.doc.as_ref().expect("doc");
+            assert_eq!(state(&app).0, (1.0, 0.0, 2.0), "{action:?}");
+            assert_eq!(doc.history.can_redo(), action == Action::Undo, "{action:?}");
+            assert!(app.error.is_none());
+        }
     }
 
     #[test]

@@ -50,8 +50,10 @@ pub fn drag_target(
     );
     let (x, z) = match grid {
         Some(g) => {
+            // The nearest grid multiple inside the bounds, so a snapped target stays on grid.
+            let inner = |v: f64, g: f64| v.clamp((-half / g).ceil() * g, (half / g).floor() * g);
             let (x, z) = snap_to_grid(raw, g);
-            (x.clamp(-half, half), z.clamp(-half, half))
+            (inner(x, g.0), inner(z, g.1))
         }
         None => raw,
     };
@@ -119,6 +121,7 @@ impl Tool for MoveTool {
         _t: &ViewTransform,
         _geometry: MapGeometry,
         _cursor: Option<egui::Pos2>,
+        _snap_grid: Option<(f64, f64)>,
     ) {
     }
 
@@ -272,10 +275,11 @@ mod tests {
             drag_target((1030.0, 0.0), (0.0, 0.0), last, half, None),
             (1030.0, 0.0)
         );
-        // A snapped target stays inside too: 1025 is the nearest multiple of 5.
+        // A snapped target stays inside and on the grid: 1025 is the nearest multiple of 5,
+        // 1020 the nearest one inside.
         assert_eq!(
-            drag_target((1023.9, 0.0), (0.0, 0.0), last, HALF, Some((5.0, 5.0))),
-            (1024.0, 0.0)
+            drag_target((1023.9, -1023.9), (0.0, 0.0), last, HALF, Some((5.0, 5.0))),
+            (1020.0, -1020.0)
         );
     }
 

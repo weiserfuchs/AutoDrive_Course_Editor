@@ -139,6 +139,8 @@ pub enum DragEvent {
     Move { at: MapPx },
     /// A claimed drag was released at `at`.
     End { at: MapPx },
+    /// A claimed drag stopped where no end position is known; nothing commits.
+    Cancel,
 }
 
 /// What the caller of [`MapView::show`] plugs in: drag handling, a moved-node preview and
@@ -287,9 +289,11 @@ impl MapView {
                 hooks.drag(DragEvent::Move { at });
             } else if response.drag_stopped() {
                 self.drag_claimed = false;
-                if let Some(at) = pointer_map() {
-                    hooks.drag(DragEvent::End { at });
-                }
+                // Without an end position nothing may commit.
+                hooks.drag(match pointer_map() {
+                    Some(at) => DragEvent::End { at },
+                    None => DragEvent::Cancel,
+                });
             }
         }
         if (response.dragged_by(primary) && !self.drag_claimed)
@@ -326,13 +330,15 @@ impl MapView {
             self.icons = Some(Icons::load(ui.ctx()));
         }
         let ns = look::node_px(node_size, t.zoom);
+        let preview = hooks.preview();
+        // Hover tests stored positions, which a preview no longer shows: none while it lasts.
         let cursor = response
             .hover_pos()
+            .filter(|_| preview.is_none())
             .map(|p| (f64::from(p.x), f64::from(p.y)));
         self.hovered_node =
             cursor.and_then(|c| hover::node_at(net, geometry, &t, ns, c, &mut self.nodes));
         self.hovered_edge = cursor.and_then(|c| hover::edge_at(net, geometry, &t, c));
-        let preview = hooks.preview();
         self.paint(&painter, net, geometry, node_size, map_texture, &t, preview);
         if let Some(id) = self.hovered_node {
             self.paint_info_box(&painter, net, geometry, &t, ns, id, rect, preview);
@@ -1522,6 +1528,38 @@ mod tests {
         let out = run(&mut view, &mut hooks);
         assert_eq!(count(&out), (1, 1));
         assert_eq!(circle_centres(&out), [egui::pos2(412.0, 512.0)]);
+    }
+
+    #[test]
+    fn nothing_is_hovered_while_a_preview_is_shown() {
+        let ctx = egui::Context::default();
+        let (mut net, a, b) = hover_net();
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        let g = MapGeometry::new(1.0);
+        let mut view = view_at(&ctx, &net, g, 10.0);
+        let mut hooks = Recorder {
+            preview: Some((b, 30.0, 0.0)),
+            ..Recorder::default()
+        };
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                // On node a.
+                events: vec![egui::Event::PointerMoved(egui::pos2(512.0, 512.0))],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                view.show(ui, &net, g, 2.0, None, &mut hooks);
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!((view.hovered_node, view.hovered_edge), (None, None));
+        hooks.preview = None;
+        let _ = hover_frame(&ctx, &mut view, &net, Some(egui::pos2(512.0, 512.0)));
+        assert_eq!(view.hovered_node, Some(a));
     }
 
     /// Vertices of the meshes painted in the grid colour.
