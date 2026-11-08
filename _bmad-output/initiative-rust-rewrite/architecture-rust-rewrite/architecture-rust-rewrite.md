@@ -222,6 +222,8 @@ graph TD
   - Arc spline nodes committed at y = 0. They take heights per AD-7, or the "no height" sentinel without a heightmap (epic-curves-lines, 2026-11-08).
   - Curve previews surviving a tool switch, several at once. One curve or arc at a time; switching tools or files discards it (AD-10) (epic-curves-lines, 2026-11-08).
   - A line reusing an existing node that lies under an interpolated point (Java's `getNodeAtWorldPosition`). A line always creates its interpolated nodes and links only its start and end to existing nodes (epic-curves-lines, 2026-11-08).
+  - `vehicles.xml` handling: Java reformats the whole file, skips the update when no vehicle parks (a deleted marker leaves a stale `parkDestination`), and leaves `firstMarker` and `secondMarker` pointing at shifted markers. Only the marker reference attributes change, every save updates them, and all three follow marker order (AD-17) (epic-markers-parking, 2026-11-08).
+  - Duplicate marker names from the add and edit dialogs. A name already used is refused in the dialog (epic-markers-parking, 2026-11-08).
 
 ### AD-14 — MapContext is the single owner of map-level data
 
@@ -274,7 +276,7 @@ graph TD
   - Marker order is the order of `<mmN>` in the loaded file, kept as an ordered list in `Network`; new markers are appended. The fixture's markers are not in node order, so regenerating them in node order would break the byte-identical round trip (AD-6).
   - Groups have no table of their own in the game config. The set of groups is derived from markers. The route-manager group list is held by ad-io for that format only.
   - Renaming a group is one `RenameGroup` command over all affected markers.
-  - Marker file ids and `parkDestination` values are derived at save from the `SaveIdMap` and marker order. `vehicles.xml` is rewritten only on a real Save, and only its `parkDestination` attributes change.
+  - Marker file ids and the `vehicles.xml` marker references (`parkDestination`, `firstMarker`, `secondMarker`) are derived at save from the `SaveIdMap` and marker order. `vehicles.xml` is rewritten only on a real Save, and only those attributes change; a reference to a deleted marker becomes `1` (`parkDestination` is removed) (epic-markers-parking, 2026-11-08).
 
 ### AD-18 — Document replacement and epochs
 
@@ -297,7 +299,7 @@ graph TD
 | Logging | `tracing` with a `tracing-appender` rolling file in the app data dir. No `println!`. |
 | Settings | One `Settings` struct (serde + `toml`) in the OS config dir (`directories`). It holds global options, per-map settings keyed by map name, and shortcuts. The default shortcut table is the Java table, except Redo (AD-13). |
 | Strings | English only. All UI text lives in one string-table module. |
-| Repo fixtures | `.gitattributes` marks `AutoDrive_config.xml` as `-text`, so `core.autocrlf` cannot normalise it. Tests read fixtures and write only to temp dirs. |
+| Repo fixtures | `.gitattributes` marks `AutoDrive_config.xml` and `vehicles.xml` as `-text`, so `core.autocrlf` cannot normalise it. Tests read fixtures and write only to temp dirs. |
 | Command naming | One type per user-visible action, named after it: `AddNodes`, `MoveNodes`, `Connect`, `Disconnect`, `DeleteNodes`, `SetFlag`, `EditMarker`, `RenameGroup`, `PasteNodes` and so on. Each carries its revert data. |
 
 ## Stack

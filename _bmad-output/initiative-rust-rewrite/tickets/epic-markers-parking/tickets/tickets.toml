@@ -1,0 +1,57 @@
+# Stories of epic-markers-parking in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Vehicles parked at markers load, survive edits and save into vehicles.xml"
+description = "Tracer (AD-17): Marker gains parked_vehicles; ad-io reads vehicles.xml beside the config (FS19/FS22/FS25 element and id rules) and maps each parkDestination to its marker, and keeps each vehicle's firstMarker/secondMarker as references to markers. Deleting and restoring a node or marker keeps its parked vehicles through undo. On a real Save, vehicles.xml is patched in place: only parkDestination, firstMarker and secondMarker values change, following marker order; a reference to a deleted marker becomes 1, a parkDestination to one is removed; a missing file is skipped. The parking icon draws on a marker whose node has parked vehicles. The person's step: open the fixture with its vehicles.xml, see the parking icons, delete a marker before a parking one, save to a copy and compare."
+verify = "ad-io tests load the fixture's vehicles.xml (6 park destinations, 25 first/second references) and show a save without edits leaves it byte-identical, and that deleting a marker shifts every later reference by one and turns references to it into 1 / removed, with every other byte unchanged; FS19 and FS22 element rules are covered by small samples; undo restores parked vehicles; the user sees the parking icons and compares a saved copy."
+covers = ["R3", "R4"]
+after = ["epic-node-connection-tools"]
+hitl = true
+risk = "high"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-17--markers-groups-and-parking-data-shape", "research-road-network-data-model-and-config-forma/research-road-network-data-model-and-config-forma.md#2-how-is-the-in-memory-road-network-written-back-to-a-config-xml-file-element-order-number-formatting-encoding"]
+
+[[entry]]
+id = 2
+type = "story"
+title = "The add-marker tool gives a node a named marker in a group"
+description = "As Java's AddMarkerButton: the add-marker tool (toolbar; W acts at once on the node under the pointer) on a node without a marker opens a dialog with a name field and an editable group list of the existing groups, sorted, with \"None\" meaning \"All\". OK with a free, non-empty name commits one EditMarker; an empty or already used name is refused in the dialog. A node that already has a marker shows a note and opens nothing. The person's step: add a marker on the fixture in a new and in an existing group and undo it."
+verify = "Tests show the sorted group list, None → All, a new group, refused empty and duplicate names, the note on a node with a marker, one undo, read-only; the edited golden test saves an added marker; the user adds and undoes a marker."
+covers = ["R1"]
+after = [1]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Edit-marker and delete-marker tools change or remove a node's marker"
+description = "As Java's EditMarkerButton and DeleteMarkerButton: the edit tool (E) on a node with a marker opens the dialog prefilled; OK commits one EditMarker that keeps the parked vehicles; a name used by another marker is refused. The delete tool (Shift+D) removes the marker in one EditMarker; undo restores it with its place in marker order and its parked vehicles. The person's step: rename and regroup a marker on the fixture, delete one with parked vehicles, undo both."
+verify = "Tests show the prefilled dialog, rename and regroup, duplicate refused, delete and undo keeping marker order and parked vehicles, read-only; the user edits and deletes markers and undoes them."
+covers = ["R1", "R3"]
+after = [2]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 4
+type = "story"
+title = "A groups window renames and deletes marker groups"
+description = "A Groups window (toolbar button) lists every group with its marker count, \"All\" first. Rename sets the group of all its markers in one RenameGroup command (AD-17); renaming onto an existing group merges them; an empty name is refused. Delete moves its markers to \"All\" in one command. \"All\" cannot be renamed or deleted. The person's step: rename and delete a group on the fixture and undo both."
+verify = "Tests show the list and counts, rename, merge, delete to All, the All guard, one undo each, read-only; the edited golden test saves a renamed group; the user renames and deletes a group and undoes it."
+covers = ["R2"]
+after = [3]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred; scope is set at its start and limited to cleanup."
+verify = "CI is green and the golden, round-trip and frame-time tests still pass."
+covers = []
+after = [1, 2, 3, 4]
+hitl = false
+risk = "low"
