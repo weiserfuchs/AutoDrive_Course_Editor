@@ -3,7 +3,7 @@ title: 'The add-marker tool gives a node a named marker in a group'
 type: 'feature'
 ticket: '2'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '72e3038'
 route: 'full'
 route_source: 'auto'
