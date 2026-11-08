@@ -24,6 +24,9 @@ pub struct Document {
     /// Selected nodes, kept outside the history and pruned to existing ids after every
     /// apply, undo and redo (AD-15). A new document starts with none (AD-18).
     pub selection: BTreeSet<NodeId>,
+    /// Bumped by every apply, undo and redo and by the map panel after a selection
+    /// gesture; tools key per-frame caches of the network or selection on it.
+    pub revision: u64,
 }
 
 impl Document {
@@ -54,6 +57,7 @@ impl Document {
             map_texture: None,
             notice,
             selection: BTreeSet::new(),
+            revision: 0,
         }
     }
 
@@ -77,8 +81,10 @@ impl Document {
         done
     }
 
-    /// Drops selected ids whose node no longer exists (AD-15).
+    /// Drops selected ids whose node no longer exists (AD-15) and bumps the revision; every
+    /// apply, undo and redo ends here.
     fn prune_selection(&mut self) {
+        self.revision += 1;
         let net = &self.config.network;
         self.selection.retain(|&id| net.node(id).is_some());
     }

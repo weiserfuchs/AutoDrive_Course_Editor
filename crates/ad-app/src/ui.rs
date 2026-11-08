@@ -17,6 +17,7 @@ use crate::tools::flip::FlipTool;
 use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
 use crate::tools::priority::PriorityTool;
+use crate::tools::rotate::RotateTool;
 use crate::tools::{Tool, ToolContext};
 use crate::view::{DragEvent, MapPx, Preview, SelectEvent, ViewHooks, ViewTransform};
 use crate::{App, Choice, Pending};
@@ -69,10 +70,11 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
-    let tools: [Box<dyn Tool>; 9] = [
+    let tools: [Box<dyn Tool>; 10] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
+        Box::new(RotateTool::default()),
         Box::new(DeleteTool),
         Box::new(PriorityTool),
         Box::new(FlipTool),
@@ -133,6 +135,8 @@ pub(crate) struct ToolHooks<'a> {
     snap: bool,
     /// The right drag draws a lasso instead of a rectangle.
     pub lasso: bool,
+    /// The document revision, handed to the tool's `paint_selection`.
+    pub revision: u64,
     pub commit: Option<Transaction>,
     pub select_event: Option<SelectEvent>,
 }
@@ -152,6 +156,7 @@ impl<'a> ToolHooks<'a> {
             selection,
             snap,
             lasso: false,
+            revision: 0,
             commit: None,
             select_event: None,
         }
@@ -270,6 +275,14 @@ impl ViewHooks for ToolHooks<'_> {
         hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     ) {
         if let Some(tool) = self.tool.as_deref() {
+            tool.paint_selection(
+                painter,
+                t,
+                self.map,
+                self.net,
+                self.selection,
+                self.revision,
+            );
             let snap_grid = self.snap.then_some(self.map.grid);
             tool.paint(painter, t, geometry, cursor, snap_grid, hovered_edge);
         }
@@ -304,6 +317,7 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     let tool = app.tool.as_deref_mut().filter(|_| editable);
     let mut hooks = ToolHooks::new(tool, &doc.map, &doc.config.network, &doc.selection, snap);
     hooks.lasso = app.lasso;
+    hooks.revision = doc.revision;
     let clicked = app.view.show(
         ui,
         &doc.config.network,
@@ -326,6 +340,7 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
             doc.map.geometry,
             event,
         );
+        doc.revision += 1;
     }
     if let Some((px, py)) = clicked {
         app.click(px, py, snap);

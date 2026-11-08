@@ -7,6 +7,7 @@ pub mod flip;
 pub mod move_node;
 pub mod node;
 pub mod priority;
+pub mod rotate;
 
 use std::collections::BTreeSet;
 
@@ -75,6 +76,20 @@ pub trait Tool {
     /// stored positions while the tool previews a move.
     fn preview(&self) -> Option<&Preview> {
         None
+    }
+
+    /// Draws what the tool shows for the selection (the rotate handle) on top of the map
+    /// view, before [`Tool::paint`]; `map` gives the geometry and the node size. `revision`
+    /// changes whenever the network or the selection may have changed.
+    fn paint_selection(
+        &self,
+        _painter: &egui::Painter,
+        _t: &ViewTransform,
+        _map: &MapContext,
+        _net: &Network,
+        _selection: &BTreeSet<NodeId>,
+        _revision: u64,
+    ) {
     }
 
     /// Draws the preview on top of the map view; `cursor` is the pointer over the view.

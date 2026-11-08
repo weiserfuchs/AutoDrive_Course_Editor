@@ -168,9 +168,90 @@ pub enum SelectEvent {
     Click { node: Option<NodeId> },
 }
 
+/// Node id to the world (x, z) a previewed node is drawn at.
+pub type Places = HashMap<NodeId, (f64, f64), BuildHasherDefault<IdHasher>>;
+
 /// The nodes a tool previews at new places: node id to the world (x, z) it is drawn at,
-/// instead of its stored position. The tool keeps it up to date during a drag.
-pub type Preview = HashMap<NodeId, (f64, f64), BuildHasherDefault<IdHasher>>;
+/// instead of its stored position (read through `Deref`). The tool keeps it up to date during
+/// a drag. Filled by [`Preview::place_all`], it also carries the [`PreviewBounds`] the view
+/// would otherwise compute with one node lookup per previewed node every frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Preview {
+    places: Places,
+    bounds: Option<PreviewBounds>,
+}
+
+/// What the view needs to find a preview's connections.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreviewBounds {
+    /// Box (x0, z0, x1, z1) of the previewed nodes' stored positions.
+    pub stored: (f64, f64, f64, f64),
+    /// The largest distance, per axis, between a previewed node's place and its stored position.
+    pub shift: (f64, f64),
+}
+
+impl Preview {
+    /// Places every previewed node, given as (id, stored (x, z), placed (x, z)), and keeps
+    /// their bounds. The stored positions must be the network's. Bounds are kept only when
+    /// `nodes` covers the whole preview.
+    pub fn place_all(&mut self, nodes: impl IntoIterator<Item = (NodeId, (f64, f64), (f64, f64))>) {
+        let (mut x0, mut z0) = (f64::INFINITY, f64::INFINITY);
+        let (mut x1, mut z1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let mut shift = (0.0_f64, 0.0_f64);
+        let mut count = 0;
+        for (id, (sx, sz), at) in nodes {
+            self.places.insert(id, at);
+            count += 1;
+            (x0, z0, x1, z1) = (x0.min(sx), z0.min(sz), x1.max(sx), z1.max(sz));
+            shift = (
+                shift.0.max((at.0 - sx).abs()),
+                shift.1.max((at.1 - sz).abs()),
+            );
+        }
+        self.bounds = (count > 0 && count == self.places.len()).then_some(PreviewBounds {
+            stored: (x0, z0, x1, z1),
+            shift,
+        });
+    }
+
+    /// Places one node; the bounds are dropped.
+    pub fn insert(&mut self, id: NodeId, at: (f64, f64)) {
+        self.places.insert(id, at);
+        self.bounds = None;
+    }
+
+    /// The bounds kept by the last [`Preview::place_all`], if nothing changed since.
+    pub fn bounds(&self) -> Option<PreviewBounds> {
+        self.bounds
+    }
+}
+
+impl std::ops::Deref for Preview {
+    type Target = Places;
+
+    fn deref(&self) -> &Places {
+        &self.places
+    }
+}
+
+/// A preview without bounds; the view computes them.
+impl FromIterator<(NodeId, (f64, f64))> for Preview {
+    fn from_iter<I: IntoIterator<Item = (NodeId, (f64, f64))>>(iter: I) -> Self {
+        Self {
+            places: iter.into_iter().collect(),
+            bounds: None,
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Preview {
+    type Item = (&'a NodeId, &'a (f64, f64));
+    type IntoIter = std::collections::hash_map::Iter<'a, NodeId, (f64, f64)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.places.iter()
+    }
+}
 
 /// One multiply per node id: the view looks up both ends of every drawn connection while a
 /// preview lasts, and SipHash made that a visible share of the frame at minimum zoom.
@@ -754,18 +835,24 @@ impl MapView {
         // stored. So the box of the previewed stored positions finds them all, and so does the
         // view widened by `shift`. Both come from one pass over the preview; no point query
         // per previewed node (35,000 of them overran the frame budget).
+        // A tool that fills its preview with `place_all` hands both over: the walk with a node
+        // lookup per previewed node cost about 1 ms a frame with the whole network turned.
         type Rect = (f64, f64, f64, f64);
         let mut stored: Option<Rect> = None;
         let mut shift = (0.0_f64, 0.0_f64);
-        for (n, &(px, pz)) in preview
-            .into_iter()
-            .flatten()
-            .filter_map(|(&id, at)| net.node(id).map(|n| (n, at)))
-        {
-            stored = Some(stored.map_or((n.x, n.z, n.x, n.z), |(a, b, c, d)| {
-                (a.min(n.x), b.min(n.z), c.max(n.x), d.max(n.z))
-            }));
-            shift = (shift.0.max((px - n.x).abs()), shift.1.max((pz - n.z).abs()));
+        if let Some(b) = preview.and_then(Preview::bounds) {
+            (stored, shift) = (Some(b.stored), b.shift);
+        } else {
+            for (n, &(px, pz)) in preview
+                .into_iter()
+                .flatten()
+                .filter_map(|(&id, at)| net.node(id).map(|n| (n, at)))
+            {
+                stored = Some(stored.map_or((n.x, n.z, n.x, n.z), |(a, b, c, d)| {
+                    (a.min(n.x), b.min(n.z), c.max(n.x), d.max(n.z))
+                }));
+                shift = (shift.0.max((px - n.x).abs()), shift.1.max((pz - n.z).abs()));
+            }
         }
         let (vx0, vx1, vz0, vz1) = (x0.min(x1), x0.max(x1), z0.min(z1), z0.max(z1));
         // The batched pass's rule: a connection is drawn when its segment's box meets the view.
@@ -2525,9 +2612,19 @@ mod tests {
             centres.sort_unstable();
             (verts, centres)
         };
-        // At zoom 10 each preview takes one of the paint path's three queries: the view
-        // widened by the shift, the joint box of view and stored positions, and the two apart.
-        let cases: [&[(NodeId, (f64, f64))]; 3] = [
+        // At zoom 10 the first three previews take one of the paint path's three queries: the
+        // view widened by the shift, the joint box of view and stored positions, and the two
+        // apart. The fourth turns every node 30° about (0, 0), as the rotate tool does.
+        let all = [a, b, c, d, e, f];
+        let (sin, cos) = 30.0_f64.to_radians().sin_cos();
+        let turned: Vec<(NodeId, (f64, f64))> = all
+            .iter()
+            .filter_map(|&id| {
+                net.node(id)
+                    .map(|n| (id, (n.x * cos - n.z * sin, n.x * sin + n.z * cos)))
+            })
+            .collect();
+        let cases: [&[(NodeId, (f64, f64))]; 4] = [
             &[
                 (a, (25.0, -27.0)),
                 (b, (35.0, -27.0)),
@@ -2536,6 +2633,7 @@ mod tests {
             ],
             &[(a, (-30.0, -30.0)), (b, (-20.0, -30.0)), (d, (-60.0, 40.0))],
             &[(c, (10.0, 0.0)), (f, (20.0, 20.0))],
+            &turned,
         ];
         for zoom in [10.0, 1.0] {
             for moves in cases {
@@ -2544,13 +2642,31 @@ mod tests {
                     moved.move_node(id, x, 0.0, z).expect("ok");
                 }
                 let want = draw(&moved, None, zoom);
-                let mut preview: Preview = moves.iter().copied().collect();
-                preview.insert(ghost, (5.0, 5.0));
-                let got = draw(&net, Some(preview), zoom);
                 assert!(!want.0.is_empty());
                 // Dots and rings at zoom 10, none at zoom 1.
                 assert_eq!(want.1.is_empty(), zoom < 2.0);
-                assert_eq!(got, want, "zoom {zoom}, {moves:?}");
+                // Bounds the view computes itself, with an id the network does not hold.
+                let mut preview: Preview = moves.iter().copied().collect();
+                preview.insert(ghost, (5.0, 5.0));
+                assert_eq!(preview.bounds(), None);
+                assert_eq!(
+                    draw(&net, Some(preview), zoom),
+                    want,
+                    "zoom {zoom}, {moves:?}"
+                );
+                // Bounds handed over by `place_all`, as the move and rotate tools fill it.
+                let mut preview = Preview::default();
+                preview.place_all(
+                    moves
+                        .iter()
+                        .filter_map(|&(id, at)| net.node(id).map(|n| (id, (n.x, n.z), at))),
+                );
+                assert!(preview.bounds().is_some());
+                assert_eq!(
+                    draw(&net, Some(preview), zoom),
+                    want,
+                    "bounds, zoom {zoom}, {moves:?}"
+                );
             }
         }
     }
@@ -3057,5 +3173,65 @@ mod tests {
             west_grabbed,
             0.0,
         );
+
+        // Story 4.6: every node inside the map selected and turned with the rotate tool's
+        // handle, 2° per frame back and forth (0 → 16° → -14° → -2°), the view centred on the
+        // dense node and given the tool's selection.
+        let pivot = crate::tools::rotate::centre(net, &inside).expect("a centre");
+        let rotate_case = |name: &str, steps: f64| {
+            let ctx = |(x, z): (f64, f64)| crate::tools::ToolContext {
+                x,
+                z,
+                map: &map,
+                net,
+                selection: &inside,
+                snap: false,
+                hovered_node: None,
+                hovered_edge: None,
+            };
+            let handle = std::cell::Cell::new((0.0, 0.0));
+            let begin = |v: &mut MapView| {
+                at(start_px, steps)(v);
+                let tool = crate::tools::rotate::RotateTool::default();
+                tool.see(v.transform.as_ref().expect("set"), geometry, 2.0);
+                handle.set(tool.handle_at(net, &inside).expect("a handle"));
+                let mut tool: Box<dyn crate::tools::Tool> = Box::new(tool);
+                assert!(tool.on_drag_start(&ctx(handle.get()), None));
+                app.borrow_mut().tool = Some(tool);
+            };
+            let step = |_: &mut MapView, i: usize| {
+                let angle = drag_px(i) / 20.0;
+                let mut app = app.borrow_mut();
+                let tool = app.tool.as_deref_mut().expect("rotate tool");
+                tool.on_drag(&ctx(crate::tools::rotate::turned(
+                    handle.get(),
+                    pivot,
+                    angle,
+                )));
+                // Every selected node is previewed, turned by the whole-degree angle.
+                let preview = tool.preview().expect("preview");
+                assert_eq!(preview.len(), inside.len());
+                let want = crate::tools::rotate::turned(start, pivot, angle);
+                let got = preview[&dragged];
+                assert!((got.0 - want.0).abs() < 1e-6 && (got.1 - want.1).abs() < 1e-6);
+            };
+            group_selected.set(Some(&inside));
+            report(name, true, &begin, &step, false);
+            group_selected.set(None);
+        };
+        rotate_case("rotate: min zoom, whole network selected", 0.0);
+        rotate_case("rotate: max zoom, whole network selected", 100.0);
+        // The rotate tool active with every node selected and no drag: it draws the handle
+        // for the selection each frame. Compare with "static: min zoom, all selected".
+        app.borrow_mut().tool = Some(Box::new(crate::tools::rotate::RotateTool::default()));
+        all_selected.set(true);
+        report(
+            "rotate tool idle: min zoom, whole network selected",
+            true,
+            &at(centre, 0.0),
+            &none,
+            false,
+        );
+        all_selected.set(false);
     }
 }

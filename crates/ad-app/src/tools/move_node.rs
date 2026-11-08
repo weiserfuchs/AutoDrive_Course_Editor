@@ -113,7 +113,11 @@ impl Tool for MoveTool {
                 n.z.min(-half + (n.z - z0)),
                 n.z.max(half - (z1 - n.z)),
             ),
-            preview: moved.iter().map(|&(id, (x, _, z))| (id, (x, z))).collect(),
+            preview: {
+                let mut p = Preview::default();
+                p.place_all(moved.iter().map(|&(id, (x, _, z))| (id, (x, z), (x, z))));
+                p
+            },
             moved,
         });
         true
@@ -133,15 +137,16 @@ impl Tool for MoveTool {
         let (x0, x1, z0, z1) = d.range;
         d.target = (x.max(x0).min(x1), z.max(z0).min(z1));
         let (dx, dz) = (d.target.0 - d.origin.0, d.target.1 - d.origin.1);
-        for &(id, (x, _, z)) in &d.moved {
+        let (grabbed, target) = (d.grabbed, d.target);
+        d.preview.place_all(d.moved.iter().map(|&(id, (x, _, z))| {
             // The grabbed node takes the target exactly, so a snapped node lands on the grid.
-            let at = if id == d.grabbed {
-                d.target
+            let at = if id == grabbed {
+                target
             } else {
                 (x + dx, z + dz)
             };
-            d.preview.insert(id, at);
-        }
+            (id, (x, z), at)
+        }));
     }
 
     fn on_drag_end(&mut self, ctx: &ToolContext) -> Option<Transaction> {

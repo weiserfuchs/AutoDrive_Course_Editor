@@ -9,6 +9,7 @@ use crate::App;
 pub(crate) enum Action {
     NodeTool,
     MoveTool,
+    RotateTool,
     /// Selects the regular connect tool, then cycles regular, dual, reverse.
     ConnectTool,
     PriorityTool,
@@ -25,7 +26,7 @@ pub(crate) enum Action {
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 12] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 13] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -41,6 +42,10 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 12] = [
     (
         Action::MoveTool,
         KeyboardShortcut::new(Modifiers::NONE, Key::M),
+    ),
+    (
+        Action::RotateTool,
+        KeyboardShortcut::new(Modifiers::NONE, Key::R),
     ),
     (
         Action::ConnectTool,
@@ -149,6 +154,7 @@ mod tests {
         assert_eq!(press(CTRL.plus(Modifiers::SHIFT), Key::Z), [Action::Redo]);
         assert_eq!(press(Modifiers::NONE, Key::F4), [Action::ToggleNodeId]);
         assert_eq!(press(Modifiers::NONE, Key::M), [Action::MoveTool]);
+        assert_eq!(press(Modifiers::NONE, Key::R), [Action::RotateTool]);
         assert_eq!(press(Modifiers::NONE, Key::P), [Action::PriorityTool]);
         assert_eq!(press(Modifiers::NONE, Key::F), [Action::FlipTool]);
         assert_eq!(press(Modifiers::NONE, Key::S), [Action::ToggleSnap]);
@@ -188,6 +194,7 @@ mod tests {
         // Ctrl+S stays free for saving.
         assert!(press(CTRL, Key::S).is_empty());
         assert!(press(Modifiers::SHIFT, Key::M).is_empty());
+        assert!(press(CTRL, Key::R).is_empty());
         assert!(press(CTRL, Key::Delete).is_empty());
         assert!(press(Modifiers::SHIFT, Key::L).is_empty());
         assert!(press(CTRL, Key::L).is_empty());
