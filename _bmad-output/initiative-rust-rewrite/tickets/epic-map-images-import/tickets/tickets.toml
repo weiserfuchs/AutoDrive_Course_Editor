@@ -1,0 +1,68 @@
+# Stories of epic-map-images-import in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "A DDS spike settles which formats decode"
+description = "Spike before the imports (architecture Deferred): add image_dds (decode only) to ad-io and decode the user's FS25 pda_map_H.dds (DXT1, 4096²) plus generated samples of every format Java's DDSReader handles (DXT1-5, uncompressed RGB/RGBA/BGR masks). Record per format: decodes / needs a small decoder / out. Write a small decoder only for a format the games are known to use that image_dds misses. Close the architecture's deferred DDS item with the result. No UI."
+verify = "ad-io tests decode each covered format to the expected pixels and the FS25 sample to 4096² (sample test skipped when the gitignored file is absent); the spike's table is in the plan and the architecture's Deferred item is updated."
+covers = ["R1"]
+after = ["epic-map-view"]
+hitl = false
+risk = "medium"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#deferred", "research-map-view-rendering-and-map-images/research-map-view-rendering-and-map-images.md#1-how-is-a-map-image-located-loaded-and-decoded-local-file-dds-zip-download-and-held-for-display"]
+
+[[entry]]
+id = 2
+type = "story"
+title = "A DDS import shows the map image and saves it for the next load"
+description = "An Import menu in the top bar with \"DDS for FS19…\" and \"DDS for FS22/FS25…\": pick a DDS, decode it on a background thread, crop per version (FS19 whole image, FS22/FS25 centre half, AD-11), scale to 2048², show it as the open document's map image and save it as <exe dir>/mapImages/<name>/<name>.png (asking before overwriting). A failure leaves the document unchanged and shows why. The person's step: import the FS25 pda_map_H.dds for the fixture and reopen it."
+verify = "Tests show both crop rules, the scale to 2048², the saved path, the overwrite question, failure leaving the document unchanged and the UI not blocking (background job); the user imports the FS25 DDS and sees it after reopening the fixture."
+covers = ["R1", "R2", "R6"]
+after = [1]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "A mod-zip import previews and saves the map image and heightmap"
+description = "Import menu \"Map mod zip…\": read modDesc.xml (descVersion 40-53 FS19, 60-80 FS22, ≥ 90 FS25, else refused, AD-11), the map config's imageFilename (.png → .dds) and dem.png; decode both in the background; show 256² previews with the map name and version; on confirm save <name>.png and <name>_HeightMap.png under <exe dir>/mapImages/<name>/ and, when the open config's map name matches, attach them. Extraction refuses absolute and .. paths and caps entry sizes (AD-12). The person's step: import a zip built from the FS25 sample files, see the preview, confirm."
+verify = "Tests with generated zips cover each descVersion range, a missing modDesc or image, absolute and .. paths, an oversized entry, the saved files and the attach on a matching name; the user imports a zip and sees the result."
+covers = ["R3", "R6"]
+after = [2]
+hitl = true
+risk = "high"
+
+[[entry]]
+id = 4
+type = "story"
+title = "A missing map image downloads in the background"
+description = "When a config loads without a local image and online_map_images is on (settings.toml, default true), a background job fetches raw.githubusercontent.com/KillBait/AutoDrive_MapImages/master/mapImages/<name>/<name>.png with ureq (connect and read timeouts, a size cap), checks it is a PNG, saves it under <exe dir>/mapImages/<name>/ and attaches it if the same document is still open (AD-18 epoch). Not found, timeout or a bad file: a notice, the blank image stays. The person's step: move the fixture's image away, open the fixture, see it download."
+verify = "Tests with a local test server cover success, 404, timeout, oversize, a non-PNG body, the epoch check and the setting off; the user sees the fixture's image download."
+covers = ["R4", "R6"]
+after = [3]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Map image and heightmap load and save by hand"
+description = "Import menu items as in Java: \"Load map image…\" (any PNG, scaled to 2048² with a notice if needed, AD-14), \"Save map image…\", \"Import heightmap…\" (PNG, sets MapContext.heightmap and recomputes height_map_scale) and \"Export heightmap…\". Loads run in the background and leave the document unchanged on failure. The person's step: load and save an image and a heightmap for the fixture."
+verify = "Tests cover scaling, saving, the heightmap scale recomputed, failures leaving the document unchanged; the user loads and saves an image and a heightmap."
+covers = ["R5", "R6"]
+after = [4]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred; scope is set at its start and limited to cleanup."
+verify = "CI is green and the golden, round-trip and frame-time tests still pass."
+covers = []
+after = [1, 2, 3, 4, 5]
+hitl = false
+risk = "low"
