@@ -1,9 +1,9 @@
 ---
 title: 'A DDS spike settles which formats decode'
-type: 'spike'
+type: 'feature'
 ticket: '1'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '5b613cd'
 route: 'full'
 route_source: 'auto'
