@@ -59,7 +59,7 @@ after = [{ epic = 2, needs = "MapContext attach and map texture upload" }]
 id = 8
 slug = "epic-scans-autosave"
 title = "The network stays healthy and recoverable"
-description = "Overlap, out-of-bounds and connection-consistency scans fix problems undoably; merge backups and rotating autosave write side files."
+description = "Overlap, out-of-bounds, missing-height and connection scans fix problems in one undoable step each; a merge writes a backup first; autosave writes rotating side files without touching the document."
 covers = ["R11", "R12"]
 after = [{ epic = 3, needs = "edit commands and the job runner" }]
 

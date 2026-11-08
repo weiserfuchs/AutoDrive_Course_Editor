@@ -1,0 +1,68 @@
+# Stories of epic-scans-autosave in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "An overlap scan marks overlapping nodes with the warning icon"
+description = "A Scan menu in the top bar with \"Find overlapping nodes…\": a dialog asks for the distance (default 0.1, Java's value, now really used); a background-safe pass over the R-tree finds every node with another node within that 3D distance (x/z query, then y). Overlapping nodes draw the warning icon (prepared in story 2.5) and a notice gives the count. While marks exist, they are recomputed after every apply, undo and redo, so moved or deleted nodes lose them. \"Clear marks\" removes them. The person's step: plant two overlapping nodes on a copy of the fixture, scan, see the icons, move one away."
+verify = "Tests show the 3D distance (same x/z, different y is no overlap), the chosen distance, the count, marks following an edit and an undo, clear; the frame-time test passes with marks shown; the user scans a copy of the fixture."
+covers = ["R1"]
+after = ["epic-node-connection-tools"]
+hitl = true
+risk = "medium"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-16--save-autosave-and-backups"]
+
+[[entry]]
+id = 2
+type = "story"
+title = "Merging overlaps writes a backup, then merges in one undoable step"
+description = "Scan menu \"Merge overlapping nodes…\" (enabled when marks exist): after a confirm, write <config>_mergeBackup.xml from the current state (AD-16: no path, saved-state or vehicles change; atomic), then merge each overlap group into its first node in network order: the others' incoming and outgoing links move to it with their shapes, self-links dropped, the others deleted; markers on deleted nodes move to the kept node if it has none, else stay with the deletion (and a notice names them). One transaction; one undo restores every node, link and marker. The person's step: merge planted overlaps on a fixture copy, see the backup, undo."
+verify = "Tests cover link shapes moved (one-way, dual, reverse, both directions), self-links dropped, marker handling, the backup written before the merge with the pre-merge state, one undo, read-only; the edited golden test saves a merged network; the user merges and undoes on a copy."
+covers = ["R2"]
+after = [1]
+hitl = true
+risk = "high"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Out-of-bounds nodes move to the map edge and missing heights are filled"
+description = "Scan menu \"Fix nodes outside the map…\": a confirm shows the bounds (±1024·map scale) and the count; nodes outside move to the nearest point on the map edge (x and z clamped), in one MoveNodes; they become the selection. \"Fix missing node heights…\" (enabled with a heightmap): nodes with y = -1 take sample_height, in one MoveNodes; they become the selection. Nothing to fix gives a notice and no commit. The person's step: plant nodes outside and without height on a copy, fix, undo."
+verify = "Tests cover the clamp on each side and a corner, the count, selection, no-op notice, height fill and its no-heightmap gate, one undo each; the user fixes and undoes on a copy."
+covers = ["R3"]
+after = [2]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 4
+type = "story"
+title = "A connection check removes dangling, duplicate and self entries"
+description = "Scan menu \"Check connections…\": finds incoming entries whose source has no matching outgoing entry, duplicate entries in any outgoing or incoming list, and self-links; shows the counts per kind; Fix removes them in one transaction (a small ad-core command if no existing one fits), leaving every real one-way, dual and reverse link intact. Clean networks give a notice. The person's step: run it on the fixture (expected clean) and on a copy with planted defects."
+verify = "Tests show each defect found and fixed, real reverse links untouched, the fixture reported clean, one undo; the edited golden test saves a fixed network; the user runs the check."
+covers = ["R4"]
+after = [3]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Autosave writes rotating side files without touching the document"
+description = "Every interval (settings.toml autosave = true, autosave_minutes = 10, autosave_slots = 10), when the document is dirty, editable, not saving and no tool preview is active, a background job writes <config>_autosave_<n>.xml beside the config (the slot after the newest existing one, wrapping at the slot count), atomically, from a snapshot. Path, saved state and vehicles.xml never change (AD-16). A failure is a notice. The person's step: edit the fixture copy, wait for (or shorten) the interval, see the slot files and the title still showing unsaved changes."
+verify = "Tests with a short interval and a fake clock cover the dirty/clean/preview/read-only gates, slot rotation and wrap, the snapshot content, path and saved state unchanged, vehicles.xml untouched, a write failure notice; the user sees autosave files appear."
+covers = ["R5"]
+after = [4]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred, including the CI AD-1 dependency check noted in deferred-work.md if it fits; scope is set at its start and limited to cleanup."
+verify = "CI is green and the golden, round-trip and frame-time tests still pass."
+covers = []
+after = [1, 2, 3, 4, 5]
+hitl = false
+risk = "low"
