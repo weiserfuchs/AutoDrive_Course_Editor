@@ -63,9 +63,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] settings -- defaults, minimums, missing keys
-- [ ] slot choice and paths -- tests for Rotation, Wrap
-- [ ] timer, gates and job -- tests for every other matrix row with a fake clock
+- [x] settings -- defaults, minimums, missing keys
+- [x] slot choice and paths -- tests for Rotation, Wrap
+- [x] timer, gates and job -- tests for every other matrix row with a fake clock
 
 **Acceptance Criteria:**
 - Given a copy of the fixture with `autosave_minutes = 1`, when the user edits it and waits a minute, then `AutoDrive_config_autosave_1.xml` appears beside it with the edit, the title still shows unsaved changes, and `vehicles.xml` is unchanged.
@@ -79,6 +79,17 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **Settings:** `autosave`, `autosave_minutes`, `autosave_slots` in `[global]`, the two numbers raised to 1 by the existing `at_least_one` deserializer.
+- **Paths and slot:** `jobs::autosave_path(config, slot)` and `jobs::next_slot(config, slots)` (takes the config path instead of dir + stem; same result). `next_slot` looks only at slots 1..=`slots`, so files of a larger earlier slot count are ignored. It runs in the background job, so the UI thread does no file I/O.
+- **Timer state per document:** `Document.autosave_since: Option<Instant>` (`None` starts the timer at the next check; a new document starts with `None`, a successful `Saved` resets it to `None`) and `Document.autosaved: Option<SavePoint>`. "Unchanged since the last autosave" compares the history `SavePoint`, not `revision`: `revision` also bumps on selection gestures, which change nothing that is written.
+- **Clock seam:** `App::tick_autosave(now, notify)` takes the time as a parameter; `ui()` passes `Instant::now()`, tests pass `t0 + n minutes`. It returns the wait until the next needed check, and `ui()` hands that to `ctx.request_repaint_after`, so the due time fires while the user is idle. While blocked it asks for no repaint: whatever ends the block (input, a job's notify) brings a frame.
+- **Busy predicate:** `App::busy()` = a claimed drag (`view.dragging()`), a selection being drawn, `Tool::in_progress()`, `dialog_shown()` or the unsaved-changes prompt. The autosave gate adds `saving`, `loading` and a running autosave. `Tool::in_progress()` is a new trait method defaulting to `preview().is_some()`; connect (pending start), Bézier (start, curve, handle drag) and arc (arc, handle drag) override it. The error window does not block.
+- **Order:** the tick runs at the end of `ui()`, after this frame's input and dialogs. The timer restarts when a write starts and when it finds nothing to write (clean or unchanged); a blocked due check keeps retrying each frame. A failure keeps `autosaved`, so the next interval retries.
+- **Results:** `JobResult::Autosaved { epoch, point, result }`; `apply_result` records the point or adds the notice "Autosave failed: <reason>" only for the matching epoch. `poll_jobs` sets the top-bar line "Autosaved to <file name>" (`App.autosave_label`), which drops after 10 s, when the document's notice changes, or with a new document; dropping it asks for one more repaint.
+- **Verification:** `cargo fmt --all --check` ok; `cargo clippy --workspace --all-targets -- -D warnings` ok; `cargo test --workspace` all pass (ad-app 419 + 3 ignored). `frame_time` (release): every case ok, worst best-round max 11.6 ms (rotate, min zoom, whole network selected); the view benchmark does not include the autosave tick, which is a few comparisons per frame. The config clone for the snapshot happens on the UI thread once per write, as the plan requires (same as the merge backup); not separately timed.
+- **Tests:** settings `autosave_options_default_and_keep_the_minimum`; jobs `autosave_path_is_beside_the_config_with_the_slot`, `the_next_slot_follows_the_newest_autosave` (Rotation), `the_next_slot_wraps_after_the_last` (Wrap); app `a_due_autosave_writes_slot_1_and_keeps_the_title_path_config_and_vehicles` (Due, Vehicles, idle repaint, 10 s line), `a_notice_ends_the_autosaved_line`, `a_clean_or_unchanged_document_is_not_autosaved` (Clean, Unchanged), `a_due_autosave_waits_for_previews_selections_dialogs_and_saves` (Preview, Modal), `a_read_only_document_or_autosave_off_is_never_autosaved` (Read-only, Off), `a_failed_autosave_adds_a_notice_and_retries_after_the_interval` (Fails), `a_save_after_an_autosave_keeps_the_files_and_restarts_the_timer` (Saved after), `a_new_document_restarts_the_autosave_timer`; `in_progress` asserts in the Bézier and arc cancel tests.
+- **Acceptance criterion** (a real minute in the GUI) needs a human hand check.
 
 ## Plan Change Log
 

@@ -164,6 +164,9 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             if let Some(label) = download_label(app) {
                 ui.label(label);
             }
+            if let Some(label) = &app.autosave_label {
+                ui.label(&label.text);
+            }
             if let Some(reason) = app.doc.as_ref().and_then(|d| d.config.read_only()) {
                 ui.colored_label(ui.visuals().warn_fg_color, reason.to_string());
             }

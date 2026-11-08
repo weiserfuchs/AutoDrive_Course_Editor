@@ -48,6 +48,14 @@ pub struct GlobalSettings {
     /// Whether a missing map image is downloaded from the data repository (Java
     /// `Check_Online_MapImages`).
     pub online_map_images: bool,
+    /// Whether unsaved edits are written to rotating side files (AD-16).
+    pub autosave: bool,
+    /// Minutes between autosaves; at least 1 (Java `autoSaveInterval`).
+    #[serde(deserialize_with = "at_least_one")]
+    pub autosave_minutes: u32,
+    /// How many autosave files rotate; at least 1 (Java `maxAutoSaveSlots`).
+    #[serde(deserialize_with = "at_least_one")]
+    pub autosave_slots: u32,
 }
 
 impl Default for GlobalSettings {
@@ -58,6 +66,9 @@ impl Default for GlobalSettings {
             line_node_distance: 12,
             create_line_end_node: false,
             online_map_images: true,
+            autosave: true,
+            autosave_minutes: 10,
+            autosave_slots: 10,
         }
     }
 }
@@ -265,6 +276,37 @@ node_size = 2.5
         assert!(load(&path).expect("load").global.online_map_images);
         std::fs::write(&path, "[global]\nonline_map_images = false\n").expect("write");
         assert!(!load(&path).expect("load").global.online_map_images);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn autosave_options_default_and_keep_the_minimum() {
+        let g = GlobalSettings::default();
+        assert_eq!(
+            (g.autosave, g.autosave_minutes, g.autosave_slots),
+            (true, 10, 10)
+        );
+        let dir = scratch_dir("autosave");
+        let path = dir.join("s.toml");
+        let autosave = |path: &Path| {
+            let g = load(path).expect("load").global;
+            (g.autosave, g.autosave_minutes, g.autosave_slots)
+        };
+        // A file from before the options existed takes the defaults.
+        std::fs::write(&path, "[global]\nshow_grid = true\n").expect("write");
+        assert_eq!(autosave(&path), (true, 10, 10));
+        std::fs::write(
+            &path,
+            "[global]\nautosave = false\nautosave_minutes = 0\nautosave_slots = 0\n",
+        )
+        .expect("write");
+        assert_eq!(autosave(&path), (false, 1, 1), "0 is raised to the minimum");
+        std::fs::write(
+            &path,
+            "[global]\nautosave_minutes = 3\nautosave_slots = 4\n",
+        )
+        .expect("write");
+        assert_eq!(autosave(&path), (true, 3, 4));
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

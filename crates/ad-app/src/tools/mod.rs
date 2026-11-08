@@ -165,6 +165,12 @@ pub trait Tool {
         true
     }
 
+    /// Whether the tool holds an uncommitted preview or a pending start (a connect start,
+    /// a curve or an arc); autosave waits for it to end (AD-16).
+    fn in_progress(&self) -> bool {
+        self.preview().is_some()
+    }
+
     /// Drops any uncommitted preview; nothing commits.
     fn cancel(&mut self);
 }

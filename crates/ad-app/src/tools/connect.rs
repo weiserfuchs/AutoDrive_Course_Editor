@@ -348,6 +348,10 @@ impl Tool for ConnectTool {
         }
     }
 
+    fn in_progress(&self) -> bool {
+        self.start.is_some()
+    }
+
     fn cancel(&mut self) {
         self.start = None;
         self.from_new_end = false;
