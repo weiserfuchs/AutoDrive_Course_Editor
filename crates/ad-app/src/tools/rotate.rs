@@ -24,6 +24,8 @@ pub const NAME: &str = "Rotate";
 pub const SNAP_STEP_DEG: f64 = 5.0;
 /// A press this close to the handle, in screen px, grabs it.
 const HANDLE_HIT_PX: f64 = 8.0;
+/// The smallest circle radius in screen px, so the handle's hit area never covers the centre.
+const MIN_RADIUS_PX: f64 = 24.0;
 /// The radius of the centre dot, in screen px (Java draws it 6 px wide).
 const CENTRE_DOT_PX: f32 = 3.0;
 /// The smallest radius the handle is drawn with, in screen px.
@@ -79,18 +81,18 @@ struct Circle {
 
 impl Circle {
     /// The circle for `selection`: through the furthest selected node plus half a node
-    /// size on screen (Java `getSelectionRadius`).
+    /// size on screen (Java `getSelectionRadius`), and at least [`MIN_RADIUS_PX`].
     fn of(net: &Network, selection: &BTreeSet<NodeId>, scale: ViewScale) -> Option<Self> {
-        let centre = centre(net, selection)?;
-        let reach = selection
-            .iter()
-            .filter_map(|&id| net.node(id))
-            .map(|n| (n.x - centre.0).hypot(n.z - centre.1))
-            .fold(0.0, f64::max);
-        Some(Self {
+        Some(Self::new(reach(net, selection)?, scale))
+    }
+
+    /// The circle about `centre` through a node `reach` world units from it.
+    fn new((centre, reach): Reach, scale: ViewScale) -> Self {
+        let radius_px = (reach / scale.world_per_px + scale.half_node_px).max(MIN_RADIUS_PX);
+        Self {
             centre,
-            radius: reach + scale.half_node_px * scale.world_per_px,
-        })
+            radius: radius_px * scale.world_per_px,
+        }
     }
 
     /// The handle turned by `degrees`.
@@ -100,10 +102,31 @@ impl Circle {
     }
 }
 
+/// The selection's centre and the world distance of its furthest node from it.
+fn reach(net: &Network, selection: &BTreeSet<NodeId>) -> Option<Reach> {
+    let centre = centre(net, selection)?;
+    let reach = selection
+        .iter()
+        .filter_map(|&id| net.node(id))
+        .map(|n| (n.x - centre.0).hypot(n.z - centre.1))
+        .fold(0.0, f64::max);
+    Some((centre, reach))
+}
+
+/// A selection's centre and the world distance of its furthest node from it.
+type Reach = ((f64, f64), f64);
+
+/// When the cached centre and reach were computed: the document revision, the selection's
+/// and the network's length.
+type CacheKey = (u64, usize, usize);
+
 /// A running rotation.
 #[derive(Debug, Clone, PartialEq)]
 struct Drag {
     circle: Circle,
+    /// The pointer's angle about the centre at the press: the turn is measured from it, so
+    /// a press anywhere on the handle starts at 0°.
+    press_angle: f64,
     /// The previewed angle in degrees, already rounded.
     angle: f64,
     /// Every selected node with its stored position when the drag started.
@@ -117,6 +140,8 @@ pub struct RotateTool {
     drag: Option<Drag>,
     /// The view the handle was last painted in; a press is tested against it.
     view: Cell<Option<ViewScale>>,
+    /// The idle handle's centre and reach, so a large selection is not walked every frame.
+    reach: Cell<Option<(CacheKey, Option<Reach>)>>,
 }
 
 impl RotateTool {
@@ -164,6 +189,7 @@ impl Tool for RotateTool {
             .collect();
         self.drag = Some(Drag {
             circle,
+            press_angle: pointer_angle((ctx.x, ctx.z), circle.centre),
             angle: 0.0,
             preview: moved.iter().map(|&(id, (x, _, z))| (id, (x, z))).collect(),
             moved,
@@ -175,7 +201,9 @@ impl Tool for RotateTool {
         let Some(d) = &mut self.drag else {
             return;
         };
-        let angle = snap_angle(pointer_angle((ctx.x, ctx.z), d.circle.centre), ctx.snap);
+        let turn = pointer_angle((ctx.x, ctx.z), d.circle.centre) - d.press_angle;
+        // Into -180..180, so a turn across straight below stays small.
+        let angle = snap_angle((turn + 180.0).rem_euclid(360.0) - 180.0, ctx.snap);
         if angle == d.angle {
             return;
         }
@@ -192,7 +220,7 @@ impl Tool for RotateTool {
             return None;
         }
         // The nodes keep their height, as with the move tool.
-        let moves = d
+        let moves: Vec<_> = d
             .moved
             .iter()
             .map(|&(id, before)| {
@@ -200,9 +228,11 @@ impl Tool for RotateTool {
                 (id, before, (x, before.1, z))
             })
             .collect();
-        Some(Transaction::new(vec![Command::MoveNodes(MoveNodes {
-            moves,
-        })]))
+        // A turn of nodes all at the centre (one selected node) moves nothing.
+        moves
+            .iter()
+            .any(|(_, before, after)| before != after)
+            .then(|| Transaction::new(vec![Command::MoveNodes(MoveNodes { moves })]))
     }
 
     fn preview(&self) -> Option<&Preview> {
@@ -210,6 +240,7 @@ impl Tool for RotateTool {
     }
 
     /// Draws the centre dot, the circle and the handle (white, as Java's control node).
+    /// Without a drag the selection's centre and reach are cached per `revision`.
     fn paint_selection(
         &self,
         painter: &egui::Painter,
@@ -217,6 +248,7 @@ impl Tool for RotateTool {
         map: &MapContext,
         net: &Network,
         selection: &BTreeSet<NodeId>,
+        revision: u64,
     ) {
         self.see(t, map.geometry, map.node_size);
         let Some(scale) = self.view.get() else {
@@ -224,10 +256,21 @@ impl Tool for RotateTool {
         };
         let (circle, angle) = match &self.drag {
             Some(d) => (d.circle, d.angle),
-            None => match Circle::of(net, selection, scale) {
-                Some(c) => (c, 0.0),
-                None => return,
-            },
+            None => {
+                let key = (revision, selection.len(), net.len());
+                let found = match self.reach.get() {
+                    Some((k, found)) if k == key => found,
+                    _ => {
+                        let found = reach(net, selection);
+                        self.reach.set(Some((key, found)));
+                        found
+                    }
+                };
+                match found {
+                    Some(r) => (Circle::new(r, scale), 0.0),
+                    None => return,
+                }
+            }
         };
         let screen = |(x, z): (f64, f64)| {
             let (mx, my) = map.geometry.to_map(x, z);
@@ -471,6 +514,67 @@ mod tests {
         // Just inside it is.
         let near = ctx(&net, &map, &selection, (hx + 1.9, hz), false);
         assert!(tool.on_drag_start(&near, None));
+    }
+
+    #[test]
+    fn a_single_node_gets_a_handle_off_its_centre_and_its_turn_commits_nothing() {
+        let (net, [a, ..], _, map) = setup();
+        let one = BTreeSet::from([a]);
+        let mut tool = tool();
+        // 24 px at zoom 4 is 6 world units, more than the 2-unit (8 px) hit area.
+        let handle = tool.handle_at(&net, &one).expect("handle");
+        assert!(close(handle, (0.0, -6.0)));
+        assert!(!tool.on_drag_start(&ctx(&net, &map, &one, (0.0, -1.0), false), Some(a)));
+        assert!(tool.on_drag_start(&ctx(&net, &map, &one, handle, false), Some(a)));
+        let end = ctx(&net, &map, &one, (6.0, 0.0), false);
+        tool.on_drag(&end);
+        assert_eq!(tool.drag.as_ref().map(|d| d.angle), Some(90.0));
+        assert!(tool.on_drag_end(&end).is_none());
+    }
+
+    #[test]
+    fn a_press_beside_the_handle_starts_at_no_turn() {
+        let (net, [a, ..], selection, map) = setup();
+        let mut tool = tool();
+        let (hx, hz) = tool.handle_at(&net, &selection).expect("handle");
+        // 1.5 world units (6 px) right of the handle: about 5° off straight above.
+        let press = (hx + 1.5, hz);
+        assert!(tool.on_drag_start(&ctx(&net, &map, &selection, press, false), None));
+        tool.on_drag(&ctx(&net, &map, &selection, press, false));
+        assert_eq!(tool.preview().expect("preview")[&a], (0.0, 0.0));
+        let at = turned(press, (5.0, 10.0), 37.4);
+        tool.on_drag(&ctx(&net, &map, &selection, at, false));
+        let want = turned((0.0, 0.0), (5.0, 10.0), 37.0);
+        assert!(close(tool.preview().expect("preview")[&a], want));
+        // Past straight below the turn wraps to the other side, not past ±180.
+        let at = turned(press, (5.0, 10.0), 200.0);
+        tool.on_drag(&ctx(&net, &map, &selection, at, false));
+        assert_eq!(tool.drag.as_ref().map(|d| d.angle), Some(-160.0));
+    }
+
+    #[test]
+    fn the_idle_handle_is_recomputed_only_when_the_revision_or_a_length_changes() {
+        let (mut net, [a, b, ..], selection, map) = setup();
+        let tool = RotateTool::default();
+        let ctx = egui::Context::default();
+        let paint = |net: &Network, selection: &BTreeSet<NodeId>, revision: u64| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let t = ViewTransform::new((512.0, 512.0), (1024.0, 1024.0));
+                tool.paint_selection(ui.painter(), &t, &map, net, selection, revision);
+            });
+            out.textures_delta.clear();
+            tool.reach.get().and_then(|(_, r)| r).map(|r| r.0)
+        };
+        assert_eq!(paint(&net, &selection, 0), Some((5.0, 10.0)));
+        let moved = MoveNodes {
+            moves: vec![(a, (0.0, 1.0, 0.0), (-10.0, 1.0, 0.0))],
+        };
+        Transaction::new(vec![Command::MoveNodes(moved)])
+            .apply(&mut net)
+            .expect("applies");
+        assert_eq!(paint(&net, &selection, 0), Some((5.0, 10.0)), "cached");
+        assert_eq!(paint(&net, &selection, 1), Some((0.0, 10.0)));
+        assert_eq!(paint(&net, &BTreeSet::from([b]), 1), Some((10.0, 0.0)));
     }
 
     #[test]

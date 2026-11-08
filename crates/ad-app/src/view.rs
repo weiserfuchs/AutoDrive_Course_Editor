@@ -3105,5 +3105,17 @@ mod tests {
         };
         rotate_case("rotate: min zoom, whole network selected", 0.0);
         rotate_case("rotate: max zoom, whole network selected", 100.0);
+        // The rotate tool active with every node selected and no drag: it draws the handle
+        // for the selection each frame. Compare with "static: min zoom, all selected".
+        app.borrow_mut().tool = Some(Box::new(crate::tools::rotate::RotateTool::default()));
+        all_selected.set(true);
+        report(
+            "rotate tool idle: min zoom, whole network selected",
+            true,
+            &at(centre, 0.0),
+            &none,
+            false,
+        );
+        all_selected.set(false);
     }
 }
