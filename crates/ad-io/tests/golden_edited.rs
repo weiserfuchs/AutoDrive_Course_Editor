@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ad_core::command::{
-    AddNodes, Command, Connect, DeleteNodes, Disconnect, EditMarker, MoveNodes, Position, SetFlag,
-    Transaction,
+    AddNodes, Command, Connect, DeleteNodes, Disconnect, EditMarker, MoveNodes, PasteNodes,
+    Position, SetFlag, Transaction,
 };
 use ad_core::heightmap::{Heightmap, sample_height};
 use ad_core::history::History;
@@ -548,5 +548,62 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
     assert!(back.outgoing().contains(&fa));
     assert!(net.node(fa).ok_or("flip node")?.incoming().contains(&fb));
     assert!(!back.incoming().contains(&fa));
+    Ok(())
+}
+
+#[test]
+fn pasted_group_saves_and_reloads() -> Result<(), Error> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    let mut cfg = load(&original)?;
+    let len = cfg.network.len();
+    let marker_count = cfg.network.markers().len();
+    // A group as ad-app's paste builds it: rounded x and z, inner links by index, a marker
+    // with a free name.
+    let paste = PasteNodes::new(
+        vec![
+            (10.125, 50.0, -20.5, NodeFlag::REGULAR),
+            (14.0, 51.25, -20.5, NodeFlag::SUB_PRIO),
+            (14.0, 52.5, -16.75, NodeFlag::REGULAR),
+        ],
+        vec![(1, "Pasted".to_owned(), "All".to_owned())],
+        vec![
+            (0, 1, ConnectionShape::OneWay),
+            (1, 2, ConnectionShape::Dual),
+            (2, 0, ConnectionShape::Reverse),
+        ],
+    );
+    let mut history = History::default();
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::PasteNodes(paste)]),
+    )?;
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_pasted_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    let reloaded = load(&written)?;
+    assert!(model(&cfg.network) == model(&reloaded.network));
+    assert!(untouched(&original)? == untouched(&written)?);
+    let net = &reloaded.network;
+    assert_eq!(net.len(), len + 3);
+    assert_eq!(net.markers().len(), marker_count + 1);
+    let new = &net.order()[len..];
+    let (a, b, c) = (new[0], new[1], new[2]);
+    let m = net.markers().last().ok_or("marker")?;
+    assert_eq!((m.node, &*m.name, &*m.group), (b, "Pasted", "All"));
+    let n = net.node(a).ok_or("a")?;
+    assert_eq!(
+        (n.x, n.y, n.z, n.flag),
+        (10.125, 50.0, -20.5, NodeFlag::REGULAR)
+    );
+    assert_eq!(net.connection_kind(a, b), ConnectionKind::Regular);
+    assert_eq!(net.connection_kind(b, c), ConnectionKind::Dual);
+    assert_eq!(net.connection_kind(c, a), ConnectionKind::Reverse);
+    assert_eq!(net.connection_kind(a, c), ConnectionKind::None);
     Ok(())
 }

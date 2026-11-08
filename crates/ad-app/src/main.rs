@@ -1,5 +1,6 @@
 //! Shell layer: the eframe application.
 
+mod clipboard;
 mod document;
 mod hover;
 mod icons;
@@ -18,6 +19,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use eframe::egui;
 
 use ad_core::command::{Command, DeleteNodes, Transaction};
+use ad_core::geometry::MAP_PIXELS;
 use ad_io::settings::Settings;
 use document::Document;
 use input::Action;
@@ -83,6 +85,10 @@ struct App {
     allow_close: bool,
     /// The title last sent to the window.
     title: String,
+    /// The copied group; app-level, so it survives opening another config (AD-15).
+    clipboard: Option<clipboard::Clipboard>,
+    /// A note for the OS clipboard after a copy or cut, put there by the shortcut handler.
+    copied: Option<String>,
 }
 
 impl App {
@@ -110,6 +116,8 @@ impl App {
             location: None,
             allow_close: false,
             title: window_title(None),
+            clipboard: None,
+            copied: None,
         }
     }
 
@@ -282,7 +290,17 @@ impl App {
                 self.view.clear_hover();
             }
             Action::DeleteHovered if self.editable() => self.delete_hovered(),
-            Action::NodeTool
+            // Copy changes no data, so it works on a read-only document too.
+            Action::Copy => {
+                self.copy();
+            }
+            Action::Cut if self.editable() => self.cut(),
+            Action::Paste if self.editable() => self.paste(false),
+            Action::PasteInPlace if self.editable() => self.paste(true),
+            Action::Cut
+            | Action::Paste
+            | Action::PasteInPlace
+            | Action::NodeTool
             | Action::MoveTool
             | Action::RotateTool
             | Action::AlignHorizontalTool
@@ -324,6 +342,72 @@ impl App {
         }
         let tx = Transaction::new(vec![Command::DeleteNodes(DeleteNodes::new(ids))]);
         if let Err(e) = doc.apply(tx) {
+            self.error = Some(e.to_string());
+        }
+    }
+
+    /// Copies the selection to the clipboard; the selection stays. Returns false, keeping
+    /// the clipboard, when nothing is selected or a selection is being drawn.
+    fn copy(&mut self) -> bool {
+        let Some(doc) = &self.doc else {
+            return false;
+        };
+        if self.view.selecting() {
+            return false;
+        }
+        let Some(clip) = clipboard::copy(&doc.config.network, &doc.selection) else {
+            return false;
+        };
+        self.copied = Some(format!(
+            "AutoDrive Course Editor: {} nodes copied",
+            clip.len()
+        ));
+        self.clipboard = Some(clip);
+        true
+    }
+
+    /// Copies the selection, then deletes it in one transaction; undo reselects it.
+    fn cut(&mut self) {
+        if !self.copy() {
+            return;
+        }
+        let Some(doc) = &mut self.doc else {
+            return;
+        };
+        if let Some(tool) = &mut self.tool {
+            tool.cancel();
+        }
+        let ids = doc.selection.iter().copied().collect();
+        let tx = Transaction::new(vec![Command::DeleteNodes(DeleteNodes::new(ids))]);
+        if let Err(e) = doc.apply_selecting(tx, |_| Default::default()) {
+            self.error = Some(e.to_string());
+        }
+    }
+
+    /// Pastes the clipboard in one transaction, centred on the view or, `in_place`, where
+    /// it was copied; the pasted nodes become the selection. Nothing while a selection is
+    /// drawn or the clipboard is empty.
+    fn paste(&mut self, in_place: bool) {
+        let (Some(doc), Some(clip)) = (&mut self.doc, &self.clipboard) else {
+            return;
+        };
+        if self.view.selecting() {
+            return;
+        }
+        let centre = (!in_place).then(|| {
+            // The view may still show the previous document until the next frame.
+            let (px, py) = if self.view_epoch == Some(doc.epoch) {
+                self.view.centre()
+            } else {
+                (MAP_PIXELS / 2.0, MAP_PIXELS / 2.0)
+            };
+            doc.map.geometry.to_world(px, py)
+        });
+        if let Some(tool) = &mut self.tool {
+            tool.cancel();
+        }
+        let tx = clipboard::paste(clip, centre, &doc.config.network, &doc.map);
+        if let Err(e) = doc.apply_selecting(tx, clipboard::pasted) {
             self.error = Some(e.to_string());
         }
     }
@@ -475,6 +559,7 @@ fn main() -> eframe::Result {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     use ad_core::command::Connect;
@@ -1728,5 +1813,326 @@ mod tests {
         assert!(!app.snap);
         app.run(Action::ToggleSnap);
         assert!(app.snap);
+    }
+
+    /// The loaded node `a` plus `b` and an outside node `c`: a -> b one-way, b -> c
+    /// one-way, a marker "Hof" on b; a and b selected. Returns [a, b, c].
+    fn group(app: &mut App) -> [NodeId; 3] {
+        let a = first(app);
+        let doc = app.doc.as_mut().expect("doc");
+        let net = &mut doc.config.network;
+        let b = net.add_node(5.0, 3.0, 2.0, NodeFlag::SUB_PRIO);
+        let c = net.add_node(-9.0, 1.0, 4.0, NodeFlag::REGULAR);
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        net.connect(b, c, ConnectionShape::OneWay).expect("ok");
+        net.push_marker(ad_core::network::Marker {
+            node: b,
+            name: "Hof".into(),
+            group: "All".into(),
+        });
+        doc.selection.extend([a, b]);
+        [a, b, c]
+    }
+
+    fn selection(app: &App) -> Vec<NodeId> {
+        let doc = app.doc.as_ref().expect("doc");
+        doc.selection.iter().copied().collect()
+    }
+
+    fn marker_names(app: &App) -> Vec<String> {
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        net.markers().iter().map(|m| m.name.clone()).collect()
+    }
+
+    #[test]
+    fn copy_keeps_the_selection_and_paste_selects_the_copy_centred_on_the_view() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        let [a, b, _] = group(&mut app);
+        app.run(Action::Copy);
+        assert_eq!(selection(&app), [a, b]);
+        assert!(app.copied.is_some());
+        // Before the first frame the view shows the map's centre, world (0, 0).
+        app.run(Action::Paste);
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        let new = selection(&app);
+        assert_eq!(new.len(), 2);
+        assert_eq!(net.len(), 5);
+        // Box x 1..5, z 2..2: centre (3, 2).
+        let pos = |id| net.node(id).map(|n| (n.x, n.y, n.z)).expect("node");
+        assert_eq!(pos(new[0]), (-2.0, 0.0, 0.0));
+        assert_eq!(pos(new[1]), (2.0, 3.0, 0.0));
+        assert_eq!(net.connection_kind(new[0], new[1]), ConnectionKind::Regular);
+        assert_eq!(net.node(new[1]).expect("b").outgoing(), &[] as &[NodeId]);
+        assert_eq!(marker_names(&app), ["Hof", "Hof_2"]);
+        app.run(Action::PasteInPlace);
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        let new = selection(&app);
+        let pos = |id| net.node(id).map(|n| (n.x, n.z)).expect("node");
+        assert_eq!((pos(new[0]), pos(new[1])), ((1.0, 2.0), (5.0, 2.0)));
+        assert_eq!(marker_names(&app), ["Hof", "Hof_2", "Hof_3"]);
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn undo_of_a_paste_restores_the_prior_selection_and_redo_reselects_the_same_ids() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        let [a, b, _] = group(&mut app);
+        let before = snapshot(&app);
+        app.run(Action::Copy);
+        app.run(Action::Paste);
+        let pasted = selection(&app);
+        let after = snapshot(&app);
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(selection(&app), [a, b]);
+        app.run(Action::Redo);
+        assert_eq!(snapshot(&app), after);
+        assert_eq!(selection(&app), pasted);
+    }
+
+    #[test]
+    fn cut_deletes_the_group_in_one_step_and_undo_restores_it_with_the_selection() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        let [a, b, c] = group(&mut app);
+        let before = snapshot(&app);
+        app.run(Action::Cut);
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.config.network.order(), [c]);
+        assert!(doc.selection.is_empty());
+        assert!(app.clipboard.is_some() && app.copied.is_some());
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(selection(&app), [a, b]);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        app.run(Action::Redo);
+        assert!(selection(&app).is_empty());
+        // Pasting the cut group keeps its free marker name.
+        app.run(Action::PasteInPlace);
+        assert_eq!(marker_names(&app), ["Hof"]);
+        assert_eq!(nodes(&app), 3);
+    }
+
+    #[test]
+    fn the_clipboard_survives_opening_another_file() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        group(&mut app);
+        app.run(Action::Copy);
+        load(&mut app, "<version>3</version>");
+        assert_eq!(nodes(&app), 1);
+        app.run(Action::Paste);
+        assert_eq!(nodes(&app), 3);
+        assert_eq!(selection(&app).len(), 2);
+        assert_eq!(marker_names(&app), ["Hof"]);
+    }
+
+    #[test]
+    fn nothing_without_a_selection_or_a_clipboard() {
+        let mut app = App::new(Settings::default());
+        for action in [
+            Action::Copy,
+            Action::Cut,
+            Action::Paste,
+            Action::PasteInPlace,
+        ] {
+            app.run(action);
+        }
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        for action in [
+            Action::Paste,
+            Action::PasteInPlace,
+            Action::Copy,
+            Action::Cut,
+        ] {
+            app.run(action);
+        }
+        assert!(app.clipboard.is_none() && app.copied.is_none());
+        assert_eq!(nodes(&app), 1);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        // An empty selection keeps an earlier clipboard.
+        group(&mut app);
+        app.run(Action::Copy);
+        let clip = app.clipboard.clone();
+        app.doc.as_mut().expect("doc").selection.clear();
+        app.run(Action::Copy);
+        app.run(Action::Cut);
+        assert_eq!(app.clipboard, clip);
+        assert_eq!(nodes(&app), 3);
+    }
+
+    #[test]
+    fn read_only_document_copies_but_does_not_cut_or_paste() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        shown(&mut app);
+        let id = first(&app);
+        app.doc.as_mut().expect("doc").selection.insert(id);
+        app.run(Action::Cut);
+        assert!(app.clipboard.is_none());
+        app.run(Action::Copy);
+        assert!(app.clipboard.is_some());
+        app.run(Action::Paste);
+        app.run(Action::PasteInPlace);
+        assert_eq!(nodes(&app), 1);
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn copy_cut_and_paste_do_nothing_while_a_selection_is_drawn() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        group(&mut app);
+        app.view.start_select((1000.0, 1000.0));
+        for action in [Action::Copy, Action::Cut] {
+            app.run(action);
+        }
+        assert!(app.clipboard.is_none());
+        app.view.reset();
+        app.run(Action::Copy);
+        app.view.start_select((1000.0, 1000.0));
+        app.run(Action::Paste);
+        app.run(Action::PasteInPlace);
+        assert_eq!(nodes(&app), 3);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+    }
+
+    #[test]
+    fn paste_and_cut_cancel_the_tool_preview() {
+        for action in [Action::Paste, Action::Cut] {
+            let mut app = App::new(Settings::default());
+            load(&mut app, "<version>3</version>");
+            shown(&mut app);
+            let [a, ..] = group(&mut app);
+            app.run(Action::Copy);
+            app.run(Action::MoveTool);
+            let start = DragEvent::Start {
+                at: (1025.0, 1026.0),
+                node: Some(a),
+            };
+            drag(&mut app, start, false);
+            drag(
+                &mut app,
+                DragEvent::Move {
+                    at: (1100.0, 1100.0),
+                },
+                false,
+            );
+            app.run(action);
+            assert!(
+                app.tool.as_ref().is_some_and(|t| t.preview().is_none()),
+                "{action:?}"
+            );
+        }
+    }
+
+    /// One frame of `events` through the shortcut handler; returns the text it put on the
+    /// OS clipboard, if any.
+    fn clipboard_frame(app: &mut App, events: Vec<egui::Event>) -> Option<String> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| input::handle_shortcuts(app, ui.ctx()));
+        out.textures_delta.clear();
+        out.platform_output.commands.iter().find_map(|c| match c {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn clipboard_events_copy_with_a_note_on_the_os_clipboard_and_paste() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        group(&mut app);
+        let note = clipboard_frame(&mut app, vec![egui::Event::Copy]);
+        assert!(note.is_some_and(|t| t.contains("2 nodes")));
+        assert!(clipboard_frame(&mut app, vec![egui::Event::Paste("x".into())]).is_none());
+        assert_eq!(nodes(&app), 5);
+        assert_eq!(app.doc.as_ref().expect("doc").selection.len(), 2);
+    }
+
+    #[test]
+    fn clipboard_events_do_nothing_while_the_edit_location_dialog_is_shown() {
+        let mut app = edit_location("<version>3</version>", true);
+        assert!(app.location.is_some());
+        let id = first(&app);
+        app.doc.as_mut().expect("doc").selection.insert(id);
+        let events = vec![egui::Event::Copy, egui::Event::Cut];
+        assert!(clipboard_frame(&mut app, events).is_none());
+        assert!(app.clipboard.is_none());
+        assert_eq!(nodes(&app), 1);
+    }
+
+    /// The FS25 fixture as the open document.
+    fn load_fixture(app: &mut App) {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+        let bytes = std::fs::read(&path).expect("fixture");
+        let config = config_xml::load(&bytes).expect("loads");
+        let result = JobResult::Loaded {
+            path,
+            result: Ok(Box::new((config, map_image::blank(), None, None))),
+        };
+        app.tx.send(result).expect("send");
+        app.poll_jobs();
+    }
+
+    #[test]
+    fn a_junction_of_the_fixture_pastes_twice_and_two_undos_remove_both() {
+        let mut app = App::new(Settings::default());
+        load_fixture(&mut app);
+        shown(&mut app);
+        let doc = app.doc.as_mut().expect("doc");
+        let net = &doc.config.network;
+        // A junction: a node with three or more distinct linked nodes, selected with them.
+        let junction: BTreeSet<NodeId> = net
+            .order()
+            .iter()
+            .filter_map(|id| net.node(*id).map(|n| (*id, n)))
+            .map(|(id, n)| {
+                let mut s: BTreeSet<NodeId> =
+                    n.outgoing().iter().chain(n.incoming()).copied().collect();
+                s.insert(id);
+                s
+            })
+            .find(|s| s.len() >= 4)
+            .expect("fixture has a junction");
+        let inner = |net: &ad_core::network::Network, ids: &BTreeSet<NodeId>| -> usize {
+            ids.iter()
+                .filter_map(|id| net.node(*id))
+                .map(|n| n.outgoing().iter().filter(|t| ids.contains(t)).count())
+                .sum()
+        };
+        let links = inner(net, &junction);
+        assert!(links >= 3);
+        doc.selection = junction.clone();
+        let before = snapshot(&app);
+        app.run(Action::Copy);
+        app.run(Action::Paste);
+        let first_copy = app.doc.as_ref().expect("doc").selection.clone();
+        app.run(Action::Paste);
+        let doc = app.doc.as_ref().expect("doc");
+        let second = doc.selection.clone();
+        assert_eq!(first_copy.len(), junction.len());
+        assert_eq!(second.len(), junction.len());
+        assert!(first_copy.is_disjoint(&second) && first_copy.is_disjoint(&junction));
+        assert_eq!(inner(&doc.config.network, &first_copy), links);
+        assert_eq!(inner(&doc.config.network, &second), links);
+        assert!(app.error.is_none());
+        app.run(Action::Undo);
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(app.doc.as_ref().expect("doc").selection, junction);
     }
 }

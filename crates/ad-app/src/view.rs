@@ -428,6 +428,12 @@ impl MapView {
         self.transform.as_mut()
     }
 
+    /// The map pixel at the centre of the view; the map's centre before the first frame.
+    pub fn centre(&self) -> (f64, f64) {
+        self.transform
+            .map_or((MAP_PIXELS / 2.0, MAP_PIXELS / 2.0), |t| t.center)
+    }
+
     /// Whether a selection rectangle or lasso is being drawn.
     pub fn selecting(&self) -> bool {
         self.select_start.is_some() || !self.lasso.is_empty()
