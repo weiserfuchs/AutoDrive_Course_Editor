@@ -8,6 +8,7 @@ pub mod connect;
 pub mod delete;
 pub mod edit_location;
 pub mod flip;
+pub mod marker;
 pub mod move_node;
 pub mod node;
 pub mod priority;
@@ -55,6 +56,13 @@ pub fn snap_to_grid((x, z): (f64, f64), (gx, gz): (f64, f64)) -> (f64, f64) {
     (axis(x, gx), axis(z, gz))
 }
 
+/// A dialog a tool's click asks the app to open for a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRequest {
+    EditLocation(NodeId),
+    AddMarker(NodeId),
+}
+
 pub trait Tool {
     /// The name shown in the toolbar.
     fn name(&self) -> &'static str;
@@ -62,9 +70,9 @@ pub trait Tool {
     /// A primary click on the map; returns the transaction to commit, if any.
     fn on_click(&mut self, ctx: &ToolContext) -> Option<Transaction>;
 
-    /// The node whose Edit location dialog the last click asked for; the app takes it
-    /// right after the click. Only the Edit location tool asks.
-    fn take_location_request(&mut self) -> Option<NodeId> {
+    /// The dialog the last click asked for; the app takes it right after the click. Only
+    /// the Edit location and Add marker tools ask.
+    fn take_request(&mut self) -> Option<ToolRequest> {
         None
     }
 

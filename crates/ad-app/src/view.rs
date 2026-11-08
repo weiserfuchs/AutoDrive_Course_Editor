@@ -439,6 +439,11 @@ impl MapView {
         self.select_start.is_some() || !self.lasso.is_empty()
     }
 
+    /// Whether the hooks claimed the primary drag in progress.
+    pub fn dragging(&self) -> bool {
+        self.drag_claimed
+    }
+
     /// Starts a selection rectangle at map px `at`, as a right press does.
     #[cfg(test)]
     pub fn start_select(&mut self, at: MapPx) {

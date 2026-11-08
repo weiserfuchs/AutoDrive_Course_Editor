@@ -897,3 +897,42 @@ fn committed_arc_saves_and_reloads() -> Result<(), Error> {
     assert!(model(&cfg.network) == before);
     Ok(())
 }
+
+#[test]
+fn added_marker_in_a_new_group_saves_and_reloads() -> Result<(), Error> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    let mut cfg = load(&original)?;
+    let marker_count = cfg.network.markers().len();
+    // As the add-marker dialog commits it: one EditMarker on an existing unmarked node.
+    let node = *cfg
+        .network
+        .order()
+        .iter()
+        .find(|id| !cfg.network.markers().iter().any(|m| m.node == **id))
+        .ok_or("no unmarked node")?;
+    let mut history = History::default();
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::EditMarker(EditMarker::new(
+            node,
+            Some(("Hof".to_owned(), "Neu".to_owned())),
+        ))]),
+    )?;
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_marker_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    let reloaded = load(&written)?;
+    assert!(model(&cfg.network) == model(&reloaded.network));
+    assert!(untouched(&original)? == untouched(&written)?);
+    let net = &reloaded.network;
+    assert_eq!(net.markers().len(), marker_count + 1);
+    let m = net.markers().last().ok_or("marker")?;
+    assert_eq!((m.node, &*m.name, &*m.group), (node, "Hof", "Neu"));
+    Ok(())
+}

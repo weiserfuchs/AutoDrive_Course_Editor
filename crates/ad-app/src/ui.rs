@@ -18,6 +18,7 @@ use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
 use crate::tools::edit_location::{self, EditLocationTool};
 use crate::tools::flip::FlipTool;
+use crate::tools::marker::AddMarkerTool;
 use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
 use crate::tools::priority::PriorityTool;
@@ -65,6 +66,9 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             if let Some(notice) = app.doc.as_ref().and_then(|d| d.notice.as_deref()) {
                 ui.colored_label(ui.visuals().warn_fg_color, notice);
             }
+            if let Some(notice) = app.tool_notice {
+                ui.label(notice);
+            }
         });
     });
 }
@@ -75,7 +79,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
     let line = app.line();
-    let tools: [Box<dyn Tool>; 16] = [
+    let tools: [Box<dyn Tool>; 17] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
@@ -92,6 +96,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous, line)),
         Box::new(BezierTool::default()),
         Box::new(ArcTool::default()),
+        Box::new(AddMarkerTool::default()),
     ];
     for tool in tools {
         let selected = active == Some(tool.name());
@@ -319,8 +324,8 @@ impl ViewHooks for ToolHooks<'_> {
 /// The map view of the open document, with the overlay hook tools draw into.
 pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
-    // The Edit location dialog is modal: the map takes no tool input or selection then.
-    let modal = app.location.is_some();
+    // A node dialog is modal: the map takes no tool input or selection then.
+    let modal = app.dialog_shown();
     let snap = input::snap(app.snap, ui.ctx());
     let Some(doc) = &mut app.doc else {
         app.view.clear_hover();
@@ -503,6 +508,57 @@ pub(crate) fn location_dialog(app: &mut App, ctx: &egui::Context) {
         app.finish_location(true);
     } else if cancel || closed {
         app.finish_location(false);
+    }
+}
+
+/// The marker dialog: a name field with a red note while the name is refused, and a group
+/// field with a drop-down of "None" and the existing groups. OK or Enter, with the name
+/// valid, commits; Cancel, Escape or a click beside the dialog commits nothing.
+pub(crate) fn marker_dialog(app: &mut App, ctx: &egui::Context) {
+    let (Some(doc), Some(dialog)) = (&app.doc, &mut app.marker) else {
+        return;
+    };
+    let net = &doc.config.network;
+    let (mut ok, mut cancel) = (false, false);
+    let modal = egui::Modal::new(egui::Id::unique("marker")).show(ctx, |ui| {
+        ui.heading("Add marker");
+        ui.label("Name");
+        ui.text_edit_singleline(&mut dialog.name);
+        let valid = match dialog.validate(net) {
+            Ok(_) => true,
+            Err(note) => {
+                ui.colored_label(ui.visuals().error_fg_color, note.to_string());
+                false
+            }
+        };
+        ui.label("Group");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut dialog.group);
+            egui::ComboBox::from_id_salt("marker_group")
+                .selected_text("Groups")
+                .show_ui(ui, |ui| {
+                    for choice in &dialog.choices {
+                        if ui
+                            .selectable_label(dialog.group == *choice, choice)
+                            .clicked()
+                        {
+                            dialog.group.clone_from(choice);
+                        }
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ok = ui.add_enabled(valid, egui::Button::new("OK")).clicked() || (valid && enter);
+            cancel = ui.button("Cancel").clicked();
+        });
+    });
+    // Always asked, so Escape is consumed while the dialog is on top.
+    let closed = modal.should_close();
+    if ok {
+        app.finish_marker(true);
+    } else if cancel || closed {
+        app.finish_marker(false);
     }
 }
 
@@ -1044,6 +1100,86 @@ mod tests {
         dialog_frame(&ctx, &mut app, &[egui::Key::Enter]);
         assert!(app.location.is_none());
         assert_eq!(node_state(&app), ((8.25, 0.0, 2.0), true));
+    }
+
+    /// One frame of the marker dialog with `events`.
+    fn marker_frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 1024.0),
+            )),
+            time: Some(ctx.input(|i| i.time) + 0.016),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| marker_dialog(app, ui.ctx()));
+        out.textures_delta.clear();
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn the_marker_dialog_commits_on_enter_and_escape_or_a_click_beside_cancels() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        let id = app.doc.as_ref().expect("doc").config.network.order()[0];
+        let open = |app: &mut App, name: &str| {
+            let net = &app.doc.as_ref().expect("doc").config.network;
+            let mut dialog = crate::tools::marker::MarkerDialog::open(net, id).expect("node");
+            dialog.name = name.to_owned();
+            app.marker = Some(dialog);
+        };
+        let markers = |app: &App| {
+            app.doc
+                .as_ref()
+                .expect("doc")
+                .config
+                .network
+                .markers()
+                .len()
+        };
+        // Enter with the name refused keeps the dialog and commits nothing.
+        open(&mut app, "  ");
+        marker_frame(&ctx, &mut app, vec![]);
+        marker_frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+        assert!(app.marker.is_some());
+        assert_eq!(markers(&app), 0);
+        // Escape closes it and commits nothing.
+        open(&mut app, "Hof");
+        marker_frame(&ctx, &mut app, vec![key(egui::Key::Escape)]);
+        assert!(app.marker.is_none());
+        assert_eq!(markers(&app), 0);
+        // A click beside it closes it and commits nothing.
+        open(&mut app, "Hof");
+        let beside = egui::pos2(5.0, 5.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: beside,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        marker_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(beside)]);
+        marker_frame(&ctx, &mut app, vec![button(true)]);
+        marker_frame(&ctx, &mut app, vec![button(false)]);
+        assert!(app.marker.is_none());
+        assert_eq!(markers(&app), 0);
+        // Enter with the name valid commits.
+        open(&mut app, "Hof");
+        marker_frame(&ctx, &mut app, vec![]);
+        marker_frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+        assert!(app.marker.is_none());
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        assert_eq!(net.markers()[0].name, "Hof");
+        assert_eq!(net.markers()[0].group, "All");
     }
 
     #[test]
