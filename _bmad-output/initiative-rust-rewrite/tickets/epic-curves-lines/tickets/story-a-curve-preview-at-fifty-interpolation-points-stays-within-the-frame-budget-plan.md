@@ -3,7 +3,7 @@ title: 'A curve preview at fifty interpolation points stays within the frame bud
 type: 'feature'
 ticket: '5'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: 'd71b841'
 route: 'oneshot'
 route_source: 'auto'
