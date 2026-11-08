@@ -8,6 +8,7 @@ companions: []
 after: []
 refined: true
 risk: medium
+status: done
 ---
 
 # Users manage markers, groups and parking
