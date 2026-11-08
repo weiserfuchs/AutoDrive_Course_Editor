@@ -375,12 +375,18 @@ pub fn download_map_image(name: &str, source: &DownloadSource) -> Result<Downloa
     let target = map_image::map_image_target(dir, name);
     let (image, scaled) = map_image::decode_map_image(&bytes, &target.display().to_string())
         .map_err(|e| fail(&format!("not a PNG: {e}")))?;
-    let unsaved = map_image::save_map_image(&target, &bytes).err().map(|e| {
-        format!(
-            "The downloaded map image could not be saved to {}: {e}",
-            target.display()
-        )
-    });
+    // A download starts only when no local image exists; one that appeared meanwhile (an
+    // import for the same map) is newer and is never overwritten.
+    let unsaved = if target.exists() {
+        None
+    } else {
+        map_image::save_map_image(&target, &bytes).err().map(|e| {
+            format!(
+                "The downloaded map image could not be saved to {}: {e}",
+                target.display()
+            )
+        })
+    };
     let notices: Vec<String> = [scaled, unsaved].into_iter().flatten().collect();
     Ok(Downloaded {
         image,
@@ -1513,6 +1519,20 @@ mod tests {
             "{notice}"
         );
         assert!(!d.is_dirty() && !d.history.can_undo());
+    }
+
+    #[test]
+    fn a_download_never_overwrites_an_image_saved_meanwhile() {
+        let exe = temp_dir("download_late");
+        let target = map_image::map_image_target(&exe, "Tiny");
+        let imported = png(2048, 2048, [1, 2, 3, 255]);
+        map_image::save_map_image(&target, &imported).expect("an import saved it first");
+        let (base, _path) = serve(ok(png(4, 4, [7, 8, 9, 255]), "image/png"));
+        let downloaded = download_map_image("Tiny", &source(base, &exe));
+        let kept = std::fs::read(&target).expect("kept");
+        std::fs::remove_dir_all(&exe).expect("cleanup");
+        assert!(downloaded.is_ok());
+        assert_eq!(kept, imported);
     }
 
     /// Runs a download of Tiny against `respond`; returns the error and whether a file was saved.

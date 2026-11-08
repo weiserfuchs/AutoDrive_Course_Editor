@@ -69,3 +69,7 @@
 - source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-map-images-import/tickets/story-a-missing-map-image-downloads-in-the-background-plan.md`
   summary: A map-image download that finishes after another config was opened may overwrite an image the user imported for the same map meanwhile; skip the save when the target appeared after the download started.
   evidence: jobs.rs saves the fetched bytes unconditionally; Import is enabled again as soon as the open document changes.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-map-images-import/tickets/story-refactor-sweep-plan.md`
+  summary: Add the AD-1 dependency check (ad-core may not depend on I/O or UI crates) to CI, as the architecture's deployment section says it runs.
+  evidence: .github/workflows/ci.yml runs only cargo fmt, clippy and test.
