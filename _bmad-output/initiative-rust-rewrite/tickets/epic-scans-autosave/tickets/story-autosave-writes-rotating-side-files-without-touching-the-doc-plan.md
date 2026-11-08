@@ -3,14 +3,14 @@ title: 'Autosave writes rotating side files without touching the document'
 type: 'feature'
 ticket: '5'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: 'e8806c5'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -94,3 +94,7 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - accepted: "unchanged" is compared by history save point instead of revision (a selection gesture changes nothing that is written); the snapshot clone runs on the UI thread once per write, as for the merge backup.
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 419).
