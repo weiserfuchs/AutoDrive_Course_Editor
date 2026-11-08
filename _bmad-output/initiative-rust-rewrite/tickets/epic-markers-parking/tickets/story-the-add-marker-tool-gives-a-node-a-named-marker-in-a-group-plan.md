@@ -60,9 +60,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `tools/marker.rs` -- groups, validation, plan; tests for Add, New group, None, Groups list, Empty / duplicate
-- [ ] dialog and wiring -- tests for Has marker, W, Cancel, Read-only, modal blocking
-- [ ] golden -- added marker round-trip
+- [x] `tools/marker.rs` -- groups, validation, plan; tests for Add, New group, None, Groups list, Empty / duplicate
+- [x] dialog and wiring -- tests for Has marker, W, Cancel, Read-only, modal blocking
+- [x] golden -- added marker round-trip
 
 **Acceptance Criteria:**
 - Given the fixture, when the user picks Add marker, clicks a node, types a name and picks a group, then the marker appears with that name and one Ctrl+Z removes it.
@@ -76,6 +76,16 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **Tool request:** `Tool::take_location_request` became `take_request() -> Option<ToolRequest>` with `ToolRequest::{EditLocation(NodeId), AddMarker(NodeId)}`; story 6.3 adds its edit request there. `AddMarkerTool` asks for every clicked node; `App::click` decides: a marked node sets the notice, an unmarked one opens `MarkerDialog`.
+- **Notice:** `App::tool_notice` (a `&'static str`), shown in the top bar's notice line after the load notice; cleared at the start of the next map click and on document replacement.
+- **Dialog:** `MarkerDialog { node, name, group, choices }`; `choices` ("None" plus `groups(net)`) is taken at open, since the network cannot change while the modal is shown. It opens with group "None". `validate` trims the name and refuses it empty or used by another node's marker (exact match; the dialog's own node is excluded, for 6.3). The group is trimmed too, so a whitespace-only group means "All" like an empty one (the spec only names trimming for the name). `groups` sorts by lowercase, then by exact text, and drops duplicates; Java's locale collator also ignores accents, which this does not.
+- **UI:** `ui::marker_dialog` is an `egui::Modal` like Edit location: name field with the red note, group text field with a "Groups" `ComboBox` beside it whose entries fill the field; OK disabled while the name is refused.
+- **Modal rule:** `App::dialog_shown()` (location or marker) replaces `location.is_some()` in `click`, `map_panel` and `handle_shortcuts`.
+- **W:** `Action::AddMarker`, `Key::W` with exact no modifiers, gated by `editable()`. It uses the hover of the document the view last showed (as Delete). It does nothing while a tool-claimed drag (new `MapView::dragging()`) or a selection drag is in progress, so the modal never cuts a drag whose end the tool would then miss; it does not cancel the active tool.
+- **Tests:** `tools::marker::tests` (add_appends_the_marker_in_one_edit_marker_and_reverts, a_typed_group_is_kept_as_a_new_group, none_or_an_empty_group_means_all, groups_are_sorted_ignoring_case_without_all_after_none, an_empty_or_taken_name_is_refused, no_dialog_for_a_marked_or_missing_node, a_click_asks_for_the_dialog_only_on_a_node); `main.rs` (add_marker_ok_commits_one_marker_and_one_undo_removes_it, add_marker_on_a_marked_node_shows_the_notice_until_the_next_click, add_marker_cancel_or_a_refused_name_commits_nothing, w_opens_the_marker_dialog_for_a_hovered_unmarked_node_whichever_tool_is_active, read_only_document_ignores_the_add_marker_tool_and_w, shortcuts_and_clicks_do_nothing_while_the_marker_dialog_is_shown, a_new_document_closes_the_marker_dialog_and_the_notice); `ui.rs` the_marker_dialog_commits_on_enter_and_escape_or_a_click_beside_cancels; `input.rs` W in the table and Shift/Ctrl/Alt+W ignored; `golden_edited.rs` added_marker_in_a_new_group_saves_and_reloads.
+- **Verification:** `cargo fmt --all --check` exit 0; `cargo clippy --workspace --all-targets -- -D warnings` exit 0; `cargo test --workspace` all pass (ad-app 321, golden_edited 7, others unchanged). `frame_time` (release): every case ok, worst best-round max 9.616 ms (rotate, min zoom, whole network selected); min zoom static 2.280 ms, drag whole network 8.451 ms.
+- **Not checked:** the dialog in the running app (needs a human): combo popup placement inside the modal, and whether Escape with the combo popup open closes the whole dialog.
 
 ## Plan Change Log
 

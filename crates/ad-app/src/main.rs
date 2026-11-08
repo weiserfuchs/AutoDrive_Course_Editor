@@ -81,6 +81,10 @@ struct App {
     prompt: Option<Pending>,
     /// The Edit location dialog, while it is shown.
     location: Option<tools::edit_location::LocationDialog>,
+    /// The marker dialog, while it is shown.
+    marker: Option<tools::marker::MarkerDialog>,
+    /// A tool's info for the toolbar's notice line, shown until the next click on the map.
+    tool_notice: Option<&'static str>,
     /// Set once closing was agreed; the next close request is not intercepted.
     allow_close: bool,
     /// The title last sent to the window.
@@ -114,6 +118,8 @@ impl App {
             pending: None,
             prompt: None,
             location: None,
+            marker: None,
+            tool_notice: None,
             allow_close: false,
             title: window_title(None),
             clipboard: None,
@@ -211,10 +217,12 @@ impl App {
             ) {
                 self.error = Some(message);
             }
-            // A new document cancels the active tool (AD-18) and the dialog of an old node.
+            // A new document cancels the active tool (AD-18) and the dialogs of an old node.
             if self.doc.as_ref().map(|d| d.epoch) != before {
                 self.set_tool(None);
                 self.location = None;
+                self.marker = None;
+                self.tool_notice = None;
             }
         }
     }
@@ -235,6 +243,11 @@ impl App {
     /// Whether the open document may be edited: tools, Undo and Redo need this.
     fn editable(&self) -> bool {
         self.doc.as_ref().is_some_and(document::Document::editable)
+    }
+
+    /// Whether a modal node dialog (Edit location or marker) is shown.
+    fn dialog_shown(&self) -> bool {
+        self.location.is_some() || self.marker.is_some()
     }
 
     /// Runs a toolbar or shortcut action.
@@ -303,6 +316,7 @@ impl App {
                 self.view.clear_hover();
             }
             Action::DeleteHovered if self.editable() => self.delete_hovered(),
+            Action::AddMarker if self.editable() => self.add_marker_hovered(),
             // Copy changes no data, so it works on a read-only document too.
             Action::Copy => {
                 self.copy();
@@ -324,8 +338,29 @@ impl App {
             | Action::BezierTool
             | Action::Undo
             | Action::Redo
-            | Action::DeleteHovered => {}
+            | Action::DeleteHovered
+            | Action::AddMarker => {}
         }
+    }
+
+    /// Opens the marker dialog for the hovered node, if it has no marker (Java's W). Not
+    /// during a drag a tool claimed or a selection being drawn, which the modal would cut.
+    fn add_marker_hovered(&mut self) {
+        let Some(doc) = &self.doc else {
+            return;
+        };
+        if self.view.selecting() || self.view.dragging() {
+            return;
+        }
+        // The hover belongs to the document the view last showed.
+        let Some(id) = self
+            .view
+            .hovered_node
+            .filter(|_| self.view_epoch == Some(doc.epoch))
+        else {
+            return;
+        };
+        self.marker = tools::marker::MarkerDialog::open(&doc.config.network, id);
     }
 
     /// Deletes the selection when it is not empty, else the hovered node, if any, after
@@ -427,12 +462,13 @@ impl App {
     }
 
     /// Hands a primary click at map pixel `(px, py)` to the active tool and commits the
-    /// transaction it returns, or opens the Edit location dialog it asks for. A read-only
-    /// document gets no click, nor does the map while the dialog is shown.
+    /// transaction it returns, or opens the dialog it asks for. A read-only document gets
+    /// no click, nor does the map while a dialog is shown. A click ends the tool notice.
     fn click(&mut self, px: f64, py: f64, snap: bool) {
-        if !self.editable() || self.location.is_some() {
+        if !self.editable() || self.dialog_shown() {
             return;
         }
+        self.tool_notice = None;
         let (Some(doc), Some(tool)) = (&mut self.doc, &mut self.tool) else {
             return;
         };
@@ -447,8 +483,18 @@ impl App {
             hovered_node: self.view.hovered_node,
             hovered_edge: self.view.hovered_edge,
         });
-        if let Some(node) = tool.take_location_request() {
-            self.location = tools::edit_location::LocationDialog::open(&doc.config.network, node);
+        let net = &doc.config.network;
+        match tool.take_request() {
+            Some(tools::ToolRequest::EditLocation(node)) => {
+                self.location = tools::edit_location::LocationDialog::open(net, node);
+            }
+            Some(tools::ToolRequest::AddMarker(node)) if tools::marker::has_marker(net, node) => {
+                self.tool_notice = Some(tools::marker::HAS_MARKER);
+            }
+            Some(tools::ToolRequest::AddMarker(node)) => {
+                self.marker = tools::marker::MarkerDialog::open(net, node);
+            }
+            None => {}
         }
         let Some(tx) = tx else {
             return;
@@ -503,6 +549,26 @@ impl App {
         };
         let Some(tx) = tools::edit_location::plan(&doc.config.network, dialog.node, (x, y, z))
         else {
+            return;
+        };
+        if let Err(e) = doc.apply(tx) {
+            self.error = Some(e.to_string());
+        }
+    }
+
+    /// Closes the marker dialog. With `ok`, sets its node's marker in one transaction,
+    /// unless the name is refused or the document is read-only.
+    fn finish_marker(&mut self, ok: bool) {
+        let Some(dialog) = self.marker.take() else {
+            return;
+        };
+        if !ok || !self.editable() {
+            return;
+        }
+        let Some(doc) = &mut self.doc else {
+            return;
+        };
+        let Some(tx) = dialog.plan(&doc.config.network) else {
             return;
         };
         if let Err(e) = doc.apply(tx) {
@@ -584,6 +650,7 @@ impl eframe::App for App {
         ui::error_window(self, &ctx);
         // Before the prompt, so a prompt from a window close shows on top of it.
         ui::location_dialog(self, &ctx);
+        ui::marker_dialog(self, &ctx);
         ui::unsaved_prompt(self, &ctx);
     }
 }
@@ -1337,6 +1404,191 @@ mod tests {
         assert!(app.location.is_some());
         load(&mut app, "<version>3</version>");
         assert!(app.location.is_none());
+    }
+
+    /// Gives the loaded node the marker "Feld", outside the history.
+    fn mark_first(app: &mut App) {
+        let id = first(app);
+        let net = &mut app.doc.as_mut().expect("doc").config.network;
+        net.push_marker(ad_core::network::Marker {
+            node: id,
+            name: "Feld".to_owned(),
+            group: "All".to_owned(),
+            parked_vehicles: Vec::new(),
+        });
+    }
+
+    /// Loads the one-node config of `version`, picks Add marker and clicks with the node
+    /// hovered.
+    fn add_marker(version: &str) -> App {
+        let mut app = App::new(Settings::default());
+        load(&mut app, version);
+        app.tool = Some(Box::new(tools::marker::AddMarkerTool::default()));
+        app.view.hovered_node = Some(first(&app));
+        app.click(0.0, 0.0, false);
+        app
+    }
+
+    #[test]
+    fn add_marker_ok_commits_one_marker_and_one_undo_removes_it() {
+        let mut app = add_marker("<version>3</version>");
+        let id = first(&app);
+        app.doc.as_mut().expect("doc").selection.insert(id);
+        let dialog = app.marker.as_mut().expect("dialog");
+        assert_eq!(dialog.node, id);
+        dialog.name = " Hof ".to_owned();
+        dialog.group = "Neu".to_owned();
+        app.finish_marker(true);
+        assert!(app.marker.is_none());
+        let doc = app.doc.as_ref().expect("doc");
+        let m = &doc.config.network.markers()[0];
+        assert_eq!((m.node, &*m.name, &*m.group), (id, "Hof", "Neu"));
+        assert!(m.parked_vehicles.is_empty());
+        assert_eq!(doc.selection, BTreeSet::from([id]), "selection unaffected");
+        app.run(Action::Undo);
+        assert!(marker_names(&app).is_empty(), "one undo step");
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+    }
+
+    #[test]
+    fn add_marker_on_a_marked_node_shows_the_notice_until_the_next_click() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        mark_first(&mut app);
+        app.tool = Some(Box::new(tools::marker::AddMarkerTool::default()));
+        app.view.hovered_node = Some(first(&app));
+        app.click(0.0, 0.0, false);
+        assert!(app.marker.is_none(), "no dialog");
+        assert_eq!(app.tool_notice, Some(tools::marker::HAS_MARKER));
+        app.view.hovered_node = None;
+        app.click(0.0, 0.0, false);
+        assert_eq!(app.tool_notice, None);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+    }
+
+    #[test]
+    fn add_marker_cancel_or_a_refused_name_commits_nothing() {
+        for (name, ok) in [("Hof", false), ("  ", true), ("Feld", true)] {
+            let mut app = App::new(Settings::default());
+            load(&mut app, "<version>3</version>");
+            app.tool = Some(Box::new(tools::marker::AddMarkerTool::default()));
+            app.view.hovered_node = Some(first(&app));
+            app.click(0.0, 0.0, false);
+            // "Feld" is taken once another node has it; the dialog checks on OK too.
+            if name == "Feld" {
+                let doc = app.doc.as_mut().expect("doc");
+                let other = doc
+                    .config
+                    .network
+                    .add_node(0.0, 0.0, 0.0, NodeFlag::REGULAR);
+                doc.config.network.push_marker(ad_core::network::Marker {
+                    node: other,
+                    name: "Feld".to_owned(),
+                    group: "All".to_owned(),
+                    parked_vehicles: Vec::new(),
+                });
+            }
+            app.marker.as_mut().expect("dialog").name = name.to_owned();
+            app.finish_marker(ok);
+            assert!(app.marker.is_none(), "{name:?}");
+            assert!(
+                !app.doc.as_ref().expect("doc").history.can_undo(),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn w_opens_the_marker_dialog_for_a_hovered_unmarked_node_whichever_tool_is_active() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        // The view showed this document.
+        app.view_epoch = app.doc.as_ref().map(|d| d.epoch);
+        app.run(Action::NodeTool);
+        app.run(Action::AddMarker);
+        assert!(app.marker.is_none(), "over empty map");
+        app.view.hovered_node = Some(first(&app));
+        app.run(Action::AddMarker);
+        assert_eq!(app.marker.as_ref().map(|d| d.node), Some(first(&app)));
+        assert_eq!(active(&app), Some("Node"));
+        app.finish_marker(false);
+        mark_first(&mut app);
+        app.run(Action::AddMarker);
+        assert!(app.marker.is_none(), "over a marked node");
+        assert_eq!(app.tool_notice, None);
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_add_marker_tool_and_w() {
+        let mut app = add_marker("<markerID>1</markerID>");
+        assert!(app.marker.is_none(), "no dialog from the tool");
+        app.view_epoch = app.doc.as_ref().map(|d| d.epoch);
+        app.run(Action::AddMarker);
+        assert!(app.marker.is_none(), "no dialog from W");
+        // Even a dialog left open commits nothing.
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        let mut dialog = tools::marker::MarkerDialog::open(net, first(&app));
+        dialog.as_mut().expect("dialog").name = "Hof".to_owned();
+        app.marker = dialog;
+        app.finish_marker(true);
+        assert!(marker_names(&app).is_empty());
+    }
+
+    #[test]
+    fn shortcuts_and_clicks_do_nothing_while_the_marker_dialog_is_shown() {
+        let mut app = add_marker("<version>3</version>");
+        app.view_epoch = app.doc.as_ref().map(|d| d.epoch);
+        // Something to undo: a marker through the dialog, then the dialog for a new node.
+        app.marker.as_mut().expect("dialog").name = "Hof".to_owned();
+        app.finish_marker(true);
+        let doc = app.doc.as_mut().expect("doc");
+        let other = doc
+            .config
+            .network
+            .add_node(5.0, 0.0, 5.0, NodeFlag::REGULAR);
+        app.view.hovered_node = Some(other);
+        app.click(0.0, 0.0, false);
+        let shown = app.marker.clone();
+        assert_eq!(shown.as_ref().map(|d| d.node), Some(other));
+        let ctx = egui::Context::default();
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let ctrl = egui::Modifiers::CTRL.plus(egui::Modifiers::COMMAND);
+        let input = egui::RawInput {
+            events: vec![
+                key(egui::Key::Z, ctrl),
+                key(egui::Key::N, egui::Modifiers::NONE),
+                key(egui::Key::S, egui::Modifiers::NONE),
+                key(egui::Key::W, egui::Modifiers::NONE),
+            ],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| input::handle_shortcuts(&mut app, ui.ctx()));
+        out.textures_delta.clear();
+        assert_eq!(marker_names(&app), ["Hof"], "no undo");
+        assert_eq!(active(&app), Some("Add marker"));
+        assert!(!app.snap);
+        assert_eq!(app.marker, shown);
+        // A click on the map while it is shown opens nothing new and commits nothing.
+        app.view.hovered_node = Some(first(&app));
+        app.click(0.0, 0.0, false);
+        assert_eq!(app.marker, shown);
+        assert_eq!(app.tool_notice, None);
+    }
+
+    #[test]
+    fn a_new_document_closes_the_marker_dialog_and_the_notice() {
+        let mut app = add_marker("<version>3</version>");
+        assert!(app.marker.is_some());
+        app.tool_notice = Some(tools::marker::HAS_MARKER);
+        load(&mut app, "<version>3</version>");
+        assert!(app.marker.is_none());
+        assert!(app.tool_notice.is_none());
     }
 
     #[test]

@@ -28,6 +28,8 @@ pub(crate) enum Action {
     ToggleNodeId,
     /// Deletes the hovered node, whichever tool is active (Java's Delete key).
     DeleteHovered,
+    /// Opens the marker dialog for the hovered node, whichever tool is active (Java's W).
+    AddMarker,
     /// Copies the selection to the app clipboard.
     Copy,
     /// Copies the selection, then deletes it.
@@ -40,7 +42,7 @@ pub(crate) enum Action {
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 20] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 21] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -105,6 +107,10 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 20] = [
     (
         Action::DeleteHovered,
         KeyboardShortcut::new(Modifiers::NONE, Key::Delete),
+    ),
+    (
+        Action::AddMarker,
+        KeyboardShortcut::new(Modifiers::NONE, Key::W),
     ),
     // eframe turns Ctrl+C, X and V into clipboard events (see `clipboard_actions`); these
     // key forms are kept for a backend that passes them on as keys.
@@ -180,11 +186,11 @@ pub(crate) fn pressed(ctx: &egui::Context) -> Vec<Action> {
     })
 }
 
-/// Handles the shortcuts pressed this frame. The unsaved prompt and the Edit location
-/// dialog are modal: no shortcut acts, nor is its key consumed, while one is shown, so a
-/// text field there keeps its own copy and paste.
+/// Handles the shortcuts pressed this frame. The unsaved prompt and the Edit location and
+/// marker dialogs are modal: no shortcut acts, nor is its key consumed, while one is
+/// shown, so a text field there keeps its own copy and paste.
 pub(crate) fn handle_shortcuts(app: &mut App, ctx: &egui::Context) {
-    if app.prompt.is_some() || app.location.is_some() {
+    if app.prompt.is_some() || app.dialog_shown() {
         return;
     }
     for action in pressed(ctx) {
@@ -236,6 +242,7 @@ mod tests {
         assert_eq!(press(Modifiers::NONE, Key::B), [Action::BezierTool]);
         assert_eq!(press(Modifiers::NONE, Key::S), [Action::ToggleSnap]);
         assert_eq!(press(Modifiers::NONE, Key::Delete), [Action::DeleteHovered]);
+        assert_eq!(press(Modifiers::NONE, Key::W), [Action::AddMarker]);
         assert_eq!(press(Modifiers::NONE, Key::L), [Action::ConnectTool]);
         assert_eq!(
             press(Modifiers::NONE, Key::Semicolon),
@@ -317,6 +324,9 @@ mod tests {
         assert!(press(Modifiers::SHIFT, Key::B).is_empty());
         assert!(press(CTRL, Key::B).is_empty());
         assert!(press(Modifiers::ALT, Key::B).is_empty());
+        assert!(press(Modifiers::SHIFT, Key::W).is_empty());
+        assert!(press(CTRL, Key::W).is_empty());
+        assert!(press(Modifiers::ALT, Key::W).is_empty());
     }
 
     #[test]

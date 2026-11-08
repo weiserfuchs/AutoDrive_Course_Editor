@@ -11,7 +11,7 @@ use ad_core::command::{Command, MoveNodes, Position, Transaction};
 use ad_core::geometry::MapGeometry;
 use ad_core::network::{Network, NodeId};
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolContext, ToolRequest};
 use crate::view::ViewTransform;
 
 /// The labels of the three fields, in field order.
@@ -149,8 +149,8 @@ impl Tool for EditLocationTool {
         None
     }
 
-    fn take_location_request(&mut self) -> Option<NodeId> {
-        self.requested.take()
+    fn take_request(&mut self) -> Option<ToolRequest> {
+        self.requested.take().map(ToolRequest::EditLocation)
     }
 
     fn paint(
@@ -311,9 +311,9 @@ mod tests {
         };
         let mut tool = EditLocationTool::default();
         assert!(tool.on_click(&ctx(Some(id))).is_none());
-        assert_eq!(tool.take_location_request(), Some(id));
-        assert_eq!(tool.take_location_request(), None, "taken once");
+        assert_eq!(tool.take_request(), Some(ToolRequest::EditLocation(id)));
+        assert_eq!(tool.take_request(), None, "taken once");
         assert!(tool.on_click(&ctx(None)).is_none());
-        assert_eq!(tool.take_location_request(), None);
+        assert_eq!(tool.take_request(), None);
     }
 }
