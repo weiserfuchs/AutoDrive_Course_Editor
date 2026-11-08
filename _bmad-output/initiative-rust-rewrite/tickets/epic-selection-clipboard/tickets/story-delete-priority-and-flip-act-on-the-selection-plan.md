@@ -3,7 +3,7 @@ title: 'Delete, priority and flip act on the selection'
 type: 'feature'
 ticket: '5'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '80206b3914b399b966665c1523ebd925869cc077'
 route: 'full'
 route_source: 'auto'
