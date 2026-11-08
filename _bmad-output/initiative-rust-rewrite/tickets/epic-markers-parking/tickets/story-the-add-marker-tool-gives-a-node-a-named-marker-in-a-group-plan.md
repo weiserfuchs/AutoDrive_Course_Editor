@@ -3,14 +3,14 @@ title: 'The add-marker tool gives a node a named marker in a group'
 type: 'feature'
 ticket: '2'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '72e3038'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -90,3 +90,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - accepted: the group is trimmed too; a name counts as taken only on another node (story 6.3 keeps a marker's own name); W does nothing during a drag or a drawn selection.
+  - for the hand check: where the group drop-down opens and whether Escape with it open closes the dialog.
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 321, golden_edited 7).
