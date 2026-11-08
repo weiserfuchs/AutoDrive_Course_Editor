@@ -426,6 +426,10 @@ impl Tool for BezierTool {
         painter.line_segment([screen((start.x, start.z)), end], stroke);
     }
 
+    fn in_progress(&self) -> bool {
+        self.start.is_some() || self.curve.is_some() || self.drag.is_some()
+    }
+
     fn cancel(&mut self) {
         self.start = None;
         self.curve = None;
@@ -835,11 +839,14 @@ mod tests {
         let (net, ids) = setup();
         let map = no_heightmap();
         let mut tool = previewing(&net, &map, ids);
+        assert!(tool.in_progress());
         tool.cancel();
-        assert!(tool.curve().is_none());
+        assert!(tool.curve().is_none() && !tool.in_progress());
         tool.on_click(&ctx(&net, &map, (0.0, 0.0), Some(ids[0])));
+        assert!(tool.in_progress(), "a pending start");
         tool.cancel();
         assert_eq!(tool.start(), None);
+        assert!(!tool.in_progress());
         // The next curve starts with the defaults.
         let tool = previewing(&net, &map, ids);
         let curve = tool.curve().expect("curve");

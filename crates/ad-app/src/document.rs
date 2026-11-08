@@ -3,9 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ad_core::command::Transaction;
-use ad_core::history::{EntryId, History};
+use ad_core::history::{EntryId, History, SavePoint};
 use ad_core::map_context::MapContext;
 use ad_core::network::{NetworkError, NodeId};
 use ad_core::scan;
@@ -79,6 +80,11 @@ pub struct Document {
     /// The overlap scan's distance and the nodes it marks, while marks are shown; kept up
     /// to date after every apply, undo and redo. A new document starts with none.
     pub overlap: Option<(f64, BTreeSet<NodeId>)>,
+    /// When the autosave timer last started; `None` starts it at the next check (a new
+    /// document, a save, AD-16).
+    pub autosave_since: Option<Instant>,
+    /// The history position the last autosave wrote; an autosave never repeats it.
+    pub autosaved: Option<SavePoint>,
 }
 
 impl Document {
@@ -116,6 +122,8 @@ impl Document {
             revision: 0,
             selections: BTreeMap::new(),
             overlap: None,
+            autosave_since: None,
+            autosaved: None,
         }
     }
 

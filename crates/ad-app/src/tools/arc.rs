@@ -346,6 +346,10 @@ impl Tool for ArcTool {
     ) {
     }
 
+    fn in_progress(&self) -> bool {
+        self.arc.is_some() || self.drag.is_some()
+    }
+
     fn cancel(&mut self) {
         self.arc = None;
         self.drag = None;
@@ -614,8 +618,9 @@ mod tests {
         arc.settings.points = 20;
         arc.swap();
         drag(&mut tool, &net, &map, (100.0, 50.0), (0.0, 0.0));
+        assert!(tool.in_progress());
         tool.cancel();
-        assert!(tool.arc().is_none());
+        assert!(tool.arc().is_none() && !tool.in_progress());
         tool.on_click(&ctx(&net, &map, (5.0, 5.0)));
         assert_eq!(tool.arc(), Some(&Arc::new((5.0, 5.0))));
         assert_eq!(tool.arc().expect("arc").settings, CurveSettings::default());

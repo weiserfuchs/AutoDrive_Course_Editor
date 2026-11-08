@@ -17,6 +17,7 @@ mod zip_import;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
@@ -63,6 +64,18 @@ fn window_title(doc: Option<&Document>) -> String {
             if doc.is_dirty() { " *" } else { "" }
         ),
     }
+}
+
+/// How long the top bar shows "Autosaved to …" unless a notice changes first.
+const AUTOSAVE_LABEL_TIME: Duration = Duration::from_secs(10);
+
+/// The top bar's line after a successful autosave.
+struct AutosaveLabel {
+    text: String,
+    /// The document's notice when the line appeared; another notice hides the line.
+    notice: Option<String>,
+    /// When the line was first checked; it goes [`AUTOSAVE_LABEL_TIME`] later.
+    since: Option<Instant>,
 }
 
 struct App {
@@ -119,6 +132,10 @@ struct App {
     connection_report: Option<ad_core::scan::Defects>,
     /// A merge's backup is being written; the merge follows when it was.
     merging: bool,
+    /// An autosave is being written.
+    autosaving: bool,
+    /// The top bar's "Autosaved to …" line, while it is shown.
+    autosave_label: Option<AutosaveLabel>,
     /// A tool's info for the toolbar's notice line, shown until the next click on the map.
     tool_notice: Option<&'static str>,
     /// Set once closing was agreed; the next close request is not intercepted.
@@ -167,6 +184,8 @@ impl App {
             fix_prompt: None,
             connection_report: None,
             merging: false,
+            autosaving: false,
+            autosave_label: None,
             tool_notice: None,
             allow_close: false,
             title: window_title(None),
@@ -274,6 +293,19 @@ impl App {
                 | JobResult::HeightmapLoaded { .. } => self.importing = false,
                 JobResult::Exported { .. } => self.exporting = false,
                 JobResult::MergeBackup { .. } => self.merging = false,
+                JobResult::Autosaved { epoch, result, .. } => {
+                    self.autosaving = false;
+                    if let (Some(doc), Ok(target)) = (&self.doc, result)
+                        && doc.epoch == *epoch
+                    {
+                        let name = target.file_name().unwrap_or_default().to_string_lossy();
+                        self.autosave_label = Some(AutosaveLabel {
+                            text: format!("Autosaved to {name}"),
+                            notice: doc.notice.clone(),
+                            since: None,
+                        });
+                    }
+                }
                 JobResult::ImageSaved { .. } => {}
                 JobResult::ZipRead { .. } => {
                     self.importing = false;
@@ -304,6 +336,7 @@ impl App {
                 self.connection_report = None;
                 self.tool_notice = None;
                 self.zip_preview = None;
+                self.autosave_label = None;
                 if let Some(name) = download {
                     self.start_download(name);
                 }
@@ -384,6 +417,79 @@ impl App {
                 .doc
                 .as_ref()
                 .is_some_and(|d| d.image_to_replace.is_some())
+    }
+
+    /// Whether an edit gesture or a question is in progress: a drag a tool claimed, a
+    /// selection being drawn, a tool's preview or pending start, a dialog or the
+    /// unsaved-changes prompt. Autosave waits while it lasts (AD-16).
+    fn busy(&self) -> bool {
+        self.view.dragging()
+            || self.view.selecting()
+            || self.tool.as_ref().is_some_and(|t| t.in_progress())
+            || self.dialog_shown()
+            || self.prompt.is_some()
+    }
+
+    /// Checks the autosave timer at `now` (the clock seam: a frame passes `Instant::now()`,
+    /// tests a time of their own) and hides the "Autosaved to …" line when its time is up.
+    /// Once the interval has passed, a dirty, editable document not autosaved at its
+    /// current state is written in the background (`notify` follows the write) unless a
+    /// save, load, autosave or [`Self::busy`] blocks it; then the next check retries. The
+    /// timer restarts when it wrote or found nothing to write. Returns how long until the
+    /// next check is needed, if one is.
+    fn tick_autosave(
+        &mut self,
+        now: Instant,
+        notify: impl FnOnce() + Send + 'static,
+    ) -> Option<Duration> {
+        let label_wait = self.tick_autosave_label(now);
+        let global = &self.settings.global;
+        if !global.autosave {
+            return label_wait;
+        }
+        let interval = Duration::from_secs(60 * u64::from(global.autosave_minutes.max(1)));
+        let slots = global.autosave_slots;
+        let blocked = self.saving || self.loading || self.autosaving || self.busy();
+        let Some(doc) = self.doc.as_mut().filter(|d| d.editable()) else {
+            return label_wait;
+        };
+        let due = *doc.autosave_since.get_or_insert(now) + interval;
+        let wait = if now < due {
+            due - now
+        } else if !doc.is_dirty() || doc.autosaved == Some(doc.history.save_point()) {
+            doc.autosave_since = Some(now);
+            interval
+        } else if blocked {
+            return label_wait;
+        } else {
+            doc.autosave_since = Some(now);
+            self.autosaving = true;
+            jobs::spawn_autosave(
+                doc.config.clone(),
+                doc.epoch,
+                doc.history.save_point(),
+                doc.path.clone(),
+                slots,
+                self.tx.clone(),
+                notify,
+            );
+            interval
+        };
+        Some(label_wait.map_or(wait, |l| l.min(wait)))
+    }
+
+    /// Hides the "Autosaved to …" line once [`AUTOSAVE_LABEL_TIME`] has passed or the
+    /// notice changed; returns how long it still shows, or zero for the repaint that
+    /// removes it.
+    fn tick_autosave_label(&mut self, now: Instant) -> Option<Duration> {
+        let notice = self.doc.as_ref().and_then(|d| d.notice.as_ref());
+        let label = self.autosave_label.as_mut()?;
+        let end = *label.since.get_or_insert(now) + AUTOSAVE_LABEL_TIME;
+        if now >= end || label.notice.as_ref() != notice {
+            self.autosave_label = None;
+            return Some(Duration::ZERO);
+        }
+        Some(end - now)
     }
 
     /// Runs a toolbar or shortcut action.
@@ -1204,6 +1310,12 @@ impl eframe::App for App {
         ui::zip_preview_window(self, &ctx);
         ui::replace_image_prompt(self, &ctx);
         ui::unsaved_prompt(self, &ctx);
+        // Last, so it sees this frame's gestures and dialogs; the repaint at the due time
+        // makes it fire while the user is idle.
+        let repaint = ctx.clone();
+        if let Some(wait) = self.tick_autosave(Instant::now(), move || repaint.request_repaint()) {
+            ctx.request_repaint_after(wait);
+        }
     }
 }
 
@@ -4135,6 +4247,329 @@ mod tests {
         app.run(Action::Undo);
         assert_eq!(snapshot(&app), before);
         assert_eq!(app.doc.as_ref().expect("doc").selection, junction);
+    }
+
+    const MINUTE: Duration = Duration::from_secs(60);
+
+    /// A document of `version` opened from `<temp>/ad_app_autosave_<name>/AutoDrive_config.xml`
+    /// (not written) with a `vehicles.xml` beside it; returns the app, the config path and
+    /// the start of the fake clock.
+    fn autosave_case(name: &str, version: &str, settings: Settings) -> (App, PathBuf, Instant) {
+        let dir = std::env::temp_dir().join(format!("ad_app_autosave_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("vehicles.xml"), VEHICLES).expect("vehicles.xml");
+        let path = dir.join("AutoDrive_config.xml");
+        let mut app = App::new(settings);
+        load(&mut app, version);
+        let doc = app.doc.as_mut().expect("doc");
+        doc.path = path.clone();
+        doc.opened_path = path.clone();
+        (app, path, Instant::now())
+    }
+
+    const VEHICLES: &str =
+        "<vehicles>\n    <vehicle id=\"1\" parkDestination=\"1\"/>\n</vehicles>\n";
+
+    /// [`tick_showing`], then drops the "Autosaved to …" line, so only the timer sets the
+    /// wait.
+    fn tick(app: &mut App, t0: Instant, after: Duration) -> (bool, Option<Duration>) {
+        let result = tick_showing(app, t0, after);
+        app.autosave_label = None;
+        result
+    }
+
+    /// Checks the autosave timer at `t0 + after`; when that started an autosave, waits for
+    /// it and polls it. Returns whether one was written or failed, and the wait the check
+    /// asked for.
+    fn tick_showing(app: &mut App, t0: Instant, after: Duration) -> (bool, Option<Duration>) {
+        let (done_tx, done_rx) = mpsc::channel();
+        let wait = app.tick_autosave(t0 + after, move || {
+            let _ = done_tx.send(());
+        });
+        let ran = app.autosaving;
+        if ran {
+            done_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("autosave finished");
+            app.poll_jobs();
+            assert!(!app.autosaving);
+        }
+        (ran, wait)
+    }
+
+    fn autosave_file(path: &Path, slot: u32) -> PathBuf {
+        let file = jobs::autosave_path(path, slot);
+        assert_eq!(file.parent(), path.parent());
+        file
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn a_due_autosave_writes_slot_1_and_keeps_the_title_path_config_and_vehicles() {
+        let (mut app, path, t0) = autosave_case("due", "<version>3</version>", Settings::default());
+        assert_eq!(
+            tick_showing(&mut app, t0, Duration::ZERO),
+            (false, Some(10 * MINUTE))
+        );
+        edit(&mut app);
+        let title = window_title(app.doc.as_ref());
+        assert!(title.ends_with(" *"));
+        // Idle: the frame asks for a repaint at the due time.
+        assert_eq!(
+            tick_showing(&mut app, t0, 9 * MINUTE),
+            (false, Some(MINUTE))
+        );
+        assert!(!autosave_file(&path, 1).exists());
+        assert_eq!(
+            tick_showing(&mut app, t0, 10 * MINUTE),
+            (true, Some(10 * MINUTE))
+        );
+        let bytes = std::fs::read(autosave_file(&path, 1)).expect("autosave written");
+        assert_eq!(config_xml::load(&bytes).expect("loads").network.len(), 2);
+        assert_eq!(window_title(app.doc.as_ref()), title, "still dirty");
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.path, path);
+        assert!(!path.exists(), "the config itself is not written");
+        let vehicles = std::fs::read_to_string(path.with_file_name("vehicles.xml"));
+        assert_eq!(vehicles.expect("vehicles.xml"), VEHICLES);
+        assert!(app.error.is_none() && doc.notice.is_none());
+        // The line shows for 10 s.
+        let label = |app: &App| app.autosave_label.as_ref().map(|l| l.text.clone());
+        let shown = Some("Autosaved to AutoDrive_config_autosave_1.xml".to_owned());
+        assert_eq!(label(&app), shown);
+        let at = 10 * MINUTE + Duration::from_secs(1);
+        let (_, wait) = tick_showing(&mut app, t0, at);
+        assert_eq!(wait, Some(Duration::from_secs(10)));
+        let (_, wait) = tick_showing(&mut app, t0, at + Duration::from_secs(9));
+        assert_eq!((label(&app), wait), (shown, Some(Duration::from_secs(1))));
+        let (_, wait) = tick_showing(&mut app, t0, at + Duration::from_secs(10));
+        assert_eq!(
+            (label(&app), wait),
+            (None, Some(Duration::ZERO)),
+            "one last repaint"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_notice_ends_the_autosaved_line() {
+        let (mut app, path, t0) =
+            autosave_case("label", "<version>3</version>", Settings::default());
+        tick_showing(&mut app, t0, Duration::ZERO);
+        edit(&mut app);
+        assert!(tick_showing(&mut app, t0, 10 * MINUTE).0);
+        assert!(app.autosave_label.is_some());
+        app.doc
+            .as_mut()
+            .expect("doc")
+            .add_notice("Something".to_owned());
+        tick_showing(&mut app, t0, 10 * MINUTE);
+        assert!(app.autosave_label.is_none());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_clean_or_unchanged_document_is_not_autosaved() {
+        let (mut app, path, t0) =
+            autosave_case("clean", "<version>3</version>", Settings::default());
+        tick(&mut app, t0, Duration::ZERO);
+        // Clean: nothing written, the timer restarts.
+        assert_eq!(tick(&mut app, t0, 10 * MINUTE), (false, Some(10 * MINUTE)));
+        assert!(!autosave_file(&path, 1).exists());
+        edit(&mut app);
+        assert_eq!(tick(&mut app, t0, 19 * MINUTE), (false, Some(MINUTE)));
+        assert!(tick(&mut app, t0, 20 * MINUTE).0);
+        // Unchanged since the autosave: nothing at the next interval; a selection
+        // change is no edit either.
+        let id = first(&app);
+        let doc = app.doc.as_mut().expect("doc");
+        doc.selection.insert(id);
+        doc.revision += 1;
+        assert_eq!(tick(&mut app, t0, 30 * MINUTE), (false, Some(10 * MINUTE)));
+        assert!(!autosave_file(&path, 2).exists());
+        // Another edit goes to the next slot.
+        edit(&mut app);
+        assert!(tick(&mut app, t0, 40 * MINUTE).0);
+        let bytes = std::fs::read(autosave_file(&path, 2)).expect("slot 2 written");
+        assert_eq!(config_xml::load(&bytes).expect("loads").network.len(), 3);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_due_autosave_waits_for_previews_selections_dialogs_and_saves() {
+        let (mut app, path, t0) =
+            autosave_case("wait", "<version>3</version>", Settings::default());
+        tick(&mut app, t0, Duration::ZERO);
+        edit(&mut app);
+        // A pending connect start.
+        app.run(Action::ConnectTool);
+        app.view.hovered_node = Some(first(&app));
+        app.click(1025.0, 1026.0, false);
+        assert!(app.tool.as_ref().is_some_and(|t| t.in_progress()));
+        assert_eq!(tick(&mut app, t0, 10 * MINUTE), (false, None));
+        assert_eq!(
+            tick(&mut app, t0, 11 * MINUTE),
+            (false, None),
+            "still waits"
+        );
+        assert!(!autosave_file(&path, 1).exists());
+        // Once it ends, the next frame writes.
+        app.set_tool(None);
+        app.view.hovered_node = None;
+        assert!(tick(&mut app, t0, 11 * MINUTE).0);
+        assert!(autosave_file(&path, 1).exists());
+        // A drag of the move tool.
+        edit(&mut app);
+        app.run(Action::MoveTool);
+        let id = first(&app);
+        let start = DragEvent::Start {
+            at: (1025.5, 1026.0),
+            node: Some(id),
+        };
+        drag(&mut app, start, false);
+        drag(
+            &mut app,
+            DragEvent::Move {
+                at: (1040.5, 1030.0),
+            },
+            false,
+        );
+        assert_eq!(tick(&mut app, t0, 21 * MINUTE), (false, None));
+        drag(
+            &mut app,
+            DragEvent::End {
+                at: (1040.5, 1030.0),
+            },
+            false,
+        );
+        app.set_tool(None);
+        // A selection being drawn, each dialog kind, the prompt and a running save.
+        let blocks: [fn(&mut App, bool); 5] = [
+            |app, on| {
+                if on {
+                    app.view.start_select((1000.0, 1000.0));
+                } else {
+                    app.view = MapView::default();
+                }
+            },
+            |app, on| app.overlap_dialog = on.then(|| OVERLAP_DEFAULT.to_owned()),
+            |app, on| app.prompt = on.then_some(Pending::Close),
+            |app, on| app.saving = on,
+            |app, on| app.loading = on,
+        ];
+        let mut at = 21 * MINUTE;
+        for (i, block) in blocks.iter().enumerate() {
+            block(&mut app, true);
+            assert_eq!(tick(&mut app, t0, at), (false, None), "block {i}");
+            block(&mut app, false);
+            assert!(tick(&mut app, t0, at).0, "block {i} ended");
+            edit(&mut app);
+            at += 10 * MINUTE;
+        }
+        assert!(app.error.is_none());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_read_only_document_or_autosave_off_is_never_autosaved() {
+        let (mut app, path, t0) =
+            autosave_case("readonly", "<markerID>1</markerID>", Settings::default());
+        app.doc.as_mut().expect("doc").history.mark_unsaved();
+        assert!(app.dirty());
+        assert_eq!(tick(&mut app, t0, Duration::ZERO), (false, None));
+        assert_eq!(tick(&mut app, t0, 100 * MINUTE), (false, None));
+        cleanup(&path);
+        let mut settings = Settings::default();
+        settings.global.autosave = false;
+        let (mut app, path, t0) = autosave_case("off", "<version>3</version>", settings);
+        edit(&mut app);
+        assert_eq!(tick(&mut app, t0, Duration::ZERO), (false, None));
+        assert_eq!(tick(&mut app, t0, 100 * MINUTE), (false, None));
+        let files = std::fs::read_dir(path.parent().expect("dir"))
+            .expect("ls")
+            .count();
+        assert_eq!(files, 1, "only vehicles.xml");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_failed_autosave_adds_a_notice_and_retries_after_the_interval() {
+        let (mut app, path, t0) =
+            autosave_case("fails", "<version>3</version>", Settings::default());
+        tick(&mut app, t0, Duration::ZERO);
+        edit(&mut app);
+        // The folder is gone, so the autosave cannot be written.
+        cleanup(&path);
+        assert!(tick(&mut app, t0, 10 * MINUTE).0);
+        let doc = app.doc.as_ref().expect("doc");
+        let notice = doc.notice.clone().expect("a notice");
+        assert!(notice.starts_with(jobs::AUTOSAVE_FAILED), "{notice}");
+        assert!(
+            notice.contains("AutoDrive_config_autosave_1.xml"),
+            "{notice}"
+        );
+        assert!(app.error.is_none() && app.autosave_label.is_none());
+        assert!(doc.is_dirty() && doc.path == path);
+        assert_eq!(tick(&mut app, t0, 15 * MINUTE), (false, Some(5 * MINUTE)));
+        // Retried, as nothing was autosaved.
+        std::fs::create_dir_all(path.parent().expect("dir")).expect("dir again");
+        assert!(tick(&mut app, t0, 20 * MINUTE).0);
+        assert!(autosave_file(&path, 1).exists());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_save_after_an_autosave_keeps_the_files_and_restarts_the_timer() {
+        let (mut app, path, t0) =
+            autosave_case("saved", "<version>3</version>", Settings::default());
+        tick(&mut app, t0, Duration::ZERO);
+        edit(&mut app);
+        assert!(tick(&mut app, t0, 10 * MINUTE).0);
+        let doc = app.doc.as_ref().expect("doc");
+        let (done_tx, done_rx) = mpsc::channel();
+        app.saving = true;
+        jobs::spawn_save(
+            doc.config.clone(),
+            jobs::vehicles_to_patch(doc, &path),
+            doc.epoch,
+            doc.history.save_point(),
+            path.clone(),
+            app.tx.clone(),
+            move || {
+                let _ = done_tx.send(());
+            },
+        );
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("save finished");
+        app.poll_jobs();
+        assert!(!app.dirty() && app.error.is_none());
+        assert!(path.exists() && autosave_file(&path, 1).exists());
+        // The timer restarts at the next check after the save.
+        assert_eq!(tick(&mut app, t0, 12 * MINUTE), (false, Some(10 * MINUTE)));
+        edit(&mut app);
+        assert_eq!(tick(&mut app, t0, 21 * MINUTE), (false, Some(MINUTE)));
+        assert!(tick(&mut app, t0, 22 * MINUTE).0);
+        assert!(autosave_file(&path, 2).exists());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_new_document_restarts_the_autosave_timer() {
+        let (mut app, path, t0) =
+            autosave_case("reload", "<version>3</version>", Settings::default());
+        tick(&mut app, t0, Duration::ZERO);
+        load(&mut app, "<version>3</version>");
+        app.doc.as_mut().expect("doc").path = path.clone();
+        edit(&mut app);
+        assert_eq!(tick(&mut app, t0, 5 * MINUTE), (false, Some(10 * MINUTE)));
+        assert!(!tick(&mut app, t0, 10 * MINUTE).0);
+        assert!(tick(&mut app, t0, 15 * MINUTE).0);
+        cleanup(&path);
     }
 }
 

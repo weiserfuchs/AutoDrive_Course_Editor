@@ -131,6 +131,12 @@ pub enum JobResult {
         start: MergeStart,
         result: Result<(), String>,
     },
+    /// An autosave of the document of `epoch` at `point`: the file written, or why not.
+    Autosaved {
+        epoch: u64,
+        point: SavePoint,
+        result: Result<PathBuf, String>,
+    },
 }
 
 /// The document state a merge's backup was written from: the merge applies only while it
@@ -178,6 +184,68 @@ pub fn spawn_merge_backup(
             Err(e) => tracing::warn!("{e}"),
         }
         let _ = tx.send(JobResult::MergeBackup { start, result });
+        notify();
+    });
+}
+
+/// The notice line of a failed autosave, before the reason.
+pub const AUTOSAVE_FAILED: &str = "Autosave failed: ";
+
+/// `<config dir>/<config stem>_autosave_<slot>.xml` (Java `autoSaveGameConfigFile`).
+pub fn autosave_path(config: &Path, slot: u32) -> PathBuf {
+    let stem = config
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    config.with_file_name(format!("{stem}_autosave_{slot}.xml"))
+}
+
+/// The slot the next autosave of `config` writes: the one after the newest existing
+/// autosave file of slots 1 to `slots` (by modification time), wrapping after `slots`;
+/// 1 when none exists.
+pub fn next_slot(config: &Path, slots: u32) -> u32 {
+    let slots = slots.max(1);
+    let newest = (1..=slots)
+        .filter_map(|slot| {
+            let modified = std::fs::metadata(autosave_path(config, slot))
+                .and_then(|m| m.modified())
+                .ok()?;
+            Some((modified, slot))
+        })
+        .max();
+    newest.map_or(1, |(_, slot)| slot % slots + 1)
+}
+
+/// Writes `snapshot` to the next autosave slot of `config` on a background thread,
+/// atomically (AD-16); path, saved state, `vehicles.xml` and the config itself stay as
+/// they are. Then calls `notify`.
+pub fn spawn_autosave(
+    snapshot: LoadedConfig,
+    epoch: u64,
+    point: SavePoint,
+    config: PathBuf,
+    slots: u32,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        let target = autosave_path(&config, next_slot(&config, slots));
+        tracing::info!("autosaving {}", target.display());
+        let result = match config_xml::save_to(&snapshot, &target) {
+            Ok(()) => {
+                tracing::info!("autosaved {}", target.display());
+                Ok(target)
+            }
+            Err(e) => {
+                tracing::warn!("autosave failed: {e}");
+                Err(e.to_string())
+            }
+        };
+        let _ = tx.send(JobResult::Autosaved {
+            epoch,
+            point,
+            result,
+        });
         notify();
     });
 }
@@ -681,6 +749,8 @@ pub fn apply_result(
                 if let Some(d) = doc.as_mut().filter(|d| d.epoch == epoch) {
                     d.history.mark_saved_at(point);
                     d.path = target;
+                    // A save restarts the autosave timer.
+                    d.autosave_since = None;
                 }
                 warning
             }
@@ -770,6 +840,20 @@ pub fn apply_result(
                 return None;
             }
             d.merge_overlaps().err().map(|e| e.to_string())
+        }
+        // Only the record of what was autosaved or a notice changes, for its document
+        // only (AD-16, AD-18); `App::poll_jobs` shows the success.
+        JobResult::Autosaved {
+            epoch,
+            point,
+            result,
+        } => {
+            let d = doc.as_mut().filter(|d| d.epoch == epoch)?;
+            match result {
+                Ok(_) => d.autosaved = Some(point),
+                Err(reason) => d.add_notice(format!("{AUTOSAVE_FAILED}{reason}")),
+            }
+            None
         }
         // The files are saved either way; they attach only to the document they were
         // imported for, and only when its map name is the folder name.
@@ -1703,5 +1787,62 @@ mod tests {
         println!("notice {:?}, saved {found:?}", downloaded.notice);
         assert_eq!(downloaded.image.rgba.len(), 2048 * 2048 * 4);
         assert!(found.is_some());
+    }
+
+    #[test]
+    fn autosave_path_is_beside_the_config_with_the_slot() {
+        assert_eq!(
+            autosave_path(Path::new("dir/AutoDrive_config.xml"), 3),
+            Path::new("dir/AutoDrive_config_autosave_3.xml")
+        );
+        assert_eq!(
+            autosave_path(Path::new("routes"), 1),
+            Path::new("routes_autosave_1.xml")
+        );
+    }
+
+    /// Writes the autosave files of `slots` beside `config`, each newer than the one before.
+    fn autosaves(config: &Path, slots: &[u32]) {
+        let start = std::time::SystemTime::now() - Duration::from_secs(3600);
+        for (i, slot) in slots.iter().enumerate() {
+            let path = autosave_path(config, *slot);
+            std::fs::write(&path, "x").expect("write");
+            let file = std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("open");
+            let modified = start + Duration::from_secs(60 * i as u64);
+            file.set_modified(modified).expect("set mtime");
+        }
+    }
+
+    #[test]
+    fn the_next_slot_follows_the_newest_autosave() {
+        let dir = temp_dir("autosave_rotation");
+        let config = dir.join("AutoDrive_config.xml");
+        assert_eq!(next_slot(&config, 10), 1, "none exists");
+        // Slots 1..3 exist, 3 newest: slot 4.
+        autosaves(&config, &[1, 2, 3]);
+        assert_eq!(next_slot(&config, 10), 4);
+        // The modification time counts, not the number: 2 rewritten last gives 3.
+        autosaves(&config, &[1, 3, 2]);
+        assert_eq!(next_slot(&config, 10), 3);
+        // Another config's autosaves do not count.
+        autosaves(&dir.join("other.xml"), &[7]);
+        assert_eq!(next_slot(&config, 10), 3);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn the_next_slot_wraps_after_the_last() {
+        let dir = temp_dir("autosave_wrap");
+        let config = dir.join("AutoDrive_config.xml");
+        autosaves(&config, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(next_slot(&config, 10), 1, "slot 10 newest");
+        // With fewer slots, files of higher slots are ignored and 3 wraps to 1.
+        autosaves(&config, &[1, 2, 3, 10]);
+        assert_eq!(next_slot(&config, 3), 1);
+        assert_eq!(next_slot(&config, 1), 1);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }
