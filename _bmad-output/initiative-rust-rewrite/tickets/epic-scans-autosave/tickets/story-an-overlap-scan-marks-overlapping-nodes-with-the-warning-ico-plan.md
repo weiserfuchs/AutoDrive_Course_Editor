@@ -3,14 +3,14 @@ title: 'An overlap scan marks overlapping nodes with the warning icon'
 type: 'feature'
 ticket: '1'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '076a0a4'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -91,3 +91,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - checked: marks follow edits by rechecking only around placed nodes (µs per moved node), with one full rescan (about 9 ms) only for edits touching more than 64 nodes and an eighth of the network; a randomized test keeps the kept marks equal to a full scan.
+  - accepted: the count notice follows every edit; a marked node shows the overlap icon instead of the height warning (as Java); the dialog always opens with 0.1.
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 395).
