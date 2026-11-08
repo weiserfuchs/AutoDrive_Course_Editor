@@ -3,14 +3,14 @@ title: 'A DDS import shows the map image and saves it for the next load'
 type: 'feature'
 ticket: '2'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '82e97cf'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -85,3 +85,7 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - accepted: the crop is the centre rectangle w/2 × h/2 (Java and the Odd-size row; the Approach's "square" holds for square DDS files); a write failing after Yes leaves the shown image as with No; a job that finishes after the document was replaced still writes its PNG for its own map, which the next load of that map uses.
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 355).
