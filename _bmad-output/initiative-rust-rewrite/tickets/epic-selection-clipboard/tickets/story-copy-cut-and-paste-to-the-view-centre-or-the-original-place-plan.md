@@ -3,7 +3,7 @@ title: 'Copy, cut and paste to the view centre or the original place'
 type: 'feature'
 ticket: '9'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '56f7bea'
 route: 'full'
 route_source: 'auto'
