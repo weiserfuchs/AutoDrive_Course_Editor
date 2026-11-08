@@ -6,7 +6,7 @@ use eframe::egui;
 use ad_core::command::{Command, DeleteNodes, Disconnect, Transaction};
 use ad_core::geometry::MapGeometry;
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolContext, acts_on_selection};
 use crate::view::ViewTransform;
 
 pub const NAME: &str = "Delete";
@@ -22,7 +22,14 @@ impl Tool for DeleteTool {
         NAME
     }
 
+    /// A click on a selected node deletes the whole selection, in id order.
     fn on_click(&mut self, ctx: &ToolContext) -> Option<Transaction> {
+        if let Some(selection) = acts_on_selection(ctx) {
+            let ids = selection.iter().copied().collect();
+            return Some(Transaction::new(vec![Command::DeleteNodes(
+                DeleteNodes::new(ids),
+            )]));
+        }
         let command = match (ctx.hovered_node, ctx.hovered_edge) {
             (Some(id), _) => Command::DeleteNodes(DeleteNodes::new(vec![id])),
             (None, Some((a, b))) => Command::Disconnect(Disconnect::new(a, b)),
@@ -79,13 +86,22 @@ mod tests {
         node: Option<NodeId>,
         edge: Option<(NodeId, NodeId)>,
     ) -> Option<Transaction> {
+        click_with(net, &BTreeSet::new(), node, edge)
+    }
+
+    fn click_with(
+        net: &Network,
+        selection: &BTreeSet<NodeId>,
+        node: Option<NodeId>,
+        edge: Option<(NodeId, NodeId)>,
+    ) -> Option<Transaction> {
         let map = MapContext::new(None, 1, 2.0, (2.0, 2.0));
         DeleteTool.on_click(&ToolContext {
             x: 0.0,
             z: 0.0,
             map: &map,
             net,
-            selection: &BTreeSet::new(),
+            selection,
             snap: false,
             hovered_node: node,
             hovered_edge: edge,
@@ -158,5 +174,37 @@ mod tests {
     fn a_click_on_empty_map_does_nothing() {
         let (net, _) = setup();
         assert!(click(&net, None, None).is_none());
+    }
+
+    #[test]
+    fn a_click_on_a_selected_node_deletes_the_whole_selection_in_one_undo() {
+        let (mut net, [a, b, c]) = setup();
+        let d = net.add_node(30.0, 4.0, 0.0, NodeFlag::REGULAR);
+        net.connect(c, d, ConnectionShape::OneWay).expect("ok");
+        let before = snapshot(&net);
+        let selection = BTreeSet::from([a, b, c]);
+        let mut tx = click_with(&net, &selection, Some(b), None).expect("a transaction");
+        assert_eq!(tx.0.len(), 1, "one DeleteNodes");
+        tx.apply(&mut net).expect("applies");
+        assert_eq!(net.order(), [d]);
+        assert!(net.markers().is_empty());
+        assert!(net.node(d).expect("d").incoming().is_empty());
+        tx.revert(&mut net).expect("reverts");
+        assert_eq!(snapshot(&net), before);
+    }
+
+    #[test]
+    fn a_click_off_the_selection_deletes_that_target_alone() {
+        let (mut net, [a, b, c]) = setup();
+        let selection = BTreeSet::from([a, b]);
+        let mut tx = click_with(&net, &selection, Some(c), None).expect("a transaction");
+        tx.apply(&mut net).expect("applies");
+        assert_eq!(net.order(), [a, b]);
+        tx.revert(&mut net).expect("reverts");
+        // A connection inside the selection is removed alone too.
+        let mut tx = click_with(&net, &selection, None, Some((a, b))).expect("a transaction");
+        tx.apply(&mut net).expect("applies");
+        assert_eq!(net.order(), [a, b, c]);
+        assert_eq!(net.connection_kind(a, b), ConnectionKind::None);
     }
 }
