@@ -3,7 +3,7 @@ title: 'Edit Location sets a node''s x, y and z with undo'
 type: 'feature'
 ticket: '8'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '22d1172'
 route: 'full'
 route_source: 'auto'
