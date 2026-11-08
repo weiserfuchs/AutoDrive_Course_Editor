@@ -61,9 +61,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `overlaps` -- tests for Pair, Height, Distance, Group
-- [ ] marks, following edits, drawing -- tests for Follow, Clear, Read-only, a frame-time case with the fixture's marks
-- [ ] dialog -- tests for Invalid; the Clean count recorded in the notes
+- [x] `overlaps` -- tests for Pair, Height, Distance, Group
+- [x] marks, following edits, drawing -- tests for Follow, Clear, Read-only, a frame-time case with the fixture's marks
+- [x] dialog -- tests for Invalid; the Clean count recorded in the notes
 
 **Acceptance Criteria:**
 - Given a copy of the fixture with two nodes pasted onto existing ones (Shift+V), when the user runs "Find overlapping nodes…" with 0.1, then those nodes show the warning icon, and moving one away removes its mark.
@@ -77,6 +77,16 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **Scan:** `ad_core::scan::overlaps(net, d)` (new `scan.rs`, pure): for each node, `within(x, z, d)` candidates kept when the 3D distance is at most `d` (inclusive).
+- **Timing (release, fixture, 35 652 nodes):** a full scan costs about 8.4-9.4 ms at d = 0.1 and 9-12 ms at d = 1.0, over the ~2 ms budget, so marks are not rescanned after each edit. Instead `scan::placed_nodes(tx)` (the nodes a transaction adds, pastes, deletes or moves; an exhaustive match, so a new command must decide) and `scan::around` give the nodes within `d` of them before and after the apply/undo/redo, and `scan::remark` recomputes only those: about 1-2 µs for one moved node. Remarking around every node would cost about 43-50 ms, so an entry placing more than 64 nodes and more than an eighth of the network gets one full rescan instead (`around_or_rescan` in `document.rs`). A randomized ad-core test checks that the kept marks equal a full scan after every apply and revert.
+- **Clean:** the fixture has **0** overlapping nodes at d = 0.1 (1 313 at d = 1.0). Because d = 0.1 marks nothing, the frame-time cases draw the d = 1.0 marks.
+- **Marks and notice:** `Document.overlap: Option<(f64, BTreeSet<NodeId>)>`, set by `scan_overlaps`, cleared by `clear_overlaps`; a new document starts with none, so opening another file clears them. The notice line ("N overlapping nodes found" / "No overlapping nodes") is replaced after every rescan or follow, so it shows the current count; clearing drops it and keeps other notice lines. Nothing touches the history, so read-only configs scan and stay clean.
+- **Drawing:** `ViewHooks::overlap()` (ToolHooks gets `overlap` from the document) hands the marks to `paint`, which draws `Icons::warning` (20 px, centred on the node at its preview position, culled to the view, one mesh) at every zoom, like the parking icon. As in Java `NodeDrawThread` 110-117, a marked node shows the overlap icon instead of the height-warning icon. The `dead_code` allow on `Icons::warning` is gone.
+- **UI:** a "Scan" menu beside "Import" (enabled with a document): "Find overlapping nodes…" opens a modal (`App.overlap_dialog`, part of `dialog_shown`, closed when a new document loads) with a distance field prefilled "0.1". It reuses `edit_location::parse(text, 0.001, 100)` (comma read as the decimal point, rounded to three decimals) with its red notes; OK is disabled and Enter ignored while the text is refused. "Clear overlap marks" is enabled while marks are shown.
+- **Tests:** ad-core `scan::tests` (pair, height, distance incl. inclusive bound, group, empty, marks kept around placed nodes equal a full scan); ad-app `document::tests` (follow a move with undo/redo and a delete, a new node marked, an edit placing many nodes rescans, clear, read-only); `ui::tests::the_overlap_dialog_refuses_an_invalid_distance_and_scans_a_valid_one`; `tests::nodes_pasted_in_place_are_marked_and_a_moved_one_loses_its_mark` (the acceptance criterion, with Copy and Paste in place), `tests::a_new_document_clears_the_overlap_marks_and_closes_the_scan_dialog`, `tests::a_read_only_document_can_be_scanned`; `view::tests::overlap_marks_draw_the_warning_icon_in_place_of_the_height_warning`; frame-time cases "static: min zoom, overlap marks (d = 1.0)" and "static: mid zoom, dense, overlap marks (d = 1.0)", plus printed scan and follow timings.
+- **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass. `frame_time` (release): every case under 16 ms; overlap-mark cases best-round median/max 2.26/2.35 ms (min zoom) and 0.57/0.59 ms (mid zoom, dense), against 2.32/2.82 and 0.59/0.60 ms for the same views without marks; highest case max: rotate at min zoom, whole network, 12.5 ms.
+- **Not verified:** the GUI by hand (dialogs need a human).
 
 ## Plan Change Log
 

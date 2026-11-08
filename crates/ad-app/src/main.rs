@@ -44,6 +44,15 @@ enum Choice {
     Cancel,
 }
 
+/// The prefilled text of the overlap scan's distance field (Java `searchDistance`).
+const OVERLAP_DEFAULT: &str = "0.1";
+
+/// The overlap scan's distance from its field: a number from 0.001 to 100, a comma read
+/// as the decimal point.
+fn overlap_distance(text: &str) -> Result<f64, tools::edit_location::Note> {
+    tools::edit_location::parse(text, 0.001, 100.0)
+}
+
 /// The window title: the open file's path, and ` *` while the document is dirty.
 fn window_title(doc: Option<&Document>) -> String {
     match doc {
@@ -99,6 +108,8 @@ struct App {
     marker: Option<tools::marker::MarkerDialog>,
     /// The groups window, while it is shown.
     groups: Option<tools::marker::GroupsWindow>,
+    /// The text of the overlap scan's distance field, while its dialog is shown.
+    overlap_dialog: Option<String>,
     /// A tool's info for the toolbar's notice line, shown until the next click on the map.
     tool_notice: Option<&'static str>,
     /// Set once closing was agreed; the next close request is not intercepted.
@@ -142,6 +153,7 @@ impl App {
             location: None,
             marker: None,
             groups: None,
+            overlap_dialog: None,
             tool_notice: None,
             allow_close: false,
             title: window_title(None),
@@ -272,6 +284,7 @@ impl App {
                 self.location = None;
                 self.marker = None;
                 self.groups = None;
+                self.overlap_dialog = None;
                 self.tool_notice = None;
                 self.zip_preview = None;
                 if let Some(name) = download {
@@ -338,12 +351,13 @@ impl App {
         self.doc.as_ref().is_some_and(document::Document::editable)
     }
 
-    /// Whether a modal dialog (Edit location, marker, groups, the map image replace
-    /// question or the zip preview) is shown.
+    /// Whether a modal dialog (Edit location, marker, groups, overlap scan, the map image
+    /// replace question or the zip preview) is shown.
     fn dialog_shown(&self) -> bool {
         self.location.is_some()
             || self.marker.is_some()
             || self.groups.is_some()
+            || self.overlap_dialog.is_some()
             || self.zip_preview.is_some()
             || self
                 .doc
@@ -685,6 +699,17 @@ impl App {
         };
         if let Err(e) = doc.apply(tx) {
             self.error = Some(e.to_string());
+        }
+    }
+
+    /// Closes the overlap scan dialog. With `ok` and a valid distance, marks the open
+    /// document's overlapping nodes; read-only documents too, as the scan changes no data.
+    fn finish_overlap(&mut self, ok: bool) {
+        let Some(text) = self.overlap_dialog.take() else {
+            return;
+        };
+        if ok && let (Some(doc), Ok(distance)) = (&mut self.doc, overlap_distance(&text)) {
+            doc.scan_overlaps(distance);
         }
     }
 
@@ -1043,6 +1068,7 @@ impl eframe::App for App {
         ui::location_dialog(self, &ctx);
         ui::marker_dialog(self, &ctx);
         ui::groups_window(self, &ctx);
+        ui::overlap_dialog(self, &ctx);
         ui::zip_preview_window(self, &ctx);
         ui::replace_image_prompt(self, &ctx);
         ui::unsaved_prompt(self, &ctx);
@@ -3176,6 +3202,72 @@ mod tests {
     fn marker_names(app: &App) -> Vec<String> {
         let net = &app.doc.as_ref().expect("doc").config.network;
         net.markers().iter().map(|m| m.name.clone()).collect()
+    }
+
+    /// Runs "Find overlapping nodes…" with `distance` as the dialog's OK does.
+    fn scan(app: &mut App, distance: &str) {
+        app.overlap_dialog = Some(distance.to_owned());
+        assert!(app.dialog_shown());
+        app.finish_overlap(true);
+        assert!(!app.dialog_shown());
+    }
+
+    fn overlap_marks(app: &App) -> Option<Vec<NodeId>> {
+        let doc = app.doc.as_ref().expect("doc");
+        doc.overlap
+            .as_ref()
+            .map(|(_, m)| m.iter().copied().collect())
+    }
+
+    #[test]
+    fn nodes_pasted_in_place_are_marked_and_a_moved_one_loses_its_mark() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        let [a, b, c] = group(&mut app);
+        scan(&mut app, "0.1");
+        assert_eq!(overlap_marks(&app), Some(vec![]));
+        app.run(Action::Copy);
+        app.run(Action::PasteInPlace);
+        // Marks shown follow the paste.
+        let pasted = selection(&app);
+        assert_eq!(overlap_marks(&app), Some(vec![a, b, pasted[0], pasted[1]]));
+        scan(&mut app, "0.1");
+        assert_eq!(overlap_marks(&app), Some(vec![a, b, pasted[0], pasted[1]]));
+        assert_eq!(
+            app.doc.as_ref().expect("doc").notice.as_deref(),
+            Some("4 overlapping nodes found")
+        );
+        let doc = app.doc.as_mut().expect("doc");
+        let n = doc.config.network.node(pasted[0]).expect("node");
+        let from = (n.x, n.y, n.z);
+        let away = Transaction::new(vec![Command::MoveNodes(ad_core::command::MoveNodes {
+            moves: vec![(pasted[0], from, (from.0 + 50.0, from.1, from.2))],
+        })]);
+        doc.apply(away).expect("applies");
+        assert_eq!(overlap_marks(&app), Some(vec![b, pasted[1]]));
+        assert!(!overlap_marks(&app).expect("marks").contains(&c));
+    }
+
+    #[test]
+    fn a_new_document_clears_the_overlap_marks_and_closes_the_scan_dialog() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        scan(&mut app, "0.1");
+        assert!(overlap_marks(&app).is_some());
+        app.overlap_dialog = Some("0.1".to_owned());
+        load(&mut app, "<version>3</version>");
+        assert!(overlap_marks(&app).is_none());
+        assert!(app.overlap_dialog.is_none());
+    }
+
+    #[test]
+    fn a_read_only_document_can_be_scanned() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        assert!(!app.editable());
+        scan(&mut app, "0.1");
+        assert_eq!(overlap_marks(&app), Some(vec![]));
+        assert!(!app.dirty());
     }
 
     #[test]

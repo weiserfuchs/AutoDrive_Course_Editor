@@ -58,8 +58,7 @@ pub fn rasterise(svg: &[u8], px: u32) -> Option<egui::ColorImage> {
 pub struct Icons {
     pub marker: Option<egui::TextureHandle>,
     pub parking: Option<egui::TextureHandle>,
-    /// Prepared for the overlap scan (a later epic); no node draws it yet.
-    #[allow(dead_code)]
+    /// Drawn on the nodes the overlap scan marks.
     pub warning: Option<egui::TextureHandle>,
     pub warning_y: Option<egui::TextureHandle>,
 }

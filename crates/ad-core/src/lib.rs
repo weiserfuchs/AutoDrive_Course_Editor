@@ -8,3 +8,4 @@ pub mod heightmap;
 pub mod history;
 pub mod map_context;
 pub mod network;
+pub mod scan;

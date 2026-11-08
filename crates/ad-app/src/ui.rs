@@ -101,6 +101,21 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                     }
                 });
             });
+            let has_marks = app.doc.as_ref().is_some_and(|d| d.overlap.is_some());
+            ui.add_enabled_ui(has_doc, |ui| {
+                ui.menu_button("Scan", |ui| {
+                    if ui.button("Find overlapping nodes…").clicked() {
+                        app.overlap_dialog = Some(crate::OVERLAP_DEFAULT.to_owned());
+                    }
+                    if ui
+                        .add_enabled(has_marks, egui::Button::new("Clear overlap marks"))
+                        .clicked()
+                        && let Some(doc) = &mut app.doc
+                    {
+                        doc.clear_overlaps();
+                    }
+                });
+            });
             ui.checkbox(&mut app.view.show_grid, "Grid");
             ui.separator();
             toolbar(app, ui);
@@ -233,6 +248,8 @@ pub(crate) struct ToolHooks<'a> {
     pub lasso: bool,
     /// The document revision, handed to the tool's `paint_selection`.
     pub revision: u64,
+    /// The nodes the overlap scan marks, handed to the view.
+    pub overlap: Option<&'a BTreeSet<NodeId>>,
     pub commit: Option<Transaction>,
     pub select_event: Option<SelectEvent>,
 }
@@ -253,6 +270,7 @@ impl<'a> ToolHooks<'a> {
             snap,
             lasso: false,
             revision: 0,
+            overlap: None,
             commit: None,
             select_event: None,
         }
@@ -319,6 +337,10 @@ impl ViewHooks for ToolHooks<'_> {
 
     fn selection(&self) -> Option<&BTreeSet<NodeId>> {
         Some(self.selection)
+    }
+
+    fn overlap(&self) -> Option<&BTreeSet<NodeId>> {
+        self.overlap
     }
 
     fn drag(&mut self, event: DragEvent) -> bool {
@@ -432,6 +454,7 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     let mut hooks = ToolHooks::new(tool, &doc.map, &doc.config.network, &doc.selection, snap);
     hooks.lasso = app.lasso;
     hooks.revision = doc.revision;
+    hooks.overlap = doc.overlap.as_ref().map(|(_, marks)| marks);
     let clicked = app.view.show(
         ui,
         &doc.config.network,
@@ -588,6 +611,40 @@ pub(crate) fn location_dialog(app: &mut App, ctx: &egui::Context) {
         app.finish_location(true);
     } else if cancel || closed {
         app.finish_location(false);
+    }
+}
+
+/// The overlap scan dialog: a distance field with a red note while its text is refused.
+/// OK or Enter, with the distance valid, scans; Cancel, Escape or a click beside the
+/// dialog scans nothing.
+pub(crate) fn overlap_dialog(app: &mut App, ctx: &egui::Context) {
+    let Some(text) = &mut app.overlap_dialog else {
+        return;
+    };
+    let (mut ok, mut cancel) = (false, false);
+    let modal = egui::Modal::new(egui::Id::unique("overlap_scan")).show(ctx, |ui| {
+        ui.heading("Find overlapping nodes");
+        ui.label("Distance");
+        ui.text_edit_singleline(text);
+        let valid = match crate::overlap_distance(text) {
+            Ok(_) => true,
+            Err(note) => {
+                ui.colored_label(ui.visuals().error_fg_color, note.to_string());
+                false
+            }
+        };
+        ui.horizontal(|ui| {
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ok = ui.add_enabled(valid, egui::Button::new("OK")).clicked() || (valid && enter);
+            cancel = ui.button("Cancel").clicked();
+        });
+    });
+    // Always asked, so Escape is consumed while the dialog is on top.
+    let closed = modal.should_close();
+    if ok {
+        app.finish_overlap(true);
+    } else if cancel || closed {
+        app.finish_overlap(false);
     }
 }
 
@@ -1485,6 +1542,68 @@ mod tests {
         let net = &app.doc.as_ref().expect("doc").config.network;
         assert_eq!(net.markers()[0].name, "Hof");
         assert_eq!(net.markers()[0].group, "All");
+    }
+
+    /// One frame of the overlap scan dialog with `events`; returns the texts it painted.
+    fn overlap_frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> String {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 1024.0),
+            )),
+            time: Some(ctx.input(|i| i.time) + 0.016),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| overlap_dialog(app, ui.ctx()));
+        out.textures_delta.clear();
+        let mut texts = Vec::new();
+        for shape in &out.shapes {
+            if let egui::Shape::Text(t) = &shape.shape {
+                texts.push(t.galley.text().to_owned());
+            }
+        }
+        texts.join("|")
+    }
+
+    #[test]
+    fn the_overlap_dialog_refuses_an_invalid_distance_and_scans_a_valid_one() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        for (text, note) in [
+            ("abc", "* Not a number"),
+            ("0", "* Must be between 0.001 and 100"),
+            ("1000", "* Must be between 0.001 and 100"),
+        ] {
+            app.overlap_dialog = Some(text.to_owned());
+            overlap_frame(&ctx, &mut app, vec![]);
+            assert!(
+                overlap_frame(&ctx, &mut app, vec![]).contains(note),
+                "{text}"
+            );
+            // Enter with the distance refused keeps the dialog and scans nothing.
+            overlap_frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+            assert!(app.overlap_dialog.is_some(), "{text}");
+            assert!(app.doc.as_ref().expect("doc").overlap.is_none(), "{text}");
+        }
+        // Escape closes it and scans nothing.
+        app.overlap_dialog = Some("0.1".to_owned());
+        overlap_frame(&ctx, &mut app, vec![key(egui::Key::Escape)]);
+        assert!(app.overlap_dialog.is_none());
+        assert!(app.doc.as_ref().expect("doc").overlap.is_none());
+        // A valid distance, with a comma, shows no note; Enter scans with it.
+        app.overlap_dialog = Some("0,5".to_owned());
+        overlap_frame(&ctx, &mut app, vec![]);
+        let texts = overlap_frame(&ctx, &mut app, vec![]);
+        assert!(
+            texts.contains("Distance") && !texts.contains('*'),
+            "{texts}"
+        );
+        overlap_frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+        assert!(app.overlap_dialog.is_none());
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.overlap.as_ref().map(|(d, _)| *d), Some(0.5));
+        assert_eq!(doc.notice.as_deref(), Some("No overlapping nodes"));
     }
 
     /// One frame of the groups window with `events`; returns the texts it painted.

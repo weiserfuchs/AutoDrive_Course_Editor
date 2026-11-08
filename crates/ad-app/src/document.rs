@@ -8,9 +8,26 @@ use ad_core::command::Transaction;
 use ad_core::history::{EntryId, History};
 use ad_core::map_context::MapContext;
 use ad_core::network::{NetworkError, NodeId};
+use ad_core::scan;
 use ad_io::config_xml::LoadedConfig;
 use ad_io::map_image::MapImage;
 use ad_io::vehicles::VehiclesFile;
+
+/// The notice line of a scan that marked no node.
+const NO_OVERLAPS: &str = "No overlapping nodes";
+/// The notice line of a scan that marked nodes, after their count.
+const OVERLAPS_FOUND_SUFFIX: &str = " overlapping nodes found";
+
+/// [`scan::around`] `nodes`, or `None` (rescan the whole network) when they are more than 64
+/// and an eighth of it: remarking around every node of the fixture costs about 43 ms, a full
+/// scan 9 ms.
+fn around_or_rescan(
+    net: &ad_core::network::Network,
+    nodes: &[NodeId],
+    distance: f64,
+) -> Option<BTreeSet<NodeId>> {
+    (nodes.len() <= (net.len() / 8).max(64)).then(|| scan::around(net, nodes, distance))
+}
 
 pub struct Document {
     pub config: LoadedConfig,
@@ -41,6 +58,9 @@ pub struct Document {
     /// redo of such an entry restore it. Records of entries gone from the history are
     /// dropped at the next `apply_selecting`.
     selections: BTreeMap<EntryId, (BTreeSet<NodeId>, BTreeSet<NodeId>)>,
+    /// The overlap scan's distance and the nodes it marks, while marks are shown; kept up
+    /// to date after every apply, undo and redo. A new document starts with none.
+    pub overlap: Option<(f64, BTreeSet<NodeId>)>,
 }
 
 impl Document {
@@ -77,6 +97,7 @@ impl Document {
             selection: BTreeSet::new(),
             revision: 0,
             selections: BTreeMap::new(),
+            overlap: None,
         }
     }
 
@@ -88,6 +109,7 @@ impl Document {
         tx: Transaction,
         select: impl FnOnce(&Transaction) -> BTreeSet<NodeId>,
     ) -> Result<EntryId, NetworkError> {
+        let near = self.overlap_around(Some(&tx));
         let before = self.selection.clone();
         let id = self.history.apply(&mut self.config.network, tx);
         if let Ok(id) = id {
@@ -98,12 +120,15 @@ impl Document {
             self.selection = after.clone();
             self.selections.insert(id, (before, after));
         }
+        self.follow_overlap(near, id.as_ref().ok().copied());
         self.prune_selection();
         id
     }
 
     pub fn apply(&mut self, tx: Transaction) -> Result<EntryId, NetworkError> {
+        let near = self.overlap_around(Some(&tx));
         let result = self.history.apply(&mut self.config.network, tx);
+        self.follow_overlap(near, result.as_ref().ok().copied());
         self.prune_selection();
         result
     }
@@ -111,7 +136,9 @@ impl Document {
     /// Returns false when there is nothing to undo or the history is read-only.
     pub fn undo(&mut self) -> bool {
         let target = self.history.undo_target();
+        let near = self.overlap_around(target.and_then(|id| self.history.transaction(id)));
         let done = self.history.undo(&mut self.config.network);
+        self.follow_overlap(near, target);
         if done && let Some((before, _)) = target.and_then(|id| self.selections.get(&id)) {
             self.selection = before.clone();
         }
@@ -122,7 +149,9 @@ impl Document {
     /// Returns false when there is nothing to redo or the history is read-only.
     pub fn redo(&mut self) -> bool {
         let target = self.history.redo_target();
+        let near = self.overlap_around(target.and_then(|id| self.history.transaction(id)));
         let done = self.history.redo(&mut self.config.network);
+        self.follow_overlap(near, target);
         if done && let Some((_, after)) = target.and_then(|id| self.selections.get(&id)) {
             self.selection = after.clone();
         }
@@ -154,13 +183,74 @@ impl Document {
 
     /// Drops the notice lines that start with `prefix`; keeps any other line.
     pub fn drop_notice_lines(&mut self, prefix: &str) {
+        self.drop_notice_lines_where(|line| line.starts_with(prefix));
+    }
+
+    fn drop_notice_lines_where(&mut self, drop: impl Fn(&str) -> bool) {
         self.notice = self.notice.take().and_then(|notice| {
-            let rest: Vec<&str> = notice
-                .lines()
-                .filter(|line| !line.starts_with(prefix))
-                .collect();
+            let rest: Vec<&str> = notice.lines().filter(|line| !drop(line)).collect();
             (!rest.is_empty()).then(|| rest.join("\n"))
         });
+    }
+
+    /// Marks every node with another node within `distance` (3D) and shows how many; the
+    /// marks then follow every apply, undo and redo. Changes no data, so it works on a
+    /// read-only document too.
+    pub fn scan_overlaps(&mut self, distance: f64) {
+        self.overlap = Some((distance, scan::overlaps(&self.config.network, distance)));
+        self.overlap_notice();
+    }
+
+    /// Removes the overlap marks and their notice.
+    pub fn clear_overlaps(&mut self) {
+        self.overlap = None;
+        self.overlap_notice();
+    }
+
+    /// The nodes whose overlap mark `tx` can change, from where its nodes are now; none
+    /// while no marks are shown. `None` asks for a full rescan instead.
+    fn overlap_around(&self, tx: Option<&Transaction>) -> Option<BTreeSet<NodeId>> {
+        match (&self.overlap, tx) {
+            (Some((distance, _)), Some(tx)) => {
+                around_or_rescan(&self.config.network, &scan::placed_nodes(tx), *distance)
+            }
+            _ => Some(BTreeSet::new()),
+        }
+    }
+
+    /// After an apply, undo or redo of `entry`: remarks `near` (from [`Self::overlap_around`]
+    /// before it) and the nodes around the entry's nodes now, so the marks equal a full
+    /// rescan without one (a full scan of the fixture costs about 9 ms, a moved node a few
+    /// µs). An entry that places many nodes gets the full rescan.
+    fn follow_overlap(&mut self, near: Option<BTreeSet<NodeId>>, entry: Option<EntryId>) {
+        let Some((distance, marks)) = &mut self.overlap else {
+            return;
+        };
+        let net = &self.config.network;
+        let after = match entry.and_then(|id| self.history.transaction(id)) {
+            Some(tx) => around_or_rescan(net, &scan::placed_nodes(tx), *distance),
+            None => Some(BTreeSet::new()),
+        };
+        match (near, after) {
+            (Some(near), Some(after)) => {
+                scan::remark(net, *distance, marks, near.into_iter().chain(after));
+            }
+            _ => *marks = scan::overlaps(net, *distance),
+        }
+        self.overlap_notice();
+    }
+
+    /// Replaces the overlap line of the notice with the current count; drops it while no
+    /// marks are shown.
+    fn overlap_notice(&mut self) {
+        self.drop_notice_lines_where(|line| {
+            line == NO_OVERLAPS || line.ends_with(OVERLAPS_FOUND_SUFFIX)
+        });
+        match self.overlap.as_ref().map(|(_, marks)| marks.len()) {
+            Some(0) => self.add_notice(NO_OVERLAPS.to_owned()),
+            Some(n) => self.add_notice(format!("{n}{OVERLAPS_FOUND_SUFFIX}")),
+            None => {}
+        }
     }
 
     /// Whether tools, Undo and Redo may change this document (AD-11).
@@ -335,5 +425,135 @@ mod tests {
         let n = d.config.network.node(id).expect("back");
         assert_eq!((n.x, n.y, n.z), (5.0, -1.0, 6.0));
         assert!(!d.redo());
+    }
+
+    /// The loaded node at (1, 0, 2) and a node added 0.05 from it.
+    fn pair() -> (Document, NodeId, NodeId) {
+        use ad_core::command::{AddNodes, Command};
+        let mut d = doc("<version>3</version>");
+        let a = d.config.network.order()[0];
+        let add = Transaction::new(vec![Command::AddNodes(AddNodes::new(vec![(
+            1.05,
+            0.0,
+            2.0,
+            NodeFlag::REGULAR,
+        )]))]);
+        d.apply(add).expect("applies");
+        let b = *d.config.network.order().last().expect("added");
+        (d, a, b)
+    }
+
+    fn marks(d: &Document) -> Option<Vec<NodeId>> {
+        d.overlap
+            .as_ref()
+            .map(|(_, marks)| marks.iter().copied().collect())
+    }
+
+    #[test]
+    fn overlap_marks_follow_a_move_and_its_undo_and_redo() {
+        use ad_core::command::{Command, MoveNodes};
+        let (mut d, a, b) = pair();
+        d.scan_overlaps(0.1);
+        assert_eq!(marks(&d), Some(vec![a, b]));
+        assert_eq!(d.notice.as_deref(), Some("2 overlapping nodes found"));
+        let away = Transaction::new(vec![Command::MoveNodes(MoveNodes {
+            moves: vec![(b, (1.05, 0.0, 2.0), (30.0, 0.0, 2.0))],
+        })]);
+        d.apply(away).expect("applies");
+        assert_eq!(marks(&d), Some(vec![]));
+        assert_eq!(d.notice.as_deref(), Some("No overlapping nodes"));
+        assert!(d.undo());
+        assert_eq!(marks(&d), Some(vec![a, b]));
+        assert!(d.redo());
+        assert_eq!(marks(&d), Some(vec![]));
+        assert!(d.undo());
+        // Deleting one of the pair unmarks the other; undo brings both marks back.
+        d.apply(delete_tx(b)).expect("applies");
+        assert_eq!(marks(&d), Some(vec![]));
+        assert!(d.undo());
+        assert_eq!(marks(&d), Some(vec![a, b]));
+        // The history and the network are untouched by the scan itself.
+        assert!(d.undo());
+        assert_eq!(marks(&d), Some(vec![]));
+        assert!(!d.history.can_undo());
+    }
+
+    #[test]
+    fn a_new_node_on_another_is_marked_while_marks_are_shown() {
+        use ad_core::command::{AddNodes, Command};
+        let mut d = doc("<version>3</version>");
+        let a = d.config.network.order()[0];
+        d.scan_overlaps(0.1);
+        assert_eq!(d.notice.as_deref(), Some("No overlapping nodes"));
+        // 0.05 above the loaded node.
+        let add = Transaction::new(vec![Command::AddNodes(AddNodes::new(vec![(
+            1.0,
+            0.05,
+            2.0,
+            NodeFlag::REGULAR,
+        )]))]);
+        d.apply(add).expect("applies");
+        let added = *d.config.network.order().last().expect("added");
+        assert_eq!(marks(&d), Some(vec![a, added]));
+        assert!(d.undo());
+        assert_eq!(marks(&d), Some(vec![]));
+    }
+
+    #[test]
+    fn an_edit_placing_many_nodes_rescans_and_matches_a_full_scan() {
+        use ad_core::command::{AddNodes, Command};
+        let mut d = doc("<version>3</version>");
+        d.scan_overlaps(0.1);
+        // 70 nodes, more than the 64 remarked around: one pair at the loaded node, the
+        // rest 1 apart.
+        let nodes = (0..70)
+            .map(|i| {
+                let x = if i == 0 { 1.02 } else { 10.0 + f64::from(i) };
+                (x, 0.0, 2.0, NodeFlag::REGULAR)
+            })
+            .collect();
+        d.apply(Transaction::new(vec![Command::AddNodes(AddNodes::new(
+            nodes,
+        ))]))
+        .expect("applies");
+        let want = scan::overlaps(&d.config.network, 0.1);
+        assert_eq!(want.len(), 2);
+        assert_eq!(d.overlap.as_ref().map(|(_, m)| m), Some(&want));
+        assert!(d.undo());
+        assert_eq!(marks(&d), Some(vec![]));
+    }
+
+    #[test]
+    fn clearing_overlap_marks_drops_them_and_their_notice_only() {
+        let (mut d, _, _) = pair();
+        d.notice = Some("Map image missing".to_owned());
+        d.scan_overlaps(0.1);
+        assert_eq!(
+            d.notice.as_deref(),
+            Some("Map image missing\n2 overlapping nodes found")
+        );
+        // A second scan replaces the line.
+        d.scan_overlaps(0.01);
+        assert_eq!(
+            d.notice.as_deref(),
+            Some("Map image missing\nNo overlapping nodes")
+        );
+        d.clear_overlaps();
+        assert_eq!(marks(&d), None);
+        assert_eq!(d.notice.as_deref(), Some("Map image missing"));
+        // Without marks, an edit computes none.
+        let tx = node_tx(&d);
+        d.apply(tx).expect("applies");
+        assert_eq!(marks(&d), None);
+    }
+
+    #[test]
+    fn the_overlap_scan_works_on_a_read_only_document() {
+        let mut d = doc("<markerID>1</markerID>");
+        assert!(!d.editable());
+        d.scan_overlaps(0.1);
+        assert_eq!(marks(&d), Some(vec![]));
+        assert_eq!(d.notice.as_deref(), Some("No overlapping nodes"));
+        assert!(!d.is_dirty() && !d.history.can_undo());
     }
 }
