@@ -3,7 +3,7 @@ title: 'A lasso selects the nodes inside a drawn outline'
 type: 'feature'
 ticket: '4'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '6efe7efd0a7212d6932105e2400ef0d5f366042d'
 route: 'full'
 route_source: 'auto'
