@@ -93,3 +93,4 @@ context: []
   - checked: revert sets back exactly the recorded markers, so a merge undoes cleanly; a redo recomputes from the same state.
   - accepted: Escape closes the whole window even while a rename field is open; "None" and same-name checks are case-sensitive, as in the marker dialog.
 - Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 346, golden_edited 9).
+- Hand check (user), pass 1: the Groups button was cut off at the right edge, because the top bar no longer fits one row. Fixed: the top bar wraps onto further rows (`horizontal_wrapped`); test `the_top_bar_wraps_so_every_button_stays_inside_a_narrow_window` fails without it. Verified: fmt, clippy, workspace tests (ad-app 347).
