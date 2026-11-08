@@ -114,9 +114,9 @@ pub fn save(
     dir: &Path,
     folder: &str,
 ) -> Result<ZipSaved, String> {
-    let image = map_image::to_2048(map_image::crop_for(version, zip.image));
-    let png =
-        map_image::encode_png(&image).map_err(|e| format!("Cannot encode the map image: {e}"))?;
+    let image = map_image::to_2048(map_image::crop_for(version, zip.image))
+        .map_err(|e| format!("Cannot encode the map image: {e}"))?;
+    let png = image.png.clone();
     let write = |target: PathBuf, bytes: &[u8]| {
         map_image::save_map_image(&target, bytes)
             .map_err(|e| format!("Cannot save {}: {e}", target.display()))
@@ -162,17 +162,16 @@ pub fn spawn_save(
 /// Shows the image and, if saved, takes the heightmap with its scale calibrated as a load
 /// does. Neither the config nor the history changes.
 pub fn attach(doc: &mut Document, saved: ZipSaved) {
-    doc.map_image = Some(saved.image);
+    doc.show(saved.image);
     if let Some(heightmap) = saved.heightmap {
-        doc.map.height_map_scale = calibrate(&heightmap, &doc.config.network, doc.map.geometry);
-        doc.map.heightmap = Some(Arc::new(heightmap));
-        // The load's "no heightmap" line no longer holds; keep any other notice line.
-        doc.notice = doc.notice.take().and_then(|notice| {
-            let rest: Vec<&str> = notice
-                .lines()
-                .filter(|line| !line.starts_with(jobs::NO_HEIGHTMAP))
-                .collect();
-            (!rest.is_empty()).then(|| rest.join("\n"))
-        });
+        attach_heightmap(doc, heightmap);
     }
+}
+
+/// Takes the heightmap with its scale calibrated as a load does and drops the load's "no
+/// heightmap" notice line. Neither the config nor the history changes.
+pub fn attach_heightmap(doc: &mut Document, heightmap: Heightmap) {
+    doc.map.height_map_scale = calibrate(&heightmap, &doc.config.network, doc.map.geometry);
+    doc.map.heightmap = Some(Arc::new(heightmap));
+    doc.drop_notice_lines(jobs::NO_HEIGHTMAP);
 }

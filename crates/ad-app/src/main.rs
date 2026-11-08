@@ -15,6 +15,7 @@ mod ui;
 mod view;
 mod zip_import;
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use eframe::egui;
@@ -67,6 +68,8 @@ struct App {
     importing: bool,
     /// The epoch of the document a map image download runs for, while it runs.
     downloading: Option<u64>,
+    /// A map image save or heightmap export runs.
+    exporting: bool,
     /// Where missing map images download from and are saved to.
     map_images: jobs::DownloadSource,
     /// The context, kept from the first frame, so jobs started while polling can repaint.
@@ -122,6 +125,7 @@ impl App {
             saving: false,
             importing: false,
             downloading: None,
+            exporting: false,
             map_images: jobs::DownloadSource::default(),
             repaint: None,
             zip_preview: None,
@@ -239,7 +243,11 @@ impl App {
                         self.pending = None;
                     }
                 }
-                JobResult::Imported { .. } | JobResult::ZipSaved { .. } => self.importing = false,
+                JobResult::Imported { .. }
+                | JobResult::ZipSaved { .. }
+                | JobResult::ImageLoaded { .. }
+                | JobResult::HeightmapLoaded { .. } => self.importing = false,
+                JobResult::Exported { .. } => self.exporting = false,
                 JobResult::ImageSaved { .. } => {}
                 JobResult::ZipRead { .. } => {
                     self.importing = false;
@@ -815,6 +823,89 @@ impl App {
         }
     }
 
+    /// Asks for a PNG and shows it as the open document's map image, not saved. Read-only
+    /// documents too: no data changes.
+    fn load_image(&mut self, ctx: &egui::Context) {
+        if self.doc.is_none() {
+            return;
+        }
+        let Some(path) = png_dialog().pick_file() else {
+            return;
+        };
+        let ctx = ctx.clone();
+        self.start_image_load(path, move || ctx.request_repaint());
+    }
+
+    fn start_image_load(&mut self, path: PathBuf, notify: impl FnOnce() + Send + 'static) {
+        let Some(doc) = &self.doc else {
+            return;
+        };
+        self.importing = true;
+        jobs::spawn_image_load(path, doc.epoch, self.tx.clone(), notify);
+    }
+
+    /// Asks for a PNG and takes it as the open document's heightmap, not saved.
+    fn import_heightmap(&mut self, ctx: &egui::Context) {
+        if self.doc.is_none() {
+            return;
+        }
+        let Some(path) = png_dialog().pick_file() else {
+            return;
+        };
+        let ctx = ctx.clone();
+        self.start_heightmap_load(path, move || ctx.request_repaint());
+    }
+
+    fn start_heightmap_load(&mut self, path: PathBuf, notify: impl FnOnce() + Send + 'static) {
+        let Some(doc) = &self.doc else {
+            return;
+        };
+        self.importing = true;
+        jobs::spawn_heightmap_load(path, doc.epoch, self.tx.clone(), notify);
+    }
+
+    /// Asks where to save the shown map image and writes its PNG there.
+    fn save_image(&mut self, ctx: &egui::Context) {
+        let Some(doc) = &self.doc else {
+            return;
+        };
+        let png = doc.map_png.clone();
+        let Some(target) = export_dialog(doc, false) else {
+            return;
+        };
+        let ctx = ctx.clone();
+        self.start_export(jobs::Export::MapImage(png), target, move || {
+            ctx.request_repaint();
+        });
+    }
+
+    /// Asks where to export the heightmap and writes it there as 16-bit grey PNG.
+    fn export_heightmap(&mut self, ctx: &egui::Context) {
+        let Some(doc) = &self.doc else {
+            return;
+        };
+        let Some(heightmap) = doc.map.heightmap.clone() else {
+            return;
+        };
+        let Some(target) = export_dialog(doc, true) else {
+            return;
+        };
+        let ctx = ctx.clone();
+        self.start_export(jobs::Export::Heightmap(heightmap), target, move || {
+            ctx.request_repaint();
+        });
+    }
+
+    fn start_export(
+        &mut self,
+        what: jobs::Export,
+        target: PathBuf,
+        notify: impl FnOnce() + Send + 'static,
+    ) {
+        self.exporting = true;
+        jobs::spawn_export(what, target, self.tx.clone(), notify);
+    }
+
     /// Asks for a map mod zip and reads it for the preview; no document is needed.
     fn import_zip(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
@@ -905,6 +996,28 @@ impl App {
         );
         true
     }
+}
+
+/// An open dialog for PNG files.
+fn png_dialog() -> rfd::FileDialog {
+    rfd::FileDialog::new().add_filter("PNG", &["png"])
+}
+
+/// A PNG save dialog prefilled with `jobs::export_target` for `doc`; it starts in the nearest
+/// existing folder of that target. The chosen path gets `.png` if it lacks it.
+fn export_dialog(doc: &Document, heightmap: bool) -> Option<PathBuf> {
+    let name = doc.config.map_name();
+    let mut dialog = png_dialog();
+    if let Some(file) = jobs::export_target(Path::new(""), name, heightmap).file_name() {
+        dialog = dialog.set_file_name(file.to_string_lossy());
+    }
+    if let Some(exe) = jobs::exe_dir() {
+        let target = jobs::export_target(&exe, name, heightmap);
+        if let Some(dir) = target.ancestors().skip(1).find(|d| d.is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+    }
+    dialog.save_file().map(jobs::with_png_extension)
 }
 
 impl eframe::App for App {
@@ -4042,5 +4155,495 @@ mod download_tests {
         let doc = app.doc.as_ref().expect("doc");
         assert_eq!(doc.config.map_name(), Some("Other"));
         assert!(doc.map_image.is_none() && doc.notice.is_none());
+    }
+}
+
+#[cfg(test)]
+mod manual_image_tests {
+    #![allow(clippy::expect_used)]
+
+    use std::io::Cursor;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ad_core::heightmap::{Heightmap, calibrate};
+    use ad_io::config_xml::{self, GameVersion};
+    use ad_io::map_image::{self, MapImage};
+
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ad_app_manual_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    fn config_text(map_name: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<AutoDrive>\n    \
+             <version>3</version>\n    <MapName>{map_name}</MapName>\n    <waypoints>\n        \
+             <id>1</id>\n        <x>1.000</x>\n        <y>0.000</y>\n        <z>2.000</z>\n        \
+             <out>-1</out>\n        <incoming>-1</incoming>\n        <flags>0</flags>\n    \
+             </waypoints>\n</AutoDrive>\n"
+        )
+    }
+
+    fn open(app: &mut App, loaded: jobs::Loaded) {
+        app.tx
+            .send(JobResult::Loaded {
+                path: PathBuf::from("a.xml"),
+                result: Ok(Box::new(loaded)),
+            })
+            .expect("send");
+        app.poll_jobs();
+    }
+
+    /// An app with a one-node config of map "M", its blank image uploaded (taken), and the
+    /// load's "no heightmap" notice.
+    fn app() -> App {
+        let mut app = App::new(Settings::default());
+        let config = config_xml::load(config_text("M").as_bytes()).expect("loads");
+        open(
+            &mut app,
+            (config, map_image::blank(), None, None, None, true),
+        );
+        let doc = app.doc.as_mut().expect("doc");
+        doc.map_image = None;
+        doc.notice = Some(format!("{} for M", jobs::NO_HEIGHTMAP));
+        app
+    }
+
+    /// Waits for the next job result and applies it as a frame would.
+    fn finish(app: &mut App) {
+        let result = app.rx.recv_timeout(Duration::from_secs(120)).expect("job");
+        app.tx.send(result).expect("send");
+        app.poll_jobs();
+    }
+
+    fn doc(app: &App) -> &Document {
+        app.doc.as_ref().expect("doc")
+    }
+
+    fn png(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+        ad_io::download::test_server::png(w, h, rgba)
+    }
+
+    fn grey16(raw: &[u16], w: u32) -> Vec<u8> {
+        let img =
+            image::ImageBuffer::<image::Luma<u16>, _>::from_raw(w, w, raw.to_vec()).expect("size");
+        let mut out = Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode");
+        out.into_inner()
+    }
+
+    /// The image waiting for the upload, which a frame would take.
+    fn take_image(app: &mut App) -> MapImage {
+        app.doc
+            .as_mut()
+            .expect("doc")
+            .map_image
+            .take()
+            .expect("image shown")
+    }
+
+    /// The kept PNG decodes to the image waiting for the upload.
+    fn png_matches(doc: &Document) {
+        let image = doc.map_image.as_ref().expect("image shown");
+        let (decoded, _) = map_image::decode_map_image(&doc.map_png, "kept").expect("a PNG");
+        assert!(
+            decoded.rgba == image.rgba,
+            "the kept PNG is the shown image"
+        );
+    }
+
+    fn unchanged_data(app: &App) {
+        let doc = doc(app);
+        assert!(!doc.is_dirty() && !doc.history.can_undo());
+        assert_eq!(doc.config.network.len(), 1);
+    }
+
+    #[test]
+    fn a_2048_png_is_shown_not_saved() {
+        let dir = temp_dir("load_2048");
+        let path = dir.join("picked.png");
+        let bytes = png(2048, 2048, [1, 2, 3, 255]);
+        std::fs::write(&path, &bytes).expect("write");
+        let mut app = app();
+        app.start_image_load(path, || {});
+        assert!(app.importing);
+        finish(&mut app);
+        let files = std::fs::read_dir(&dir).expect("list").count();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(!app.importing && app.error.is_none());
+        assert_eq!(files, 1, "nothing is saved");
+        let notice = doc(&app).notice.clone().expect("notice");
+        assert_eq!(
+            notice,
+            format!("{} for M\n{}", jobs::NO_HEIGHTMAP, jobs::NOT_SAVED)
+        );
+        assert_eq!(&*doc(&app).map_png, &bytes[..]);
+        assert_eq!(&take_image(&mut app).rgba[..4], &[1, 2, 3, 255]);
+        unchanged_data(&app);
+    }
+
+    #[test]
+    fn another_size_is_scaled_with_the_notice() {
+        let dir = temp_dir("load_1024");
+        let path = dir.join("small.png");
+        std::fs::write(&path, png(1024, 1024, [4, 5, 6, 255])).expect("write");
+        let mut app = app();
+        app.start_image_load(path, || {});
+        finish(&mut app);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(app.error.is_none());
+        let notice = doc(&app).notice.clone().expect("notice");
+        assert!(
+            notice.contains("small.png is 1024x1024 and was scaled to 2048x2048"),
+            "{notice}"
+        );
+        assert!(notice.ends_with(jobs::NOT_SAVED), "{notice}");
+        png_matches(doc(&app));
+        let image = take_image(&mut app);
+        assert_eq!(image.rgba.len(), 2048 * 2048 * 4);
+        assert_eq!(&image.rgba[..4], &[4, 5, 6, 255]);
+        // A second load replaces the lines about the first image instead of adding more.
+        let dir = temp_dir("load_twice");
+        let path = dir.join("again.png");
+        std::fs::write(&path, png(2048, 2048, [7, 7, 7, 255])).expect("write");
+        app.start_image_load(path, || {});
+        finish(&mut app);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        let notice = doc(&app).notice.clone().expect("notice");
+        assert_eq!(
+            notice,
+            format!("{} for M\n{}", jobs::NO_HEIGHTMAP, jobs::NOT_SAVED)
+        );
+    }
+
+    #[test]
+    fn a_bad_file_shows_an_error_and_keeps_the_image() {
+        let dir = temp_dir("load_bad");
+        let path = dir.join("broken.png");
+        std::fs::write(&path, b"not a png").expect("write");
+        let mut app = app();
+        let before = doc(&app).map_png.clone();
+        app.start_image_load(path, || {});
+        finish(&mut app);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(!app.importing);
+        let error = app.error.clone().unwrap_or_default();
+        assert!(error.contains("broken.png"), "{error}");
+        let doc = doc(&app);
+        assert!(doc.map_image.is_none() && Arc::ptr_eq(&doc.map_png, &before));
+        assert!(
+            !doc.notice
+                .as_deref()
+                .unwrap_or("")
+                .contains(jobs::NOT_SAVED)
+        );
+        unchanged_data(&app);
+    }
+
+    #[test]
+    fn save_writes_the_shown_image_and_drops_the_not_saved_line() {
+        let dir = temp_dir("save");
+        let path = dir.join("picked.png");
+        std::fs::write(&path, png(512, 512, [9, 8, 7, 255])).expect("write");
+        let mut app = app();
+        app.start_image_load(path, || {});
+        finish(&mut app);
+        // Saved after the upload dropped the RGBA copy.
+        let shown = take_image(&mut app);
+        let target = map_image::map_image_target(&dir, "M");
+        let png = doc(&app).map_png.clone();
+        app.start_export(jobs::Export::MapImage(png), target.clone(), || {});
+        assert!(app.exporting);
+        finish(&mut app);
+        let (saved, notice) = map_image::load_map_image(&target);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(!app.exporting && app.error.is_none());
+        assert_eq!((saved.rgba == shown.rgba, notice), (true, None));
+        // The scaling line stays: it still describes the shown image.
+        let notice = doc(&app).notice.clone().expect("notice");
+        assert!(notice.starts_with(jobs::NO_HEIGHTMAP), "{notice}");
+        assert!(notice.contains("512x512") && !notice.contains(jobs::NOT_SAVED));
+        unchanged_data(&app);
+    }
+
+    #[test]
+    fn save_without_an_image_writes_the_blank_one() {
+        let dir = temp_dir("save_blank");
+        let mut app = app();
+        let target = dir.join("unknown.png");
+        let png = doc(&app).map_png.clone();
+        app.start_export(jobs::Export::MapImage(png), target.clone(), || {});
+        finish(&mut app);
+        let (saved, notice) = map_image::load_map_image(&target);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(app.error.is_none() && notice.is_none());
+        assert!(saved.rgba == map_image::blank().rgba);
+    }
+
+    #[test]
+    fn a_failed_save_shows_the_reason() {
+        let dir = temp_dir("save_fail");
+        let mut app = app();
+        // The target is a folder: the write fails.
+        let target = dir.join("taken.png");
+        std::fs::create_dir_all(&target).expect("dir");
+        let png = doc(&app).map_png.clone();
+        app.start_export(jobs::Export::MapImage(png), target, || {});
+        finish(&mut app);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        let error = app.error.clone().unwrap_or_default();
+        assert!(error.contains("taken.png") && !app.exporting, "{error}");
+    }
+
+    /// Imports `bytes` as heightmap into `app` and applies the result.
+    fn import_heightmap(app: &mut App, dir: &Path, bytes: &[u8]) {
+        let path = dir.join("terrain.heightmap.png");
+        std::fs::write(&path, bytes).expect("write");
+        app.start_heightmap_load(path, || {});
+        assert!(app.importing);
+        finish(app);
+        assert!(!app.importing);
+    }
+
+    #[test]
+    fn an_imported_heightmap_is_set_with_its_scale_and_drops_the_notice() {
+        let dir = temp_dir("heightmap");
+        let mut app = app();
+        app.doc.as_mut().expect("doc").map.height_map_scale = 5.0;
+        let raw: Vec<u16> = (0..16).map(|i| 25600 + i * 100).collect();
+        import_heightmap(&mut app, &dir, &grey16(&raw, 4));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(app.error.is_none(), "{:?}", app.error);
+        let doc = doc(&app);
+        let heightmap = doc.map.heightmap.as_deref().expect("heightmap");
+        assert_eq!(heightmap, &Heightmap::new(4, 4, raw).expect("heightmap"));
+        let scale = calibrate(heightmap, &doc.config.network, doc.map.geometry);
+        assert_eq!(doc.map.height_map_scale, scale);
+        assert_eq!(doc.notice, None);
+        assert!(ui::can_export_heightmap(&app));
+        unchanged_data(&app);
+    }
+
+    #[test]
+    fn a_refused_heightmap_shows_an_error_and_keeps_the_old_one() {
+        let dir = temp_dir("heightmap_bad");
+        let mut app = app();
+        import_heightmap(&mut app, &dir, &grey16(&[100; 4], 2));
+        let before = doc(&app).map.heightmap.clone().expect("first");
+        // 8-bit grey: the heightmap loader refuses it.
+        let mut grey8 = Cursor::new(Vec::new());
+        image::GrayImage::from_pixel(4, 4, image::Luma([7]))
+            .write_to(&mut grey8, image::ImageFormat::Png)
+            .expect("encode");
+        import_heightmap(&mut app, &dir, &grey8.into_inner());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        let error = app.error.clone().unwrap_or_default();
+        assert!(error.contains("terrain.heightmap.png"), "{error}");
+        let doc = doc(&app);
+        assert!(Arc::ptr_eq(
+            doc.map.heightmap.as_ref().expect("kept"),
+            &before
+        ));
+        unchanged_data(&app);
+    }
+
+    #[test]
+    fn export_writes_a_16_bit_png_that_reloads_to_the_same_heights() {
+        let dir = temp_dir("export");
+        let mut app = app();
+        assert!(
+            !ui::can_export_heightmap(&app),
+            "disabled without a heightmap"
+        );
+        let raw: Vec<u16> = (0..9).map(|i| i * 7000).collect();
+        import_heightmap(&mut app, &dir, &grey16(&raw, 3));
+        let heightmap = doc(&app).map.heightmap.clone().expect("heightmap");
+        let target = map_image::heightmap_target(&dir, "M");
+        app.start_export(
+            jobs::Export::Heightmap(heightmap.clone()),
+            target.clone(),
+            || {},
+        );
+        finish(&mut app);
+        let bytes = std::fs::read(&target).expect("written");
+        let reloaded = map_image::load_heightmap(&target).expect("reloads");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(app.error.is_none() && !app.exporting);
+        assert_eq!((bytes[24], bytes[25]), (16, 0), "16-bit grey");
+        assert_eq!(&reloaded, &*heightmap);
+        unchanged_data(&app);
+    }
+
+    #[test]
+    fn results_for_a_replaced_document_are_ignored() {
+        let dir = temp_dir("replaced");
+        let image = dir.join("picked.png");
+        std::fs::write(&image, png(2048, 2048, [1, 2, 3, 255])).expect("write");
+        let height = dir.join("height.png");
+        std::fs::write(&height, grey16(&[100; 4], 2)).expect("write");
+        let mut app = app();
+        app.start_image_load(image, || {});
+        let first = app.rx.recv_timeout(Duration::from_secs(60)).expect("job");
+        app.start_heightmap_load(height, || {});
+        let second = app.rx.recv_timeout(Duration::from_secs(60)).expect("job");
+        // Another config opens before the results are applied.
+        let config = config_xml::load(config_text("M").as_bytes()).expect("loads");
+        open(
+            &mut app,
+            (config, map_image::blank(), None, None, None, true),
+        );
+        app.doc.as_mut().expect("doc").map_image = None;
+        app.tx.send(first).expect("send");
+        app.tx.send(second).expect("send");
+        app.poll_jobs();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(app.error.is_none() && !app.importing);
+        let doc = doc(&app);
+        assert!(doc.map_image.is_none() && doc.map.heightmap.is_none());
+        assert!(doc.notice.is_none());
+    }
+
+    #[test]
+    fn export_targets_and_the_png_extension() {
+        let exe = Path::new("exe");
+        assert_eq!(
+            jobs::export_target(exe, Some("M"), false),
+            exe.join("mapImages").join("M").join("M.png")
+        );
+        assert_eq!(
+            jobs::export_target(exe, Some("M"), true),
+            exe.join("mapImages").join("M").join("M_HeightMap.png")
+        );
+        assert_eq!(
+            jobs::export_target(exe, None, false),
+            exe.join("mapImages").join("unknown.png")
+        );
+        assert_eq!(
+            jobs::export_target(exe, None, true),
+            exe.join("mapImages").join("unknown_HeightMap.png")
+        );
+        for (picked, saved) in [
+            ("a.png", "a.png"),
+            ("a.PNG", "a.PNG"),
+            ("a", "a.png"),
+            ("a.v2", "a.v2.png"),
+        ] {
+            assert_eq!(
+                jobs::with_png_extension(picked.into()),
+                PathBuf::from(saved)
+            );
+        }
+    }
+
+    #[test]
+    fn every_way_an_image_is_shown_keeps_png_bytes_of_it() {
+        let dir = temp_dir("every_way");
+        // A load without an image: Blank, its bytes as shipped.
+        let blank = app();
+        assert_eq!(&*doc(&blank).map_png, &*map_image::blank().png);
+        // A load with a local image of another size: scaled, then encoded.
+        let folder = dir.join("mapImages").join("M");
+        std::fs::create_dir_all(&folder).expect("dir");
+        std::fs::write(folder.join("M.png"), png(64, 64, [3, 3, 3, 255])).expect("write");
+        let config = dir.join("AutoDrive_config.xml");
+        std::fs::write(&config, config_text("M")).expect("write");
+        let mut app = App::new(Settings::default());
+        let loaded = jobs::load_file(&config, Some(&dir), &Settings::default()).expect("load");
+        open(&mut app, loaded);
+        png_matches(doc(&app));
+        // A DDS import.
+        let dds = dir.join("map.dds");
+        std::fs::write(&dds, jobs::test_dds([5, 6, 7, 255])).expect("write");
+        let target = dir.join("dds").join("M.png");
+        app.start_import(dds, GameVersion::FS25, target, || {});
+        finish(&mut app);
+        png_matches(doc(&app));
+        // A zip import's attach.
+        let zip = ad_io::mod_zip::ModZip {
+            version: GameVersion::FS19,
+            titles: Vec::new(),
+            image: image::RgbaImage::from_pixel(8, 8, image::Rgba([2, 4, 6, 255])),
+            dem: None,
+            notice: None,
+        };
+        let saved = zip_import::save(zip, GameVersion::FS19, &dir.join("zip"), "M").expect("saves");
+        zip_import::attach(app.doc.as_mut().expect("doc"), saved);
+        png_matches(doc(&app));
+        // A download.
+        let (base, _) = ad_io::download::test_server::serve(ad_io::download::test_server::ok(
+            png(16, 16, [8, 8, 8, 255]),
+            "image/png",
+        ));
+        app.map_images = jobs::DownloadSource {
+            base_url: base,
+            limits: ad_io::download::Limits::default(),
+            exe_dir: Some(dir.join("download")),
+        };
+        app.start_download("M".to_owned());
+        finish(&mut app);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(app.error.is_none(), "{:?}", app.error);
+        let image = doc(&app).map_image.as_ref().expect("image");
+        assert_eq!(&image.rgba[..4], &[8, 8, 8, 255]);
+        png_matches(doc(&app));
+    }
+
+    /// The acceptance run: the fixture open, a PNG loaded as map image and saved, the FS25
+    /// `dem.png` imported as heightmap and exported; both files load back the same. Needs the
+    /// gitignored `dem.png` in the repo root; skipped when it is absent.
+    #[test]
+    fn the_fixture_takes_a_loaded_image_and_the_fs25_dem_and_saves_both() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(dem) = std::fs::read(root.join("dem.png")) else {
+            eprintln!("skipped: dem.png is absent");
+            return;
+        };
+        let dir = temp_dir("fixture");
+        let mut app = App::new(Settings::default());
+        let fixture = root.join("AutoDrive_config.xml");
+        let loaded = jobs::load_file(&fixture, None, &Settings::default()).expect("fixture");
+        open(&mut app, loaded);
+        let nodes = doc(&app).config.network.len();
+        app.doc.as_mut().expect("doc").map.heightmap = None;
+        // Load and save the map image.
+        let picked = dir.join("picked.png");
+        std::fs::write(&picked, png(1024, 1024, [10, 20, 30, 255])).expect("write");
+        app.start_image_load(picked, || {});
+        finish(&mut app);
+        let shown = take_image(&mut app);
+        let image_target = map_image::map_image_target(&dir, "NF_Marsch_4fach");
+        let png = doc(&app).map_png.clone();
+        app.start_export(jobs::Export::MapImage(png), image_target.clone(), || {});
+        finish(&mut app);
+        // Import and export the heightmap.
+        import_heightmap(&mut app, &dir, &dem);
+        let heightmap = doc(&app).map.heightmap.clone().expect("heightmap");
+        let height_target = map_image::heightmap_target(&dir, "NF_Marsch_4fach");
+        app.start_export(
+            jobs::Export::Heightmap(heightmap.clone()),
+            height_target.clone(),
+            || {},
+        );
+        finish(&mut app);
+        let saved_image = map_image::load_map_image(&image_target);
+        let saved_height = map_image::load_heightmap(&height_target).expect("reloads");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(saved_image.0.rgba == shown.rgba && saved_image.1.is_none());
+        assert_eq!(
+            saved_height,
+            map_image::decode_heightmap(&dem).expect("dem")
+        );
+        assert_eq!(&saved_height, &*heightmap);
+        let doc = doc(&app);
+        assert!(doc.map.height_map_scale >= 1.0);
+        assert_eq!(doc.config.network.len(), nodes);
+        assert!(!doc.is_dirty() && !doc.history.can_undo());
     }
 }
