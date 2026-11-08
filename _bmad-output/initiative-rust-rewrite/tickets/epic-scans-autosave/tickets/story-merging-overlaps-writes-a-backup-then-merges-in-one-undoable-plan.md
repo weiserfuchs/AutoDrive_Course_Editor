@@ -3,7 +3,7 @@ title: 'Merging overlaps writes a backup, then merges in one undoable step'
 type: 'feature'
 ticket: '2'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '3a64ade'
 route: 'full'
 route_source: 'auto'
