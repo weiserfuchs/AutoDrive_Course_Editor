@@ -3,14 +3,14 @@ title: 'A connection check removes dangling, duplicate and self entries'
 type: 'feature'
 ticket: '4'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: 'c1cefd1'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -92,3 +92,8 @@ A reverse link (A lists B in `outgoing`, B does not list A in `incoming`) is val
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - checked: an incoming entry left pointing at a node deleted in the editor is harmless on save (the writer skips ids that no longer exist) and is reported as dangling by the check; reverse links are never touched; removal reverts every entry at its index.
+  - accepted: no notice after a fix (the selection shows the touched nodes).
+- Verification (orchestrator re-run, incl. the full suite after the last doc edit): fmt, clippy and workspace tests pass (ad-app 408).
