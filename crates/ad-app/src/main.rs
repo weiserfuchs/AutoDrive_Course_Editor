@@ -242,6 +242,14 @@ impl App {
             Action::RotateTool if self.editable() => {
                 self.set_tool(Some(Box::new(tools::rotate::RotateTool::default())));
             }
+            Action::AlignHorizontalTool if self.editable() => {
+                let tool = tools::align::AlignTool::new(tools::align::Axis::Horizontal);
+                self.set_tool(Some(Box::new(tool)));
+            }
+            Action::AlignVerticalTool if self.editable() => {
+                let tool = tools::align::AlignTool::new(tools::align::Axis::Vertical);
+                self.set_tool(Some(Box::new(tool)));
+            }
             Action::PriorityTool if self.editable() => {
                 self.set_tool(Some(Box::new(tools::priority::PriorityTool)));
             }
@@ -273,6 +281,8 @@ impl App {
             Action::NodeTool
             | Action::MoveTool
             | Action::RotateTool
+            | Action::AlignHorizontalTool
+            | Action::AlignVerticalTool
             | Action::ConnectTool
             | Action::PriorityTool
             | Action::FlipTool
@@ -718,6 +728,65 @@ mod tests {
         load(&mut app, "<markerID>1</markerID>");
         app.run(Action::RotateTool);
         assert!(app.tool.is_none());
+    }
+
+    #[test]
+    fn shift_x_aligns_the_selection_to_a_clicked_node_and_undo_restores_it() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        let id = first(&app);
+        let doc = app.doc.as_mut().expect("doc");
+        let net = &mut doc.config.network;
+        let b = net.add_node(11.0, 3.0, 2.0, NodeFlag::REGULAR);
+        let c = net.add_node(-5.0, 1.0, 7.0, NodeFlag::REGULAR);
+        let reference = net.add_node(40.0, 9.0, -12.5, NodeFlag::REGULAR);
+        doc.selection.extend([id, b, c]);
+        let positions = |app: &App| {
+            let net = &app.doc.as_ref().expect("doc").config.network;
+            [id, b, c, reference].map(|n| net.node(n).map(|n| (n.x, n.y, n.z)).expect("node"))
+        };
+        let start = positions(&app);
+        app.run(Action::AlignHorizontalTool);
+        assert_eq!(active(&app), Some("Align H"));
+        app.view.hovered_node = Some(reference);
+        app.click(0.0, 0.0, false);
+        let now = positions(&app);
+        for (i, (x, y, z)) in now[..3].iter().enumerate() {
+            assert_eq!((*x, *y, *z), (start[i].0, start[i].1, -12.5));
+        }
+        assert_eq!(now[3], start[3]);
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.selection, std::collections::BTreeSet::from([id, b, c]));
+        app.run(Action::Undo);
+        assert!(
+            !app.doc.as_ref().expect("doc").history.can_undo(),
+            "one undo step"
+        );
+        assert_eq!(positions(&app), start);
+        app.run(Action::AlignVerticalTool);
+        assert_eq!(active(&app), Some("Align V"));
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_align_tools() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        app.run(Action::AlignHorizontalTool);
+        app.run(Action::AlignVerticalTool);
+        assert!(app.tool.is_none());
+        let id = first(&app);
+        let doc = app.doc.as_mut().expect("doc");
+        let reference = doc
+            .config
+            .network
+            .add_node(40.0, 9.0, -12.5, NodeFlag::REGULAR);
+        doc.selection.insert(id);
+        app.tool = Some(Box::new(tools::align::AlignTool::new(
+            tools::align::Axis::Horizontal,
+        )));
+        app.view.hovered_node = Some(reference);
+        app.click(0.0, 0.0, false);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
     }
 
     #[test]

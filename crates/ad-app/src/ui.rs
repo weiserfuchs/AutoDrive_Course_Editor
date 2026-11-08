@@ -11,6 +11,7 @@ use ad_core::map_context::MapContext;
 use ad_core::network::{ConnectionShape, Network, NodeFlag, NodeId};
 
 use crate::input::{self, Action};
+use crate::tools::align::{AlignTool, Axis};
 use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
 use crate::tools::flip::FlipTool;
@@ -70,11 +71,14 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
-    let tools: [Box<dyn Tool>; 10] = [
+    let tools: [Box<dyn Tool>; 13] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
         Box::new(RotateTool::default()),
+        Box::new(AlignTool::new(Axis::Horizontal)),
+        Box::new(AlignTool::new(Axis::Vertical)),
+        Box::new(AlignTool::new(Axis::Depth)),
         Box::new(DeleteTool),
         Box::new(PriorityTool),
         Box::new(FlipTool),
@@ -135,6 +139,8 @@ pub(crate) struct ToolHooks<'a> {
     snap: bool,
     /// The right drag draws a lasso instead of a rectangle.
     pub lasso: bool,
+    /// The node hovered as of the last frame, handed to the tool's `paint_selection`.
+    pub hovered: Option<NodeId>,
     /// The document revision, handed to the tool's `paint_selection`.
     pub revision: u64,
     pub commit: Option<Transaction>,
@@ -156,6 +162,7 @@ impl<'a> ToolHooks<'a> {
             selection,
             snap,
             lasso: false,
+            hovered: None,
             revision: 0,
             commit: None,
             select_event: None,
@@ -281,6 +288,7 @@ impl ViewHooks for ToolHooks<'_> {
                 self.map,
                 self.net,
                 self.selection,
+                self.hovered,
                 self.revision,
             );
             let snap_grid = self.snap.then_some(self.map.grid);
@@ -318,6 +326,8 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     let mut hooks = ToolHooks::new(tool, &doc.map, &doc.config.network, &doc.selection, snap);
     hooks.lasso = app.lasso;
     hooks.revision = doc.revision;
+    // The view finds this frame's hover while it paints; the tool sees last frame's.
+    hooks.hovered = app.view.hovered_node;
     let clicked = app.view.show(
         ui,
         &doc.config.network,
