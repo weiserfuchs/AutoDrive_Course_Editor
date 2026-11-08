@@ -4,3 +4,5 @@ target/
 /terrain.heightmap.png
 /dem.png
 /pda_map_H.dds
+*_autosave_*.xml
+*_mergeBackup.xml
