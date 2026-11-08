@@ -224,7 +224,7 @@ graph TD
   - A line reusing an existing node that lies under an interpolated point (Java's `getNodeAtWorldPosition`). A line always creates its interpolated nodes and links only its start and end to existing nodes (epic-curves-lines, 2026-11-08).
   - `vehicles.xml` handling: Java reformats the whole file, skips the update when no vehicle parks (a deleted marker leaves a stale `parkDestination`), and leaves `firstMarker` and `secondMarker` pointing at shifted markers. Only the marker reference attributes change, every save updates them, and all three follow marker order (AD-17) (epic-markers-parking, 2026-11-08).
   - Duplicate marker names from the add and edit dialogs. A name already used is refused in the dialog (epic-markers-parking, 2026-11-08).
-  - Scans: Java ignores the chosen overlap distance, merges and fills heights without undo, and moves out-of-bounds nodes to (0, 0). The distance is used, every fix undoes in one step, and out-of-bounds nodes move to the nearest map edge (epic-scans-autosave, 2026-11-08).
+  - Scans: Java ignores the chosen overlap distance, measures it in 3D, merges and fills heights without undo, and moves out-of-bounds nodes to (0, 0). The distance is used in (x, z) with a separate 2 m height tolerance (pasted copies take heightmap heights up to about 2 m off the stored ones), every fix undoes in one step, and out-of-bounds nodes move to the nearest map edge (epic-scans-autosave, 2026-11-08).
 
 ### AD-14 — MapContext is the single owner of map-level data
 

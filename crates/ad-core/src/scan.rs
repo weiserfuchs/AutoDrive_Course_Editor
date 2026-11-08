@@ -5,9 +5,14 @@ use std::collections::BTreeSet;
 use crate::command::{Command, Transaction};
 use crate::network::{Network, NodeId};
 
-/// Every node with at least one other node within `distance` of it in 3D (x, y and z),
-/// inclusive (Java `ScanManager.scanNetworkForOverlapNodes`, which ignored the typed
-/// distance).
+/// How far apart in height two overlapping nodes may be. Stored heights of a road and of a
+/// copy pasted onto it differ by up to about 2 m (the heightmap sample is not the stored
+/// height), while bridges and crossings on two levels are several metres apart.
+pub const HEIGHT_TOLERANCE: f64 = 2.0;
+
+/// Every node with at least one other node within `distance` of it in (x, z) and within
+/// [`HEIGHT_TOLERANCE`] in height, both inclusive. Java (`ScanManager.
+/// scanNetworkForOverlapNodes`) measured 3D and ignored the typed distance (AD-13).
 pub fn overlaps(net: &Network, distance: f64) -> BTreeSet<NodeId> {
     net.order()
         .iter()
@@ -16,18 +21,17 @@ pub fn overlaps(net: &Network, distance: f64) -> BTreeSet<NodeId> {
         .collect()
 }
 
-/// Whether another node lies within `distance` of `id` in 3D. The R-tree gives the
-/// candidates within `distance` in (x, z). False for a missing node.
+/// Whether another node lies within `distance` of `id` in (x, z), as the R-tree finds it,
+/// and within [`HEIGHT_TOLERANCE`] in height. False for a missing node.
 fn overlapping(net: &Network, id: NodeId, distance: f64) -> bool {
     let Some(n) = net.node(id) else {
         return false;
     };
-    let limit = distance * distance;
     net.within(n.x, n.z, distance).into_iter().any(|other| {
         other != id
-            && net.node(other).is_some_and(|o| {
-                (o.x - n.x).powi(2) + (o.y - n.y).powi(2) + (o.z - n.z).powi(2) <= limit
-            })
+            && net
+                .node(other)
+                .is_some_and(|o| (o.y - n.y).abs() <= HEIGHT_TOLERANCE)
     })
 }
 
@@ -106,17 +110,22 @@ mod tests {
     }
 
     #[test]
-    fn height_counts() {
+    fn height_counts_only_beyond_the_tolerance() {
+        // Two levels (a bridge): apart.
         let (n, _) = net(&[(10.0, 0.0, 10.0), (10.0, 5.0, 10.0)]);
         assert!(overlaps(&n, 0.1).is_empty());
-        // Only the height apart, within the distance.
-        let (n, ids) = net(&[(10.0, 0.0, 10.0), (10.0, 0.05, 10.0)]);
+        let (n, _) = net(&[(10.0, 0.0, 10.0), (10.0, 2.001, 10.0)]);
+        assert!(overlaps(&n, 0.1).is_empty());
+        // A pasted copy whose height came from the heightmap (1.65 m off): overlapping.
+        let (n, ids) = net(&[(10.0, 0.0, 10.0), (10.0, 1.65, 10.0)]);
+        assert_eq!(overlaps(&n, 0.1), BTreeSet::from([ids[0], ids[1]]));
+        let (n, ids) = net(&[(10.0, 0.0, 10.0), (10.05, 2.0, 10.0)]);
         assert_eq!(overlaps(&n, 0.1), BTreeSet::from([ids[0], ids[1]]));
     }
 
     #[test]
     fn the_distance_decides() {
-        let (n, ids) = net(&[(0.0, 0.0, 0.0), (0.3, 0.4, 0.0)]);
+        let (n, ids) = net(&[(0.0, 0.0, 0.0), (0.3, 0.4, 0.4)]);
         assert!(overlaps(&n, 0.1).is_empty());
         assert_eq!(overlaps(&n, 1.0), BTreeSet::from([ids[0], ids[1]]));
         // Inclusive: exactly 0.5 apart.
