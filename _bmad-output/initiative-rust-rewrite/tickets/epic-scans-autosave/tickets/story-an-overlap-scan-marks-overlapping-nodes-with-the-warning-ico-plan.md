@@ -3,7 +3,7 @@ title: 'An overlap scan marks overlapping nodes with the warning icon'
 type: 'feature'
 ticket: '1'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '076a0a4'
 route: 'full'
 route_source: 'auto'
