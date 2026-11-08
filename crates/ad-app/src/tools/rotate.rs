@@ -191,7 +191,11 @@ impl Tool for RotateTool {
             circle,
             press_angle: pointer_angle((ctx.x, ctx.z), circle.centre),
             angle: 0.0,
-            preview: moved.iter().map(|&(id, (x, _, z))| (id, (x, z))).collect(),
+            preview: {
+                let mut p = Preview::default();
+                p.place_all(moved.iter().map(|&(id, (x, _, z))| (id, (x, z), (x, z))));
+                p
+            },
             moved,
         });
         true
@@ -208,9 +212,12 @@ impl Tool for RotateTool {
             return;
         }
         d.angle = angle;
-        for &(id, (x, _, z)) in &d.moved {
-            d.preview.insert(id, turned((x, z), d.circle.centre, angle));
-        }
+        let centre = d.circle.centre;
+        d.preview.place_all(
+            d.moved
+                .iter()
+                .map(|&(id, (x, _, z))| (id, (x, z), turned((x, z), centre, angle))),
+        );
     }
 
     fn on_drag_end(&mut self, ctx: &ToolContext) -> Option<Transaction> {
