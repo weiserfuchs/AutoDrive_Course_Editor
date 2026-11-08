@@ -3,7 +3,7 @@ title: 'A DDS import shows the map image and saves it for the next load'
 type: 'feature'
 ticket: '2'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '82e97cf'
 route: 'full'
 route_source: 'auto'
