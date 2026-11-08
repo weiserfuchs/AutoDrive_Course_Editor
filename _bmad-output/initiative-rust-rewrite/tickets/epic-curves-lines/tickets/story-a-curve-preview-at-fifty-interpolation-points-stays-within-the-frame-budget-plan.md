@@ -3,14 +3,14 @@ title: 'A curve preview at fifty interpolation points stays within the frame bud
 type: 'feature'
 ticket: '5'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: 'd71b841'
 route: 'oneshot'
 route_source: 'auto'
 risk: 'low'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -49,3 +49,5 @@ context: []
   - At min zoom the cost is the network itself, about the same as "drag: min zoom, dense node" (2.2 to 2.3 ms). Every other case was ok in both runs; the worst best-round max was "rotate: min zoom, whole network selected" at 12.280 ms.
 
 ## Review Triage Log
+
+- Quick review (orchestrator, inline): no finding; test-only change, the step asserts guard against a frozen preview.
