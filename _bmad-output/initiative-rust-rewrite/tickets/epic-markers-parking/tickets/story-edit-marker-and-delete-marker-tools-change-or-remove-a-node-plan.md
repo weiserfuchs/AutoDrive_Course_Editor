@@ -3,14 +3,14 @@ title: 'Edit-marker and delete-marker tools change or remove a node''s marker'
 type: 'feature'
 ticket: '3'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: 'a3a14d8'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -87,3 +87,7 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: 1 low patched.
+  - low, patch: in a config Java edited, two markers can share a name; editing one of them, even only its group, was refused as taken. The edit dialog now accepts the marker's own current name; a new duplicate is still refused. Test `edit_keeps_a_name_an_older_file_already_duplicated`.
+- Verification after the patch: fmt, clippy and workspace tests pass (ad-app 335).

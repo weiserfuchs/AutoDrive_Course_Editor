@@ -137,10 +137,14 @@ impl MarkerDialog {
         if name.is_empty() {
             return Err(Note::EmptyName);
         }
-        if net
-            .markers()
-            .iter()
-            .any(|m| m.node != self.node && m.name == name)
+        // Editing may keep the marker's current name even if an older file (Java allows
+        // duplicates) gave another marker the same one.
+        let own = self.editing.as_ref().is_some_and(|(old, _)| old == name);
+        if !own
+            && net
+                .markers()
+                .iter()
+                .any(|m| m.node != self.node && m.name == name)
         {
             return Err(Note::NameTaken);
         }
@@ -471,6 +475,24 @@ mod tests {
         d.name = " Wald ".to_owned();
         assert_eq!(d.validate(&net), Err(Note::NameTaken));
         assert!(d.plan(&net).is_none());
+    }
+
+    #[test]
+    fn edit_keeps_a_name_an_older_file_already_duplicated() {
+        let (mut net, ids) = three_markers();
+        let wald = net.markers()[1].name.clone();
+        let mut tx = Transaction::new(vec![Command::EditMarker(EditMarker::new(
+            ids[0],
+            Some((wald.clone(), "A".to_owned())),
+        ))]);
+        tx.apply(&mut net).expect("duplicate as an old file has it");
+        let mut d = MarkerDialog::edit(&net, ids[0]).expect("marked");
+        d.group = "B".to_owned();
+        assert_eq!(d.validate(&net), Ok((wald, "B".to_owned())));
+        assert!(d.plan(&net).is_some());
+        // A new duplicate is still refused.
+        d.name = net.markers()[2].name.clone();
+        assert_eq!(d.validate(&net), Err(Note::NameTaken));
     }
 
     #[test]
