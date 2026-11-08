@@ -56,11 +56,14 @@ pub fn snap_to_grid((x, z): (f64, f64), (gx, gz): (f64, f64)) -> (f64, f64) {
     (axis(x, gx), axis(z, gz))
 }
 
-/// A dialog a tool's click asks the app to open for a node.
+/// A dialog a tool's click asks the app to open for a node, or a notice to show for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolRequest {
     EditLocation(NodeId),
     AddMarker(NodeId),
+    EditMarker(NodeId),
+    /// A Delete marker click on a node without a marker.
+    NoMarker(NodeId),
 }
 
 pub trait Tool {
@@ -71,7 +74,7 @@ pub trait Tool {
     fn on_click(&mut self, ctx: &ToolContext) -> Option<Transaction>;
 
     /// The dialog the last click asked for; the app takes it right after the click. Only
-    /// the Edit location and Add marker tools ask.
+    /// the Edit location and marker tools ask.
     fn take_request(&mut self) -> Option<ToolRequest> {
         None
     }

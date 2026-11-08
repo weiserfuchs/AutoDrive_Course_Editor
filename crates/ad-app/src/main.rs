@@ -316,7 +316,17 @@ impl App {
                 self.view.clear_hover();
             }
             Action::DeleteHovered if self.editable() => self.delete_hovered(),
-            Action::AddMarker if self.editable() => self.add_marker_hovered(),
+            Action::AddMarker if self.editable() => {
+                self.marker = self
+                    .marker_target()
+                    .and_then(|(net, id)| tools::marker::MarkerDialog::open(net, id));
+            }
+            Action::EditMarker if self.editable() => {
+                self.marker = self
+                    .marker_target()
+                    .and_then(|(net, id)| tools::marker::MarkerDialog::edit(net, id));
+            }
+            Action::DeleteMarker if self.editable() => self.delete_marker_hovered(),
             // Copy changes no data, so it works on a read-only document too.
             Action::Copy => {
                 self.copy();
@@ -339,28 +349,40 @@ impl App {
             | Action::Undo
             | Action::Redo
             | Action::DeleteHovered
-            | Action::AddMarker => {}
+            | Action::AddMarker
+            | Action::EditMarker
+            | Action::DeleteMarker => {}
         }
     }
 
-    /// Opens the marker dialog for the hovered node, if it has no marker (Java's W). Not
-    /// during a drag a tool claimed or a selection being drawn, which the modal would cut.
-    fn add_marker_hovered(&mut self) {
-        let Some(doc) = &self.doc else {
-            return;
-        };
+    /// The network and the hovered node the marker keys (W, E, Shift+D) act on. None
+    /// during a drag a tool claimed or a selection being drawn, which a modal would cut.
+    fn marker_target(&self) -> Option<(&ad_core::network::Network, ad_core::network::NodeId)> {
+        let doc = self.doc.as_ref()?;
         if self.view.selecting() || self.view.dragging() {
-            return;
+            return None;
         }
         // The hover belongs to the document the view last showed.
-        let Some(id) = self
+        let id = self
             .view
             .hovered_node
-            .filter(|_| self.view_epoch == Some(doc.epoch))
+            .filter(|_| self.view_epoch == Some(doc.epoch))?;
+        Some((&doc.config.network, id))
+    }
+
+    /// Removes the hovered node's marker in one transaction, if it has one (Shift+D).
+    fn delete_marker_hovered(&mut self) {
+        let Some(tx) = self
+            .marker_target()
+            .and_then(|(net, id)| tools::marker::delete_plan(net, id))
         else {
             return;
         };
-        self.marker = tools::marker::MarkerDialog::open(&doc.config.network, id);
+        if let Some(doc) = &mut self.doc
+            && let Err(e) = doc.apply(tx)
+        {
+            self.error = Some(e.to_string());
+        }
     }
 
     /// Deletes the selection when it is not empty, else the hovered node, if any, after
@@ -494,6 +516,15 @@ impl App {
             Some(tools::ToolRequest::AddMarker(node)) => {
                 self.marker = tools::marker::MarkerDialog::open(net, node);
             }
+            Some(tools::ToolRequest::EditMarker(node)) => {
+                self.marker = tools::marker::MarkerDialog::edit(net, node);
+                if self.marker.is_none() {
+                    self.tool_notice = Some(tools::marker::NO_MARKER);
+                }
+            }
+            Some(tools::ToolRequest::NoMarker(_)) => {
+                self.tool_notice = Some(tools::marker::NO_MARKER);
+            }
             None => {}
         }
         let Some(tx) = tx else {
@@ -557,7 +588,7 @@ impl App {
     }
 
     /// Closes the marker dialog. With `ok`, sets its node's marker in one transaction,
-    /// unless the name is refused or the document is read-only.
+    /// unless the name is refused, an edit changed nothing or the document is read-only.
     fn finish_marker(&mut self, ok: bool) {
         let Some(dialog) = self.marker.take() else {
             return;
@@ -1589,6 +1620,163 @@ mod tests {
         load(&mut app, "<version>3</version>");
         assert!(app.marker.is_none());
         assert!(app.tool_notice.is_none());
+    }
+
+    /// Loads the one-node config of `version`, gives the node the marker "Feld" with a
+    /// parked vehicle and selects it; the view showed this document.
+    fn marked(version: &str) -> App {
+        let mut app = App::new(Settings::default());
+        load(&mut app, version);
+        mark_first(&mut app);
+        let id = first(&app);
+        let doc = app.doc.as_mut().expect("doc");
+        assert!(doc.config.network.park_vehicle(0, "7".to_owned()));
+        doc.selection.insert(id);
+        app.view_epoch = Some(doc.epoch);
+        app
+    }
+
+    fn markers(app: &App) -> Vec<ad_core::network::Marker> {
+        app.doc
+            .as_ref()
+            .expect("doc")
+            .config
+            .network
+            .markers()
+            .to_vec()
+    }
+
+    #[test]
+    fn edit_marker_ok_commits_one_edit_and_one_undo_restores_it() {
+        let mut app = marked("<version>3</version>");
+        let before = markers(&app);
+        app.tool = Some(Box::new(tools::marker::EditMarkerTool::default()));
+        app.view.hovered_node = Some(first(&app));
+        app.click(0.0, 0.0, false);
+        let dialog = app.marker.as_mut().expect("dialog");
+        assert_eq!((&*dialog.name, &*dialog.group), ("Feld", "None"));
+        dialog.name = "Hof".to_owned();
+        dialog.group = "Neu".to_owned();
+        app.finish_marker(true);
+        let after = markers(&app);
+        assert_eq!((&*after[0].name, &*after[0].group), ("Hof", "Neu"));
+        assert_eq!(after[0].parked_vehicles, ["7"]);
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.selection, BTreeSet::from([first(&app)]));
+        app.run(Action::Undo);
+        assert_eq!(markers(&app), before, "one undo step");
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        // OK without a change commits nothing.
+        app.click(0.0, 0.0, false);
+        app.finish_marker(true);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+    }
+
+    #[test]
+    fn delete_marker_removes_it_in_one_step_and_undo_brings_back_its_vehicles() {
+        let mut app = marked("<version>3</version>");
+        let before = markers(&app);
+        app.tool = Some(Box::new(tools::marker::DeleteMarkerTool::default()));
+        app.view.hovered_node = Some(first(&app));
+        app.click(0.0, 0.0, false);
+        assert!(markers(&app).is_empty());
+        assert!(app.marker.is_none(), "no confirmation");
+        assert_eq!(app.tool_notice, None);
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.selection, BTreeSet::from([first(&app)]));
+        app.run(Action::Undo);
+        assert_eq!(markers(&app), before);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+    }
+
+    #[test]
+    fn edit_or_delete_marker_on_a_plain_node_shows_the_notice_until_the_next_click() {
+        let tools: [fn() -> Box<dyn Tool>; 2] = [
+            || Box::new(tools::marker::EditMarkerTool::default()),
+            || Box::new(tools::marker::DeleteMarkerTool::default()),
+        ];
+        for tool in tools {
+            let mut app = App::new(Settings::default());
+            load(&mut app, "<version>3</version>");
+            app.tool = Some(tool());
+            app.view.hovered_node = Some(first(&app));
+            app.click(0.0, 0.0, false);
+            assert!(app.marker.is_none(), "no dialog");
+            assert_eq!(app.tool_notice, Some(tools::marker::NO_MARKER));
+            assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+            app.view.hovered_node = None;
+            app.click(0.0, 0.0, false);
+            assert_eq!(app.tool_notice, None);
+        }
+    }
+
+    #[test]
+    fn e_and_shift_d_act_on_a_hovered_marked_node_whichever_tool_is_active() {
+        let mut app = marked("<version>3</version>");
+        let before = markers(&app);
+        app.run(Action::NodeTool);
+        // Over empty map: nothing.
+        app.run(Action::EditMarker);
+        app.run(Action::DeleteMarker);
+        assert!(app.marker.is_none());
+        assert_eq!(markers(&app), before);
+        // Over the marked node: the prefilled dialog, then the delete.
+        app.view.hovered_node = Some(first(&app));
+        app.run(Action::EditMarker);
+        let dialog = app.marker.as_ref().expect("dialog");
+        assert_eq!((dialog.node, dialog.title()), (first(&app), "Edit marker"));
+        app.finish_marker(false);
+        app.run(Action::DeleteMarker);
+        assert!(markers(&app).is_empty());
+        assert_eq!(active(&app), Some("Node"));
+        // Over a plain node: nothing, and no notice.
+        app.run(Action::EditMarker);
+        app.run(Action::DeleteMarker);
+        assert!(app.marker.is_none());
+        assert_eq!(app.tool_notice, None);
+        app.run(Action::Undo);
+        assert_eq!(markers(&app), before, "the delete was one step");
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_edit_and_delete_marker_tools_and_keys() {
+        let mut app = marked("<markerID>1</markerID>");
+        let before = markers(&app);
+        app.view.hovered_node = Some(first(&app));
+        app.run(Action::EditMarker);
+        app.run(Action::DeleteMarker);
+        assert!(app.marker.is_none());
+        let tools: [Box<dyn Tool>; 2] = [
+            Box::new(tools::marker::EditMarkerTool::default()),
+            Box::new(tools::marker::DeleteMarkerTool::default()),
+        ];
+        for tool in tools {
+            app.tool = Some(tool);
+            app.click(0.0, 0.0, false);
+            assert!(app.marker.is_none());
+            assert_eq!(app.tool_notice, None);
+        }
+        assert_eq!(markers(&app), before);
+        // Even an edit dialog left open commits nothing.
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        let mut dialog = tools::marker::MarkerDialog::edit(net, first(&app));
+        dialog.as_mut().expect("dialog").name = "Hof".to_owned();
+        app.marker = dialog;
+        app.finish_marker(true);
+        assert_eq!(markers(&app), before);
+    }
+
+    #[test]
+    fn e_and_shift_d_do_nothing_during_a_drawn_selection() {
+        let mut app = marked("<version>3</version>");
+        let before = markers(&app);
+        app.view.hovered_node = Some(first(&app));
+        app.view.start_select((1000.0, 1000.0));
+        assert!(app.view.selecting());
+        app.run(Action::EditMarker);
+        app.run(Action::DeleteMarker);
+        assert!(app.marker.is_none());
+        assert_eq!(markers(&app), before);
     }
 
     #[test]
