@@ -3,14 +3,14 @@ title: 'Connect tools draw straight lines with interpolated nodes'
 type: 'feature'
 ticket: '2'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: 'dd52d30'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -99,3 +99,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - checked, no finding: the start position is stored when picked; Undo, Redo, Delete, cut and paste cancel the tool first, so it cannot go stale before a commit, and a vanished start makes `plan_line` return nothing.
+  - accepted as Java: with the end-node option off, the preview still runs to the cursor on empty map; the user judges it in the hand check.
+- Verification (orchestrator re-run): fmt, clippy, workspace tests and the release frame-time test pass (no case over budget).
