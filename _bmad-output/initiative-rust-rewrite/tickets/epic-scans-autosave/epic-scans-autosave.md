@@ -8,6 +8,7 @@ companions: []
 after: []
 refined: true
 risk: medium
+status: done
 ---
 
 # The network stays healthy and recoverable
