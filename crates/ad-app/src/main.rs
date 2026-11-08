@@ -65,6 +65,12 @@ struct App {
     saving: bool,
     /// A DDS or map mod zip import job is running.
     importing: bool,
+    /// The epoch of the document a map image download runs for, while it runs.
+    downloading: Option<u64>,
+    /// Where missing map images download from and are saved to.
+    map_images: jobs::DownloadSource,
+    /// The context, kept from the first frame, so jobs started while polling can repaint.
+    repaint: Option<egui::Context>,
     /// The map mod zip preview window, while it is shown.
     zip_preview: Option<zip_import::ZipPreview>,
     error: Option<String>,
@@ -115,6 +121,9 @@ impl App {
             loading: false,
             saving: false,
             importing: false,
+            downloading: None,
+            map_images: jobs::DownloadSource::default(),
+            repaint: None,
             zip_preview: None,
             error: None,
             settings,
@@ -205,8 +214,21 @@ impl App {
     /// Applies finished jobs. Called once per frame on the UI thread.
     fn poll_jobs(&mut self) {
         while let Ok(result) = self.rx.try_recv() {
+            let mut download = None;
             match &result {
-                JobResult::Loaded { .. } => self.loading = false,
+                JobResult::Loaded { result, .. } => {
+                    self.loading = false;
+                    download = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|loaded| jobs::download_wanted(loaded, &self.settings))
+                        .map(str::to_owned);
+                }
+                JobResult::Downloaded { epoch, .. } => {
+                    if self.downloading == Some(*epoch) {
+                        self.downloading = None;
+                    }
+                }
                 JobResult::Saved {
                     result, warning, ..
                 } => {
@@ -244,8 +266,36 @@ impl App {
                 self.groups = None;
                 self.tool_notice = None;
                 self.zip_preview = None;
+                if let Some(name) = download {
+                    self.start_download(name);
+                }
             }
         }
+    }
+
+    /// Whether a map image download runs for the open document.
+    fn downloading_for_doc(&self) -> bool {
+        self.downloading.is_some() && self.downloading == self.doc.as_ref().map(|d| d.epoch)
+    }
+
+    /// Downloads the missing map image of the open document in the background (AD-14).
+    fn start_download(&mut self, name: String) {
+        let Some(doc) = &self.doc else {
+            return;
+        };
+        self.downloading = Some(doc.epoch);
+        let ctx = self.repaint.clone();
+        jobs::spawn_download(
+            name,
+            self.map_images.clone(),
+            doc.epoch,
+            self.tx.clone(),
+            move || {
+                if let Some(ctx) = ctx {
+                    ctx.request_repaint();
+                }
+            },
+        );
     }
 
     /// Shows the preview of a read zip, unless the document changed meanwhile (AD-18).
@@ -859,8 +909,11 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.poll_jobs();
         let ctx = ui.ctx().clone();
+        if self.repaint.is_none() {
+            self.repaint = Some(ctx.clone());
+        }
+        self.poll_jobs();
         self.resume(&ctx);
         self.intercept_close(&ctx);
         let title = window_title(self.doc.as_ref());
@@ -924,7 +977,14 @@ mod tests {
         let config = config_xml::load(text(version).as_bytes()).expect("loads");
         let result = JobResult::Loaded {
             path: PathBuf::from("a.xml"),
-            result: Ok(Box::new((config, map_image::blank(), None, None, None))),
+            result: Ok(Box::new((
+                config,
+                map_image::blank(),
+                None,
+                None,
+                None,
+                true,
+            ))),
         };
         app.tx.send(result).expect("send");
         app.poll_jobs();
@@ -3243,7 +3303,14 @@ mod tests {
         let config = config_xml::load(&bytes).expect("loads");
         let result = JobResult::Loaded {
             path,
-            result: Ok(Box::new((config, map_image::blank(), None, None, None))),
+            result: Ok(Box::new((
+                config,
+                map_image::blank(),
+                None,
+                None,
+                None,
+                true,
+            ))),
         };
         app.tx.send(result).expect("send");
         app.poll_jobs();
@@ -3333,7 +3400,14 @@ mod import_tests {
         app.tx
             .send(JobResult::Loaded {
                 path: PathBuf::from("a.xml"),
-                result: Ok(Box::new((config, map_image::blank(), None, None, None))),
+                result: Ok(Box::new((
+                    config,
+                    map_image::blank(),
+                    None,
+                    None,
+                    None,
+                    true,
+                ))),
             })
             .expect("send");
         app.poll_jobs();
@@ -3447,7 +3521,14 @@ mod import_tests {
         app.tx
             .send(JobResult::Loaded {
                 path: PathBuf::from("b.xml"),
-                result: Ok(Box::new((config, map_image::blank(), None, None, None))),
+                result: Ok(Box::new((
+                    config,
+                    map_image::blank(),
+                    None,
+                    None,
+                    None,
+                    true,
+                ))),
             })
             .expect("send");
         app.poll_jobs();
@@ -3521,7 +3602,10 @@ mod zip_tests {
     fn app(map_name: &str) -> App {
         let mut app = App::new(Settings::default());
         let config = config_xml::load(config_text(map_name).as_bytes()).expect("loads");
-        open(&mut app, (config, map_image::blank(), None, None, None));
+        open(
+            &mut app,
+            (config, map_image::blank(), None, None, None, true),
+        );
         app
     }
 
@@ -3783,7 +3867,10 @@ mod zip_tests {
         app.start_zip_read(path, || {});
         let result = app.rx.recv_timeout(Duration::from_secs(60)).expect("job");
         let config = config_xml::load(config_text("M").as_bytes()).expect("loads");
-        open(&mut app, (config, map_image::blank(), None, None, None));
+        open(
+            &mut app,
+            (config, map_image::blank(), None, None, None, true),
+        );
         app.tx.send(result).expect("send");
         app.poll_jobs();
         assert!(app.zip_preview.is_none() && app.error.is_none() && !app.importing);
@@ -3792,7 +3879,10 @@ mod zip_tests {
         app.zip_import(&dir, false, || {});
         let result = app.rx.recv_timeout(Duration::from_secs(60)).expect("job");
         let config = config_xml::load(config_text("M").as_bytes()).expect("loads");
-        open(&mut app, (config, map_image::blank(), None, None, None));
+        open(
+            &mut app,
+            (config, map_image::blank(), None, None, None, true),
+        );
         app.tx.send(result).expect("send");
         app.poll_jobs();
         let saved = map_image::map_image_target(&dir, "M").is_file();
@@ -3813,5 +3903,144 @@ mod zip_tests {
         assert!(app.error.as_deref().is_some_and(|e| e.contains("mod.zip")));
         assert!(app.doc.as_ref().expect("doc").map_image.is_none());
         unchanged_data(&app);
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    #![allow(clippy::expect_used)]
+
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use ad_io::download::test_server::{ok, png, serve};
+    use ad_io::{config_xml, map_image};
+
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ad_app_download_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    fn config_text(map_name: Option<&str>) -> String {
+        let name = map_name.map_or(String::new(), |n| format!("<MapName>{n}</MapName>"));
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<AutoDrive>\n    \
+             <version>3</version>\n    {name}\n    <waypoints>\n        <id>1</id>\n        \
+             <x>1.000</x>\n        <y>0.000</y>\n        <z>2.000</z>\n        <out>-1</out>\n        \
+             <incoming>-1</incoming>\n        <flags>0</flags>\n    </waypoints>\n</AutoDrive>\n"
+        )
+    }
+
+    /// An app whose downloads go to `base` and save into `exe`, with short limits.
+    fn app(settings: Settings, base: &str, exe: &Path) -> App {
+        let mut app = App::new(settings);
+        app.map_images = jobs::DownloadSource {
+            base_url: base.to_owned(),
+            limits: ad_io::download::Limits {
+                connect: Duration::from_secs(2),
+                global: Duration::from_secs(5),
+                max_bytes: 1 << 20,
+            },
+            exe_dir: Some(exe.to_path_buf()),
+        };
+        app
+    }
+
+    /// Sends a load of a config naming `map_name` and polls it; `found` as `load_file` says.
+    fn load(app: &mut App, map_name: Option<&str>, found: bool) {
+        let config = config_xml::load(config_text(map_name).as_bytes()).expect("loads");
+        app.tx
+            .send(JobResult::Loaded {
+                path: PathBuf::from("a.xml"),
+                result: Ok(Box::new((
+                    config,
+                    map_image::blank(),
+                    None,
+                    None,
+                    None,
+                    found,
+                ))),
+            })
+            .expect("send");
+        app.poll_jobs();
+        // The view takes the blank image on the first frame.
+        app.doc.as_mut().expect("doc").map_image = None;
+    }
+
+    /// Waits for the next job result and applies it as a frame would.
+    fn finish(app: &mut App) {
+        let result = app.rx.recv_timeout(Duration::from_secs(30)).expect("job");
+        app.tx.send(result).expect("send");
+        app.poll_jobs();
+    }
+
+    #[test]
+    fn a_load_without_an_image_downloads_it_once_with_the_label() {
+        let exe = temp_dir("app_ok");
+        let (base, path) = serve(ok(png(4, 4, [7, 8, 9, 255]), "image/png"));
+        let mut app = app(Settings::default(), &base, &exe);
+        load(&mut app, Some("Tiny"), false);
+        assert_eq!(ui::download_label(&app), Some("Downloading map image…"));
+        finish(&mut app);
+        let requested = path.recv().expect("path");
+        let found = map_image::find_map_image("Tiny", Some(&exe), None);
+        std::fs::remove_dir_all(&exe).expect("cleanup");
+        assert_eq!(requested, "/mapImages/Tiny/Tiny.png");
+        assert!(found.is_some());
+        assert_eq!(ui::download_label(&app), None);
+        assert!(app.downloading.is_none() && app.error.is_none());
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(
+            &doc.map_image.as_ref().expect("image").rgba[..4],
+            &[7, 8, 9, 255]
+        );
+        assert!(!doc.is_dirty() && !doc.history.can_undo());
+        // At most one download per load: nothing else was started.
+        assert!(app.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn no_download_with_a_local_image_the_setting_off_or_no_map_name() {
+        let exe = temp_dir("app_none");
+        let mut off = Settings::default();
+        off.global.online_map_images = false;
+        let cases = [
+            (Settings::default(), Some("Tiny"), true),
+            (off, Some("Tiny"), false),
+            (Settings::default(), None, false),
+        ];
+        for (settings, name, found) in cases {
+            let mut app = app(settings, "http://127.0.0.1:9/unused", &exe);
+            load(&mut app, name, found);
+            assert!(app.downloading.is_none(), "{name:?} {found}");
+            assert_eq!(ui::download_label(&app), None);
+        }
+        let written = exe.join("mapImages").exists();
+        std::fs::remove_dir_all(&exe).expect("cleanup");
+        assert!(!written);
+    }
+
+    #[test]
+    fn a_download_finishing_after_another_open_is_saved_but_not_attached() {
+        let exe = temp_dir("app_replaced");
+        let (base, _) = serve(ok(png(4, 4, [7, 8, 9, 255]), "image/png"));
+        let mut app = app(Settings::default(), &base, &exe);
+        load(&mut app, Some("Tiny"), false);
+        let first = app.downloading;
+        // Another config, its image found locally, opens before the download ends.
+        load(&mut app, Some("Other"), true);
+        assert_eq!(ui::download_label(&app), None);
+        finish(&mut app);
+        let found = map_image::find_map_image("Tiny", Some(&exe), None);
+        std::fs::remove_dir_all(&exe).expect("cleanup");
+        assert!(first.is_some() && app.downloading.is_none());
+        assert!(found.is_some(), "saved for its map");
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.config.map_name(), Some("Other"));
+        assert!(doc.map_image.is_none() && doc.notice.is_none());
     }
 }

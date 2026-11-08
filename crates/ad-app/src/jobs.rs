@@ -11,6 +11,7 @@ use ad_core::history::SavePoint;
 use ad_core::map_context::MapContext;
 use ad_io::config_xml::{self, GameVersion, LoadedConfig};
 use ad_io::dds;
+use ad_io::download::{self, DownloadError};
 use ad_io::map_image::{self, MapImage};
 use ad_io::settings::Settings;
 use ad_io::vehicles::{self, VehiclesFile};
@@ -23,14 +24,41 @@ pub type CalibratedHeightmap = (Arc<Heightmap>, f64);
 
 /// A parsed config with its map image, the calibrated heightmap if one was found, the
 /// notice about image, heightmap and `vehicles.xml`, if any, and the `vehicles.xml` beside
-/// the config, if it was read.
+/// the config, if it was read, and whether a local map image was found (false: the image
+/// is Blank and may be downloaded).
 pub type Loaded = (
     LoadedConfig,
     MapImage,
     Option<CalibratedHeightmap>,
     Option<String>,
     Option<Arc<VehiclesFile>>,
+    bool,
 );
+
+/// A downloaded map image, decoded and scaled, and its notice (scaled, or not saved).
+pub struct Downloaded {
+    pub image: MapImage,
+    pub notice: Option<String>,
+}
+
+/// Where a missing map image is downloaded from and saved to.
+#[derive(Debug, Clone)]
+pub struct DownloadSource {
+    pub base_url: String,
+    pub limits: download::Limits,
+    /// `mapImages/<name>/` is saved here; without it nothing is downloaded.
+    pub exe_dir: Option<PathBuf>,
+}
+
+impl Default for DownloadSource {
+    fn default() -> Self {
+        Self {
+            base_url: download::MAP_IMAGES_URL.to_owned(),
+            limits: download::Limits::default(),
+            exe_dir: exe_dir(),
+        }
+    }
+}
 
 /// A `vehicles.xml` to patch after the config save, and where it is.
 pub type VehiclesSave = (Arc<VehiclesFile>, PathBuf);
@@ -64,6 +92,11 @@ pub enum JobResult {
     },
     /// The write of an imported map image over an existing one.
     ImageSaved { result: Result<(), String> },
+    /// A missing map image downloaded for the document of `epoch`.
+    Downloaded {
+        epoch: u64,
+        result: Result<Box<Downloaded>, String>,
+    },
     /// A map mod zip read for the preview; `epoch` is the open document's, if any.
     ZipRead {
         epoch: Option<u64>,
@@ -173,6 +206,7 @@ pub fn load_file(
     let found = config
         .map_name()
         .and_then(|name| map_image::find_map_image(name, exe_dir, path.parent()));
+    let image_found = found.is_some();
     let (image, notice) = match found {
         Some(image_path) => map_image::load_map_image(&image_path),
         None => (map_image::blank(), None),
@@ -183,7 +217,64 @@ pub fn load_file(
         .flatten()
         .collect();
     let notice = (!notices.is_empty()).then(|| notices.join("\n"));
-    Ok((config, image, heightmap, notice, vehicles))
+    Ok((config, image, heightmap, notice, vehicles, image_found))
+}
+
+/// The map name to download an image for after `loaded`: none when a local image was found,
+/// the setting is off or the config names no map (AD-14 step 3).
+pub fn download_wanted<'a>(loaded: &'a Loaded, settings: &Settings) -> Option<&'a str> {
+    let (config, .., image_found) = loaded;
+    (!image_found && settings.global.online_map_images)
+        .then(|| config.map_name())
+        .flatten()
+}
+
+/// Fetches the map image of `name`, decodes it as a local image is, then saves the fetched
+/// bytes as `<exe dir>/mapImages/<name>/<name>.png`. A failure to save is a notice only.
+pub fn download_map_image(name: &str, source: &DownloadSource) -> Result<Downloaded, String> {
+    let fail = |why: &dyn std::fmt::Display| {
+        format!("Map image for {name} could not be downloaded ({why})")
+    };
+    let dir = (source.exe_dir.as_deref()).ok_or_else(|| fail(&"the program folder is unknown"))?;
+    let bytes =
+        download::fetch_map_image(&source.base_url, name, source.limits).map_err(|e| match e {
+            DownloadError::NotFound => format!("No map image online for {name}"),
+            e => fail(&e),
+        })?;
+    let target = map_image::map_image_target(dir, name);
+    let (image, scaled) = map_image::decode_map_image(&bytes, &target.display().to_string())
+        .map_err(|e| fail(&format!("not a PNG: {e}")))?;
+    let unsaved = map_image::save_map_image(&target, &bytes).err().map(|e| {
+        format!(
+            "The downloaded map image could not be saved to {}: {e}",
+            target.display()
+        )
+    });
+    let notices: Vec<String> = [scaled, unsaved].into_iter().flatten().collect();
+    Ok(Downloaded {
+        image,
+        notice: (!notices.is_empty()).then(|| notices.join("\n")),
+    })
+}
+
+/// Runs `download_map_image` on a background thread, then calls `notify`.
+pub fn spawn_download(
+    name: String,
+    source: DownloadSource,
+    epoch: u64,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        tracing::info!("downloading the map image for {name}");
+        let result = download_map_image(&name, &source).map(Box::new);
+        match &result {
+            Ok(_) => tracing::info!("downloaded the map image for {name}"),
+            Err(e) => tracing::warn!("{e}"),
+        }
+        let _ = tx.send(JobResult::Downloaded { epoch, result });
+        notify();
+    });
 }
 
 /// Reads the `vehicles.xml` beside the config into its markers (AD-17). A missing file
@@ -340,7 +431,7 @@ pub fn replace_document(
     path: PathBuf,
     settings: &Settings,
 ) {
-    let (config, image, heightmap, notice, vehicles) = loaded;
+    let (config, image, heightmap, notice, vehicles, _) = loaded;
     let map_settings = config
         .map_name()
         .and_then(|name| settings.maps.get(name))
@@ -416,6 +507,25 @@ pub fn apply_result(
             }
         }
         JobResult::ImageSaved { result } => result.err(),
+        // Like an import: only the image and the notice change, and only for the document
+        // it was started for (the file is saved either way).
+        JobResult::Downloaded { epoch, result } => {
+            let d = doc.as_mut().filter(|d| d.epoch == epoch)?;
+            let notice = match result {
+                Ok(downloaded) => {
+                    d.map_image = Some(downloaded.image);
+                    downloaded.notice
+                }
+                Err(message) => Some(message),
+            };
+            if let Some(notice) = notice {
+                d.notice = Some(match d.notice.take() {
+                    Some(old) => format!("{old}\n{notice}"),
+                    None => notice,
+                });
+            }
+            None
+        }
         // Taken by `App::poll_jobs` before this is called.
         JobResult::ZipRead { .. } => None,
         // The files are saved either way; they attach only to the document they were
@@ -520,7 +630,7 @@ mod tests {
     }
 
     fn loaded_config(config: LoadedConfig) -> Loaded {
-        (config, map_image::blank(), None, None, None)
+        (config, map_image::blank(), None, None, None, true)
     }
 
     fn config() -> LoadedConfig {
@@ -814,7 +924,7 @@ mod tests {
         std::fs::write(&config, named(&inline_text("1.000,2.500"))).expect("write");
         let loaded = load_file(&config, None, &settings(500));
         std::fs::remove_dir_all(&dir).expect("cleanup");
-        let (_, image, _, notice, _) = loaded.expect("loads");
+        let (_, image, _, notice, _, _) = loaded.expect("loads");
         assert_ne!(image, map_image::blank());
         assert_eq!(&image.rgba[..4], &[1, 2, 3, 255]);
         assert!(notice.expect("notice").contains("Tiny.png"));
@@ -829,9 +939,9 @@ mod tests {
             inline_text("1.000,2.500"),
         ] {
             std::fs::write(&config, text).expect("write");
-            let (_, image, heightmap, notice, _) =
+            let (_, image, heightmap, notice, _, found) =
                 load_file(&config, None, &settings(500)).expect("loads");
-            assert_eq!((image, heightmap), (map_image::blank(), None));
+            assert_eq!((image, heightmap, found), (map_image::blank(), None, false));
             assert!(
                 notice
                     .expect("notice")
@@ -908,7 +1018,7 @@ mod tests {
         std::fs::write(&config, inline_text("1.000,2.500")).expect("write");
         let loaded = load_file(&config, None, &settings(500));
         std::fs::remove_dir_all(&dir).expect("cleanup");
-        let (_, _, heightmap, notice, _) = loaded.expect("loads");
+        let (_, _, heightmap, notice, _, _) = loaded.expect("loads");
         assert!(heightmap.is_none());
         assert!(notice.expect("notice").contains("terrain.heightmap.png"));
     }
@@ -1145,5 +1255,196 @@ mod tests {
             deviations.len()
         );
         assert!(median < 1.0, "median deviation {median}");
+    }
+
+    use ad_io::download::test_server::{not_found, ok, png, serve};
+
+    /// A download source for `base` saving into `exe`, with short timeouts and a 1 MiB cap.
+    fn source(base: String, exe: &Path) -> DownloadSource {
+        DownloadSource {
+            base_url: base,
+            limits: download::Limits {
+                connect: Duration::from_secs(2),
+                global: Duration::from_millis(500),
+                max_bytes: 1 << 20,
+            },
+            exe_dir: Some(exe.to_path_buf()),
+        }
+    }
+
+    /// A Tiny document of epoch 1 with no image and the load's heightmap notice.
+    fn tiny() -> Option<Document> {
+        let mut doc = Some(open(&named(&inline_text("1.000,2.500"))));
+        if let Some(d) = doc.as_mut() {
+            d.map_image = None;
+            d.notice = Some(format!("{NO_HEIGHTMAP} for Tiny"));
+        }
+        doc
+    }
+
+    fn apply_download(doc: &mut Option<Document>, result: Result<Downloaded, String>) {
+        let result = JobResult::Downloaded {
+            epoch: 1,
+            result: result.map(Box::new),
+        };
+        assert_eq!(apply_result(doc, &mut 1, &settings(500), result), None);
+    }
+
+    #[test]
+    fn a_download_is_wanted_only_without_a_local_image_with_the_setting_and_a_name() {
+        let dir = temp_dir("wanted");
+        let config = dir.join("AutoDrive_config.xml");
+        std::fs::write(&config, named(&inline_text("1.000,2.500"))).expect("write");
+        let mut off = settings(500);
+        off.global.online_map_images = false;
+        let missing = load_file(&config, None, &settings(500)).expect("loads");
+        assert_eq!(download_wanted(&missing, &settings(500)), Some("Tiny"));
+        // Setting off.
+        assert_eq!(download_wanted(&missing, &off), None);
+        // Local image.
+        let folder = dir.join("mapImages").join("Tiny");
+        std::fs::create_dir_all(&folder).expect("folder");
+        std::fs::write(folder.join("Tiny.png"), png(4, 4, [1, 2, 3, 255])).expect("write");
+        let local = load_file(&config, None, &settings(500)).expect("loads");
+        assert!(local.5);
+        assert_eq!(download_wanted(&local, &settings(500)), None);
+        // No map name.
+        std::fs::write(&config, inline_text("1.000,2.500")).expect("write");
+        let unnamed = load_file(&config, None, &settings(500)).expect("loads");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert_eq!(download_wanted(&unnamed, &settings(500)), None);
+    }
+
+    #[test]
+    fn a_downloaded_image_is_attached_saved_and_found_at_the_next_load() {
+        let exe = temp_dir("download_ok");
+        let (base, path) = serve(ok(png(4, 4, [7, 8, 9, 255]), "image/png"));
+        let downloaded = download_map_image("Tiny", &source(base, &exe));
+        let requested = path.recv().expect("path");
+        let target = map_image::map_image_target(&exe, "Tiny");
+        let found = map_image::find_map_image("Tiny", Some(&exe), None);
+        let saved = map_image::load_map_image(&target);
+        std::fs::remove_dir_all(&exe).expect("cleanup");
+        assert_eq!(requested, "/mapImages/Tiny/Tiny.png");
+        assert_eq!(found, Some(target));
+        assert_eq!(&saved.0.rgba[..4], &[7, 8, 9, 255]);
+        let downloaded = downloaded.expect("downloads");
+        // 4x4 is scaled, as a local image would be.
+        let scaled = downloaded.notice.clone().expect("scaled notice");
+        assert!(scaled.contains("4x4"), "{scaled}");
+        let mut doc = tiny();
+        apply_download(&mut doc, Ok(downloaded));
+        let d = doc.expect("doc");
+        assert_eq!(
+            &d.map_image.as_ref().expect("attached").rgba[..4],
+            &[7, 8, 9, 255]
+        );
+        let notice = d.notice.as_deref().expect("notice");
+        assert!(
+            notice.starts_with(NO_HEIGHTMAP) && notice.contains("4x4"),
+            "{notice}"
+        );
+        assert!(!d.is_dirty() && !d.history.can_undo());
+    }
+
+    /// Runs a download of Tiny against `respond`; returns the error and whether a file was saved.
+    fn failed_download(
+        tag: &str,
+        respond: impl FnOnce(&mut std::net::TcpStream) + Send + 'static,
+    ) -> (String, bool) {
+        let exe = temp_dir(tag);
+        let (base, _) = serve(respond);
+        let result = download_map_image("Tiny", &source(base, &exe));
+        let saved = exe.join("mapImages").exists();
+        std::fs::remove_dir_all(&exe).expect("cleanup");
+        (result.err().expect("fails"), saved)
+    }
+
+    #[test]
+    fn a_404_gives_the_no_image_online_notice_and_keeps_the_blank() {
+        let (message, saved) = failed_download("download_404", not_found);
+        assert_eq!(message, "No map image online for Tiny");
+        assert!(!saved);
+        let mut doc = tiny();
+        apply_download(&mut doc, Err(message));
+        let d = doc.expect("doc");
+        assert!(d.map_image.is_none());
+        let notice = d.notice.expect("notice");
+        assert!(
+            notice.ends_with("\nNo map image online for Tiny"),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn a_timeout_oversize_or_html_body_names_the_reason_and_saves_nothing() {
+        let html = b"<html><body>Rate limited</body></html>".to_vec();
+        let results = [
+            (
+                failed_download("download_slow", |_| {
+                    std::thread::sleep(Duration::from_secs(3))
+                }),
+                "timed out",
+            ),
+            (
+                failed_download("download_big", ok(vec![0; (1 << 20) + 1], "image/png")),
+                "larger than",
+            ),
+            (
+                failed_download("download_html", ok(html, "text/html")),
+                "not a PNG",
+            ),
+        ];
+        for ((message, saved), reason) in results {
+            assert!(message.starts_with("Map image for Tiny"), "{message}");
+            assert!(message.contains(reason), "{message}");
+            assert!(!saved, "{message}");
+        }
+    }
+
+    #[test]
+    fn a_download_for_a_replaced_document_is_not_attached() {
+        let mut doc = tiny();
+        let downloaded = Downloaded {
+            image: map_image::blank(),
+            notice: None,
+        };
+        let stale = JobResult::Downloaded {
+            epoch: 0,
+            result: Ok(Box::new(downloaded)),
+        };
+        assert_eq!(apply_result(&mut doc, &mut 1, &settings(500), stale), None);
+        let d = doc.expect("doc");
+        assert!(d.map_image.is_none());
+        assert_eq!(d.notice, Some(format!("{NO_HEIGHTMAP} for Tiny")));
+    }
+
+    #[test]
+    fn without_the_program_folder_nothing_is_requested() {
+        let (base, path) = serve(not_found);
+        let mut source = source(base, Path::new("unused"));
+        source.exe_dir = None;
+        let message = download_map_image("Tiny", &source).err().expect("fails");
+        assert!(message.contains("program folder"), "{message}");
+        assert!(path.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    /// Downloads the fixture's map image from the data repository into a temp folder.
+    /// Run: `cargo test -p ad-app -- --ignored real_map_image_download --nocapture`.
+    #[test]
+    #[ignore = "needs the network"]
+    fn real_map_image_download() {
+        let exe = temp_dir("download_real");
+        let source = DownloadSource {
+            exe_dir: Some(exe.clone()),
+            ..DownloadSource::default()
+        };
+        let result = download_map_image("NF_Marsch_4fach", &source);
+        let found = map_image::find_map_image("NF_Marsch_4fach", Some(&exe), None);
+        std::fs::remove_dir_all(&exe).expect("cleanup");
+        let downloaded = result.expect("downloads");
+        println!("notice {:?}, saved {found:?}", downloaded.notice);
+        assert_eq!(downloaded.image.rgba.len(), 2048 * 2048 * 4);
+        assert!(found.is_some());
     }
 }

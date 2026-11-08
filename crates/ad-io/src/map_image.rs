@@ -104,17 +104,27 @@ pub fn load_map_image(path: &Path) -> (MapImage, Option<String>) {
         Ok(b) => b,
         Err(e) => return (blank(), Some(failed(path, &e))),
     };
-    match decode(&bytes) {
-        Ok((image, None)) => (image, None),
-        Ok((image, Some((w, h)))) => (
-            image,
-            Some(format!(
-                "Map image {} is {w}x{h} and was scaled to {SIDE}x{SIDE}",
-                path.display()
-            )),
-        ),
+    match decode_map_image(&bytes, &path.display().to_string()) {
+        Ok(decoded) => decoded,
         Err(e) => (blank(), Some(failed(path, &e))),
     }
+}
+
+/// Decodes PNG bytes as `load_map_image` does; a wrong size is scaled with a notice naming
+/// `source`. Bytes that are no PNG are an error.
+pub fn decode_map_image(
+    bytes: &[u8],
+    source: &str,
+) -> Result<(MapImage, Option<String>), image::ImageError> {
+    Ok(match decode(bytes)? {
+        (image, None) => (image, None),
+        (image, Some((w, h))) => (
+            image,
+            Some(format!(
+                "Map image {source} is {w}x{h} and was scaled to {SIDE}x{SIDE}"
+            )),
+        ),
+    })
 }
 
 /// `<exe dir>/mapImages/<name>/<name>.png`, where an imported image is saved.

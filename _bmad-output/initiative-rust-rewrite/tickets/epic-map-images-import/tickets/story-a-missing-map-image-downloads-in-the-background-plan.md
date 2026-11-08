@@ -61,9 +61,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `download.rs` and dependency -- tests for 404, Timeout, Oversize, Not a PNG, Success
-- [ ] setting and app wiring -- tests for Local image, Setting off, No map name, Replaced, the label
-- [ ] one ignored test that fetches the real `NF_Marsch_4fach` image (run by hand only)
+- [x] `download.rs` and dependency -- tests for 404, Timeout, Oversize, Not a PNG, Success
+- [x] setting and app wiring -- tests for Local image, Setting off, No map name, Replaced, the label
+- [x] one ignored test that fetches the real `NF_Marsch_4fach` image (run by hand only)
 
 **Acceptance Criteria:**
 - Given no local image for the fixture's map, when the user opens the fixture, then the map image downloads without blocking the UI, appears, and is found locally at the next load.
@@ -77,6 +77,19 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **Dependency:** `ureq = "=3.5.1"`, `default-features = false, features = ["rustls"]` (rustls with ring and webpki-roots; no gzip, a PNG does not compress). Builds on Windows with the MSVC toolchain alone. New in Cargo.lock: base64, getrandom (second version), http, httparse, itoa, ring, rustls, rustls-pki-types, rustls-webpki, subtle, untrusted, ureq, ureq-proto, utf8-zero, wasi, webpki-roots, zeroize.
+- **ad-io `download`:** `MAP_IMAGES_URL` (the data repository), `Limits { connect, global, max_bytes }` (default 10 s, 60 s, 32 MiB), `map_image_url` (name percent-encoded), `fetch_map_image(base_url, name, limits) -> Result<Vec<u8>, DownloadError>`. One agent per call with `timeout_connect`, `timeout_global` and `http_status_as_error(false)`; 404 is `NotFound`, other non-200 `Status`. A `Content-Length` above the cap is refused before reading; otherwise the body is read through `with_config().limit(cap)`, whose overflow is `BodyExceedsLimit` → `TooLarge` (an error, never a truncated body). `Timeout` and an I/O `TimedOut` both map to `Timeout`.
+- **Test server:** `ad_io::download::test_server` (one-shot `TcpListener` on 127.0.0.1:0 answering raw HTTP/1.1), compiled for ad-io tests and, through the new `test-util` feature, for ad-app's dev-dependency only.
+- **Decode:** `map_image::decode_map_image(bytes, source)` is what `load_map_image` now uses, so a download decodes and scales exactly as a local image (wrong size: scaled with the usual notice). The fetched bytes, not a re-encode, are saved atomically to `<exe dir>/mapImages/<name>/<name>.png`; a failed save is a notice, the image still attaches.
+- **Starting the job:** `jobs::Loaded` gains a sixth element, `bool` "a local map image was found". `jobs::download_wanted(loaded, settings)` gives the map name when not found, the setting is on and the config names a map. `App::poll_jobs` reads it from the `Loaded` result and starts `spawn_download` right after the new document is in place, with its epoch; so once per load, never blocking the load. The repaint context is kept from the first frame (`App::repaint`) because `poll_jobs` has no context.
+- **Result:** `JobResult::Downloaded { epoch, result }`. On a matching epoch the image replaces `map_image` (uploaded by the view as for an import) and any notice is appended to `doc.notice` (404: "No map image online for <name>"; others: "Map image for <name> could not be downloaded (<reason>)", reasons "timed out", "larger than N bytes", "not a PNG: …", "HTTP status N", or the network error). A stale epoch drops it; the file was saved by the job already. Network, history and dirty state never change.
+- **UI:** "Downloading map image…" in the top bar while a download runs for the open document (`App::downloading: Option<u64>`, an epoch; `ui::download_label`). The Import menu is disabled meanwhile so a download cannot overwrite an image imported during it.
+- **Setting:** `[global] online_map_images` (default `true`, serde default keeps old files loading).
+- **Tests:** ad-io `download::tests` (success with path and encoding, 404, 500, silent server timeout, body stalling midway, oversize Content-Length, oversize chunked body, URL layout), `settings::tests::online_map_images_defaults_on_and_loads_off`; ad-app `jobs::tests` (`a_download_is_wanted_only_without_a_local_image_with_the_setting_and_a_name`, `a_downloaded_image_is_attached_saved_and_found_at_the_next_load`, `a_404_gives_the_no_image_online_notice_and_keeps_the_blank`, `a_timeout_oversize_or_html_body_names_the_reason_and_saves_nothing`, `a_download_for_a_replaced_document_is_not_attached`, `without_the_program_folder_nothing_is_requested`, ignored `real_map_image_download`), `download_tests` in main.rs (`a_load_without_an_image_downloads_it_once_with_the_label`, `no_download_with_a_local_image_the_setting_off_or_no_map_name`, `a_download_finishing_after_another_open_is_saved_but_not_attached`).
+- **Dropped test:** a refused-connection test; on Windows a connect to a closed local port retries for about 2 s, so it hit the short test timeout instead of a network error.
+- **Verification (2026-11-08):** `cargo fmt --all --check` exit 0; `cargo clippy --workspace --all-targets -- -D warnings` exit 0; `cargo test --workspace` all pass (371 ad-app, 3 ignored; 73 ad-io; no network). `frame_time` release: every case ok, highest best-round max 8.953 ms (rotate, min zoom, whole network). The ignored `real_map_image_download` passed: the 2048x2048 image of `NF_Marsch_4fach` downloaded, decoded without a scaling notice and saved to a temp folder (about 1.3 s).
+- **Open for the hand check:** opening the fixture with no `mapImages/NF_Marsch_4fach/` beside the exe shows the label, then the image; the next open finds it locally.
 
 ## Plan Change Log
 

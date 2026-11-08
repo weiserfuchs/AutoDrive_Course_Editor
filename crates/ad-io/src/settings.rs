@@ -45,6 +45,9 @@ pub struct GlobalSettings {
     /// Whether a connect click on empty map ends the line at a new node (Java
     /// `CreateLinearLineEndNode`).
     pub create_line_end_node: bool,
+    /// Whether a missing map image is downloaded from the data repository (Java
+    /// `Check_Online_MapImages`).
+    pub online_map_images: bool,
 }
 
 impl Default for GlobalSettings {
@@ -54,6 +57,7 @@ impl Default for GlobalSettings {
             show_grid: false,
             line_node_distance: 12,
             create_line_end_node: false,
+            online_map_images: true,
         }
     }
 }
@@ -248,6 +252,19 @@ node_size = 2.5
         assert_eq!(line(&path), (1, true), "0 is raised to the minimum");
         std::fs::write(&path, "[global]\nline_node_distance = 5\n").expect("write");
         assert_eq!(line(&path), (5, false));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn online_map_images_defaults_on_and_loads_off() {
+        assert!(GlobalSettings::default().online_map_images);
+        let dir = scratch_dir("online");
+        let path = dir.join("s.toml");
+        // A file from before the option existed takes the default.
+        std::fs::write(&path, "[global]\nshow_grid = true\n").expect("write");
+        assert!(load(&path).expect("load").global.online_map_images);
+        std::fs::write(&path, "[global]\nonline_map_images = false\n").expect("write");
+        assert!(!load(&path).expect("load").global.online_map_images);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
