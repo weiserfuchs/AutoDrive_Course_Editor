@@ -3,7 +3,7 @@ title: 'Edit-marker and delete-marker tools change or remove a node''s marker'
 type: 'feature'
 ticket: '3'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: 'a3a14d8'
 route: 'full'
 route_source: 'auto'
