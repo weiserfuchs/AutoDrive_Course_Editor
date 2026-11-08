@@ -423,10 +423,23 @@ pub fn apply_result(
             result,
         } => match result {
             Ok(saved) => {
-                let d = doc.as_mut().filter(|d| {
+                let same = |d: &Document| {
                     Some(d.epoch) == epoch && d.config.map_name() == Some(folder.as_str())
-                })?;
-                zip_import::attach(d, *saved);
+                };
+                match doc.as_mut() {
+                    Some(d) if same(d) => zip_import::attach(d, *saved),
+                    // Saved for another map: say where, so the import is not silent.
+                    Some(d) => {
+                        d.notice = Some(format!(
+                            "Map images for \"{folder}\" saved; they load with a config of that map"
+                        ));
+                    }
+                    None => {
+                        return Some(format!(
+                            "Map images for \"{folder}\" saved; they load with a config of that map"
+                        ));
+                    }
+                }
                 None
             }
             Err(message) => Some(message),

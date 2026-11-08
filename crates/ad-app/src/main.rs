@@ -3731,6 +3731,12 @@ mod zip_tests {
         let image = map_image::map_image_target(&dir, "Foo_Bar").is_file();
         let height = map_image::heightmap_target(&dir, "Foo_Bar").exists();
         assert!(image && !height && app.error.is_none());
+        let notice = app
+            .doc
+            .as_ref()
+            .and_then(|d| d.notice.clone())
+            .unwrap_or_default();
+        assert!(notice.contains("\"Foo_Bar\" saved"), "{notice}");
         let doc = app.doc.as_ref().expect("doc");
         assert!(doc.map_image.is_none() && doc.map.heightmap.is_none());
         unchanged_data(&app);
@@ -3744,7 +3750,9 @@ mod zip_tests {
         let both = map_image::map_image_target(&dir, "Foo_Bar").is_file()
             && map_image::heightmap_target(&dir, "Foo_Bar").is_file();
         std::fs::remove_dir_all(&dir).expect("cleanup");
-        assert!(both && app.doc.is_none() && app.error.is_none());
+        assert!(both && app.doc.is_none());
+        let message = app.error.clone().unwrap_or_default();
+        assert!(message.contains("\"Foo_Bar\" saved"), "{message}");
     }
 
     #[test]

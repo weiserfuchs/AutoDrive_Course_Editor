@@ -3,14 +3,14 @@ title: 'A mod-zip import previews and saves the map image and heightmap'
 type: 'feature'
 ticket: '3'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '3641a05'
 route: 'full'
 route_source: 'auto'
 risk: 'high'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -94,3 +94,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: 1 low patched.
+  - low, patch: images saved for another map (no attach) gave no feedback at all. The open document now shows a notice naming the saved folder; with no document open, the message shows in the message window. Covered in `another_maps_name_or_no_document_saves_without_attaching`.
+  - accepted: only the entries actually read are checked for hostile names; `dem.png` must be named exactly (Java's `endsWith` also matched e.g. `xdem.png`).
+- Verification after the patch: fmt, clippy and workspace tests pass (ad-app 361).
