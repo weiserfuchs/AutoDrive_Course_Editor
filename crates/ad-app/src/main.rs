@@ -278,24 +278,33 @@ impl App {
         }
     }
 
-    /// Deletes the hovered node, if any, after cancelling the tool's preview (as Undo does).
+    /// Deletes the selection when it is not empty, else the hovered node, if any, after
+    /// cancelling the tool's preview (as Undo does). Nothing while a selection is drawn.
     fn delete_hovered(&mut self) {
         let Some(doc) = &mut self.doc else {
             return;
         };
-        // The hover belongs to the document the view last showed, and must still exist.
-        let Some(id) = self
-            .view
-            .hovered_node
-            .filter(|_| self.view_epoch == Some(doc.epoch))
-            .filter(|&id| doc.config.network.node(id).is_some())
-        else {
+        if self.view.selecting() {
             return;
+        }
+        let ids = if doc.selection.is_empty() {
+            // The hover belongs to the document the view last showed, and must still exist.
+            let Some(id) = self
+                .view
+                .hovered_node
+                .filter(|_| self.view_epoch == Some(doc.epoch))
+                .filter(|&id| doc.config.network.node(id).is_some())
+            else {
+                return;
+            };
+            vec![id]
+        } else {
+            doc.selection.iter().copied().collect()
         };
         if let Some(tool) = &mut self.tool {
             tool.cancel();
         }
-        let tx = Transaction::new(vec![Command::DeleteNodes(DeleteNodes::new(vec![id]))]);
+        let tx = Transaction::new(vec![Command::DeleteNodes(DeleteNodes::new(ids))]);
         if let Err(e) = doc.apply(tx) {
             self.error = Some(e.to_string());
         }
@@ -817,6 +826,98 @@ mod tests {
         assert!(app.error.is_none());
         app.run(Action::Undo);
         assert_eq!(snapshot(&app), before);
+    }
+
+    #[test]
+    fn the_delete_key_deletes_a_non_empty_selection_and_one_undo_restores_it() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        let a = first(&app);
+        let doc = app.doc.as_mut().expect("doc");
+        let net = &mut doc.config.network;
+        let b = net.add_node(5.5, 3.0, -7.25, NodeFlag::REGULAR);
+        let c = net.add_node(-9.0, 1.0, 4.0, NodeFlag::REGULAR);
+        net.connect(a, b, ConnectionShape::Dual).expect("ok");
+        net.connect(b, c, ConnectionShape::OneWay).expect("ok");
+        doc.selection.extend([a, b]);
+        let before = snapshot(&app);
+        // The selection wins over the hovered node.
+        app.view.hovered_node = Some(c);
+        app.run(Action::DeleteHovered);
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.config.network.order(), [c]);
+        assert!(doc.selection.is_empty(), "pruned");
+        assert!(app.error.is_none());
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+    }
+
+    #[test]
+    fn the_delete_key_does_nothing_while_a_selection_is_drawn() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        let id = first(&app);
+        app.view.hovered_node = Some(id);
+        app.view.start_select((1000.0, 1000.0));
+        assert!(app.view.selecting());
+        app.run(Action::DeleteHovered);
+        app.doc.as_mut().expect("doc").selection.insert(id);
+        app.run(Action::DeleteHovered);
+        assert_eq!(nodes(&app), 1);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_delete_key_on_a_selection() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        shown(&mut app);
+        let id = first(&app);
+        app.doc.as_mut().expect("doc").selection.insert(id);
+        app.run(Action::DeleteHovered);
+        app.tool = Some(Box::new(tools::delete::DeleteTool));
+        app.view.hovered_node = Some(id);
+        app.click(0.0, 0.0, false);
+        assert_eq!(nodes(&app), 1);
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn delete_priority_and_flip_on_a_selected_node_undo_the_group_in_one_step() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        shown(&mut app);
+        let a = first(&app);
+        let doc = app.doc.as_mut().expect("doc");
+        let net = &mut doc.config.network;
+        let b = net.add_node(5.5, 3.0, -7.25, NodeFlag::REGULAR);
+        let c = net.add_node(-9.0, 1.0, 4.0, NodeFlag::SUB_PRIO);
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        net.connect(b, c, ConnectionShape::Reverse).expect("ok");
+        doc.selection.extend([a, b, c]);
+        let before = snapshot(&app);
+        let tools: [Box<dyn Tool>; 3] = [
+            Box::new(tools::delete::DeleteTool),
+            Box::new(tools::priority::PriorityTool),
+            Box::new(tools::flip::FlipTool),
+        ];
+        for tool in tools {
+            let name = tool.name();
+            app.set_tool(Some(tool));
+            app.view.hovered_node = Some(b);
+            app.click(0.0, 0.0, false);
+            assert_ne!(snapshot(&app), before, "{name}");
+            app.run(Action::Undo);
+            assert_eq!(snapshot(&app), before, "{name}");
+            let doc = app.doc.as_mut().expect("doc");
+            assert!(!doc.history.can_undo(), "{name}: one undo step");
+            // A delete prunes the selection; undo does not reselect.
+            doc.selection.extend([a, b, c]);
+        }
+        assert!(app.error.is_none());
     }
 
     #[test]

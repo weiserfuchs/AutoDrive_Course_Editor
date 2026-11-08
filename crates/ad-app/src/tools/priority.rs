@@ -7,7 +7,7 @@ use ad_core::command::{Command, SetFlag, Transaction};
 use ad_core::geometry::MapGeometry;
 use ad_core::network::NodeFlag;
 
-use super::{Tool, ToolContext};
+use super::{Tool, ToolContext, acts_on_selection};
 use crate::view::ViewTransform;
 
 pub const NAME: &str = "Priority";
@@ -30,7 +30,18 @@ impl Tool for PriorityTool {
         NAME
     }
 
+    /// A click on a selected node swaps every selected node, one `SetFlag` each.
     fn on_click(&mut self, ctx: &ToolContext) -> Option<Transaction> {
+        if let Some(selection) = acts_on_selection(ctx) {
+            let commands = selection
+                .iter()
+                .filter_map(|&id| {
+                    let flag = ctx.net.node(id)?.flag;
+                    Some(Command::SetFlag(SetFlag::new(id, swapped(flag))))
+                })
+                .collect();
+            return Some(Transaction::new(commands));
+        }
         let id = ctx.hovered_node?;
         let flag = ctx.net.node(id)?.flag;
         Some(Transaction::new(vec![Command::SetFlag(SetFlag::new(
@@ -65,13 +76,21 @@ mod tests {
     use super::*;
 
     fn click(net: &Network, node: Option<NodeId>) -> Option<Transaction> {
+        click_with(net, &BTreeSet::new(), node)
+    }
+
+    fn click_with(
+        net: &Network,
+        selection: &BTreeSet<NodeId>,
+        node: Option<NodeId>,
+    ) -> Option<Transaction> {
         let map = MapContext::new(None, 1, 2.0, (2.0, 2.0));
         let ctx = ToolContext {
             x: 0.0,
             z: 0.0,
             map: &map,
             net,
-            selection: &BTreeSet::new(),
+            selection,
             snap: false,
             hovered_node: node,
             hovered_edge: None,
@@ -117,5 +136,33 @@ mod tests {
     fn a_click_off_a_node_does_nothing() {
         let net = Network::new();
         assert!(click(&net, None).is_none());
+    }
+
+    fn flags(net: &Network) -> Vec<NodeFlag> {
+        net.order()
+            .iter()
+            .filter_map(|id| net.node(*id).map(|n| n.flag))
+            .collect()
+    }
+
+    #[test]
+    fn a_click_on_a_selected_node_swaps_every_selected_node_in_one_undo() {
+        let mut net = Network::new();
+        let a = net.add_node(0.0, 1.0, 0.0, NodeFlag::REGULAR);
+        let b = net.add_node(10.0, 1.0, 0.0, NodeFlag::SUB_PRIO);
+        let c = net.add_node(20.0, 1.0, 0.0, NodeFlag(4));
+        let d = net.add_node(30.0, 1.0, 0.0, NodeFlag::REGULAR);
+        let before = flags(&net);
+        let selection = BTreeSet::from([a, b, c]);
+        let mut tx = click_with(&net, &selection, Some(b)).expect("swap");
+        tx.apply(&mut net).expect("apply");
+        let (r, s) = (NodeFlag::REGULAR, NodeFlag::SUB_PRIO);
+        assert_eq!(flags(&net), [s, r, s, r]);
+        tx.revert(&mut net).expect("revert");
+        assert_eq!(flags(&net), before);
+        // A click on the unselected node swaps it alone.
+        let mut tx = click_with(&net, &selection, Some(d)).expect("swap");
+        tx.apply(&mut net).expect("apply");
+        assert_eq!(flags(&net), [r, s, NodeFlag(4), s]);
     }
 }

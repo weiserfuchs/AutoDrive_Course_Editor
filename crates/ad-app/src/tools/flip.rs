@@ -9,7 +9,7 @@ use ad_core::geometry::MapGeometry;
 use ad_core::network::{ConnectionShape, Network, NodeId};
 
 use super::connect::is_exactly;
-use super::{Tool, ToolContext};
+use super::{Tool, ToolContext, acts_on_selection};
 use crate::view::ViewTransform;
 
 pub const NAME: &str = "Flip";
@@ -39,8 +39,22 @@ impl Tool for FlipTool {
         NAME
     }
 
-    /// The view hovers no connection under a node (story 3.4 rule), so a node click is a no-op.
+    /// A click on a selected node flips every one-way or reverse link with both ends
+    /// selected; nothing when there is none. The view hovers no connection under a node
+    /// (story 3.4 rule), so a click on an unselected node is a no-op.
     fn on_click(&mut self, ctx: &ToolContext) -> Option<Transaction> {
+        if let Some(selection) = acts_on_selection(ctx) {
+            // Such a link is listed in its start's `outgoing` only, so each is found once.
+            let commands: Vec<Command> = selection
+                .iter()
+                .filter_map(|&a| ctx.net.node(a).map(|n| (a, n)))
+                .flat_map(|(a, n)| n.outgoing().iter().map(move |&b| (a, b)))
+                .filter(|(_, b)| selection.contains(b))
+                .filter_map(|(a, b)| plan(ctx.net, a, b))
+                .flat_map(|tx| tx.0)
+                .collect();
+            return (!commands.is_empty()).then(|| Transaction::new(commands));
+        }
         if ctx.hovered_node.is_some() {
             return None;
         }
@@ -95,13 +109,22 @@ mod tests {
         node: Option<NodeId>,
         edge: Option<(NodeId, NodeId)>,
     ) -> Option<Transaction> {
+        click_with(net, &BTreeSet::new(), node, edge)
+    }
+
+    fn click_with(
+        net: &Network,
+        selection: &BTreeSet<NodeId>,
+        node: Option<NodeId>,
+        edge: Option<(NodeId, NodeId)>,
+    ) -> Option<Transaction> {
         let map = MapContext::new(None, 1, 2.0, (2.0, 2.0));
         let ctx = ToolContext {
             x: 0.0,
             z: 0.0,
             map: &map,
             net,
-            selection: &BTreeSet::new(),
+            selection,
             snap: false,
             hovered_node: node,
             hovered_edge: edge,
@@ -152,5 +175,57 @@ mod tests {
         net.connect(a, b, ConnectionShape::OneWay).expect("ok");
         assert!(click(&net, Some(a), Some((a, b))).is_none());
         assert!(click(&net, None, None).is_none());
+    }
+
+    fn all_links(net: &Network) -> Vec<(Vec<NodeId>, Vec<NodeId>)> {
+        net.order().iter().map(|id| links(net, *id)).collect()
+    }
+
+    /// a -> b one-way, c -> b reverse, a <-> c dual, b -> d one-way to an outside node.
+    fn group() -> (Network, [NodeId; 4]) {
+        let mut net = Network::new();
+        let a = net.add_node(0.0, 1.0, 0.0, NodeFlag::REGULAR);
+        let b = net.add_node(10.0, 1.0, 0.0, NodeFlag::REGULAR);
+        let c = net.add_node(20.0, 1.0, 0.0, NodeFlag::REGULAR);
+        let d = net.add_node(30.0, 1.0, 0.0, NodeFlag::REGULAR);
+        net.connect(a, b, ConnectionShape::OneWay).expect("ok");
+        net.connect(c, b, ConnectionShape::Reverse).expect("ok");
+        net.connect(a, c, ConnectionShape::Dual).expect("ok");
+        net.connect(b, d, ConnectionShape::OneWay).expect("ok");
+        (net, [a, b, c, d])
+    }
+
+    #[test]
+    fn a_click_on_a_selected_node_flips_the_inner_links_in_one_undo() {
+        let (mut net, [a, b, c, d]) = group();
+        let before = all_links(&net);
+        let selection = BTreeSet::from([a, b, c]);
+        let mut tx = click_with(&net, &selection, Some(a), None).expect("flip");
+        tx.apply(&mut net).expect("apply");
+        assert!(is_exactly(&net, b, a, ConnectionShape::OneWay));
+        assert!(is_exactly(&net, b, c, ConnectionShape::Reverse));
+        assert!(is_exactly(&net, a, c, ConnectionShape::Dual));
+        assert!(is_exactly(&net, b, d, ConnectionShape::OneWay));
+        tx.revert(&mut net).expect("revert");
+        assert_eq!(all_links(&net), before);
+    }
+
+    #[test]
+    fn a_selection_without_an_inner_one_way_or_reverse_link_flips_nothing() {
+        let (net, [a, _, c, d]) = group();
+        // Only the dual a <-> c lies inside; b -> d leaves the selection.
+        assert!(click_with(&net, &BTreeSet::from([a, c]), Some(c), None).is_none());
+        assert!(click_with(&net, &BTreeSet::from([d]), Some(d), None).is_none());
+    }
+
+    #[test]
+    fn a_click_off_the_selection_acts_as_before() {
+        let (mut net, [a, b, c, d]) = group();
+        let selection = BTreeSet::from([a, b, c]);
+        assert!(click_with(&net, &selection, Some(d), None).is_none());
+        let mut tx = click_with(&net, &selection, None, Some((a, b))).expect("flip");
+        tx.apply(&mut net).expect("apply");
+        assert!(is_exactly(&net, b, a, ConnectionShape::OneWay));
+        assert!(is_exactly(&net, c, b, ConnectionShape::Reverse));
     }
 }

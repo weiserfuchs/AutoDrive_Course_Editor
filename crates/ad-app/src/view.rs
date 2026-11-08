@@ -249,6 +249,36 @@ fn place(id: NodeId, n: &Node, preview: Option<&Preview>) -> (f64, f64) {
         .unwrap_or((n.x, n.z))
 }
 
+/// The node at screen point `c`: [`hover::node_at`], or, zoomed out so far that nodes are
+/// too small to hit, the selected node whose mark is under `c` (bug 4.11).
+#[allow(clippy::too_many_arguments)]
+fn node_or_mark_at(
+    net: &Network,
+    geometry: MapGeometry,
+    t: &ViewTransform,
+    ns: i32,
+    selection: Option<&BTreeSet<NodeId>>,
+    c: (f64, f64),
+    buf: &mut Vec<NodeId>,
+) -> Option<NodeId> {
+    hover::node_at(net, geometry, t, ns, c, buf).or_else(|| {
+        let selection = selection.filter(|s| !s.is_empty())?;
+        (f64::from(ns) < MIN_NODE_PX)
+            .then(|| {
+                hover::selected_mark_at(
+                    net,
+                    geometry,
+                    t,
+                    selection,
+                    c,
+                    f64::from(SELECTED_MARK_PX) / 2.0 + MARK_HIT_SLACK_PX,
+                    buf,
+                )
+            })
+            .flatten()
+    })
+}
+
 /// Draws the network on the map. Owns the query buffers reused across frames.
 pub struct MapView {
     transform: Option<ViewTransform>,
@@ -315,6 +345,17 @@ impl MapView {
         self.transform.as_mut()
     }
 
+    /// Whether a selection rectangle or lasso is being drawn.
+    pub fn selecting(&self) -> bool {
+        self.select_start.is_some() || !self.lasso.is_empty()
+    }
+
+    /// Starts a selection rectangle at map px `at`, as a right press does.
+    #[cfg(test)]
+    pub fn start_select(&mut self, at: MapPx) {
+        self.select_start = Some(at);
+    }
+
     /// Nothing is hovered, e.g. while there is no document.
     pub fn clear_hover(&mut self) {
         self.hovered_node = None;
@@ -360,24 +401,9 @@ impl MapView {
             let node = origin.and_then(|p| {
                 let ns = look::node_px(node_size, transform.zoom);
                 let c = (f64::from(p.x), f64::from(p.y));
-                hover::node_at(net, geometry, transform, ns, c, &mut self.nodes).or_else(|| {
-                    // Zoomed out, nodes are too small to hit, but selected ones show a mark:
-                    // a press on a mark grabs that node, so the selection can be dragged.
-                    let selection = hooks.selection().filter(|s| !s.is_empty())?;
-                    (f64::from(ns) < MIN_NODE_PX)
-                        .then(|| {
-                            hover::selected_mark_at(
-                                net,
-                                geometry,
-                                transform,
-                                selection,
-                                c,
-                                f64::from(SELECTED_MARK_PX) / 2.0 + MARK_HIT_SLACK_PX,
-                                &mut self.nodes,
-                            )
-                        })
-                        .flatten()
-                })
+                // A press on a selection mark grabs that node, so the selection can be dragged.
+                let selection = hooks.selection();
+                node_or_mark_at(net, geometry, transform, ns, selection, c, &mut self.nodes)
             });
             self.drag_claimed = origin.is_some_and(|p| {
                 let at = transform.screen_to_map(f64::from(p.x), f64::from(p.y));
@@ -483,11 +509,12 @@ impl MapView {
             .hover_pos()
             .filter(|_| preview.is_none())
             .map(|p| (f64::from(p.x), f64::from(p.y)));
-        self.hovered_node =
-            cursor.and_then(|c| hover::node_at(net, geometry, &t, ns, c, &mut self.nodes));
+        // A click on a selection mark acts on the selection, even when nodes are too small.
+        let selection = hooks.selection().filter(|s| !s.is_empty());
+        self.hovered_node = cursor
+            .and_then(|c| node_or_mark_at(net, geometry, &t, ns, selection, c, &mut self.nodes));
         self.hovered_edge =
             cursor.and_then(|c| hover::edge_at(net, geometry, &t, ns, self.hovered_node, c));
-        let selection = hooks.selection().filter(|s| !s.is_empty());
         self.paint(
             &painter,
             net,
@@ -1806,6 +1833,67 @@ mod tests {
             drag(&mut hooks, at);
             assert_eq!(start_node(&hooks), None, "press at {at:?}");
         }
+    }
+
+    #[test]
+    fn zoomed_out_a_delete_click_on_a_selection_mark_deletes_the_selection() {
+        use crate::tools::{Tool, ToolContext, delete::DeleteTool};
+        use ad_core::map_context::MapContext;
+
+        let mut net = Network::new();
+        // Zoom 0.5: nodes are 1 px, too small to hit; `a` is at screen (506, 506).
+        let a = net.add_node(-12.0, 0.0, -12.0, NodeFlag::REGULAR);
+        let b = net.add_node(-40.0, 0.0, -12.0, NodeFlag::REGULAR);
+        let c = net.add_node(-60.0, 0.0, -12.0, NodeFlag::REGULAR);
+        let selection = BTreeSet::from([a, b]);
+        let mut hooks = Recorder {
+            selection: Some(selection.clone()),
+            ..Recorder::default()
+        };
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        let mut view = view_at(&ctx, &net, g, 0.5);
+        // Beside the mark, within its reach (half mark 1.5 + slack 2).
+        let at = egui::pos2(509.0, 506.0);
+        let frames = [
+            vec![egui::Event::PointerMoved(at)],
+            vec![press(at, true)],
+            vec![press(at, false)],
+        ];
+        let mut clicked = None;
+        for (i, events) in frames.into_iter().enumerate() {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                time: Some(i as f64 * 0.016),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                if view.show(ui, &net, g, 2.0, None, &mut hooks).is_some() {
+                    clicked = Some(view.hovered_node);
+                }
+            });
+        }
+        let hovered_node = clicked.expect("a click");
+        assert_eq!(hovered_node, Some(a));
+        let map = MapContext::new(None, 1, 2.0, (2.0, 2.0));
+        let mut tx = DeleteTool
+            .on_click(&ToolContext {
+                x: 0.0,
+                z: 0.0,
+                map: &map,
+                net: &net,
+                selection: &selection,
+                snap: false,
+                hovered_node,
+                hovered_edge: None,
+            })
+            .expect("a transaction");
+        tx.apply(&mut net).expect("applies");
+        assert_eq!(net.order(), [c]);
     }
 
     #[test]

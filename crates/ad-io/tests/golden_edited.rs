@@ -252,12 +252,6 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         &mut cfg.network,
         Transaction::new(vec![Command::SetFlag(SetFlag::new(flagged, new_flag))]),
     )?;
-    let flagged_index = cfg
-        .network
-        .order()
-        .iter()
-        .position(|id| *id == flagged)
-        .ok_or("flag node")?;
     // The flip tool: a one-way link between nodes no other edit touches turns around.
     let busy = [&touched[..], &[rev_a, rev_b, flagged]].concat();
     let (flip_a, flip_b) = cfg
@@ -290,18 +284,6 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
             Command::Connect(Connect::new(flip_b, flip_a, ConnectionShape::OneWay)),
         ]),
     )?;
-    let flipped = (
-        cfg.network
-            .order()
-            .iter()
-            .position(|id| *id == flip_a)
-            .ok_or("flip node")?,
-        cfg.network
-            .order()
-            .iter()
-            .position(|id| *id == flip_b)
-            .ok_or("flip node")?,
-    );
     // The move tool on a selection: three nodes no other edit touches move in one
     // MoveNodes, each to a value the writer's three decimals hold exactly, y kept.
     let busy = [&busy[..], &[flip_a, flip_b]].concat();
@@ -325,9 +307,36 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
             moves: group.clone(),
         })]),
     )?;
+    // The delete tool or key on a selection: three unmarked nodes no other edit touches go
+    // in one DeleteNodes, in id order.
+    let busy = [
+        &busy[..],
+        &group.iter().map(|g| g.0).collect::<Vec<_>>()[..],
+    ]
+    .concat();
+    let mut gone: Vec<NodeId> = cfg
+        .network
+        .order()
+        .iter()
+        .copied()
+        .filter(|id| *id != added && !busy.contains(id) && !markers.contains(id))
+        .take(3)
+        .collect();
+    gone.sort();
+    assert_eq!(gone.len(), 3);
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::DeleteNodes(DeleteNodes::new(gone.clone()))]),
+    )?;
+    assert!(gone.iter().all(|id| cfg.network.node(*id).is_none()));
     let shaped_kind = cfg.network.connection_kind(shape_a, shape_b);
     assert_ne!(shaped_kind, old_kind);
     let index_of = |id: NodeId| cfg.network.order().iter().position(|n| *n == id);
+    let flagged_index = index_of(flagged).ok_or("flag node")?;
+    let flipped = (
+        index_of(flip_a).ok_or("flip node")?,
+        index_of(flip_b).ok_or("flip node")?,
+    );
     let cut = (
         index_of(cut_a).ok_or("cut node")?,
         index_of(cut_b).ok_or("cut node")?,
@@ -351,7 +360,7 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .filter_map(|&(id, _, after)| Some((index_of(id)?, after)))
         .collect();
     assert_eq!(group_moved.len(), 3);
-    assert_eq!(cfg.network.len(), order.len() - 1);
+    assert_eq!(cfg.network.len(), order.len() - 4);
 
     let dir = std::env::temp_dir().join(format!("ad_golden_edited_{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;

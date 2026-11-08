@@ -35,6 +35,14 @@ pub struct ToolContext<'a> {
     pub hovered_edge: Option<(NodeId, NodeId)>,
 }
 
+/// The selection a click acts on as a whole: `Some` when the clicked node is selected,
+/// `None` when it is not (or no node is hovered), so the click acts on that target alone.
+pub fn acts_on_selection<'a>(ctx: &ToolContext<'a>) -> Option<&'a BTreeSet<NodeId>> {
+    ctx.hovered_node
+        .filter(|id| ctx.selection.contains(id))
+        .map(|_| ctx.selection)
+}
+
 /// (x, z) rounded to the nearest multiple of the grid spacing per axis (Java
 /// `Math.round(pos / grid) * grid`, which rounds halves up).
 pub fn snap_to_grid((x, z): (f64, f64), (gx, gz): (f64, f64)) -> (f64, f64) {
