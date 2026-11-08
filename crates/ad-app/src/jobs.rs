@@ -9,7 +9,8 @@ use ad_core::geometry::MapGeometry;
 use ad_core::heightmap::{Heightmap, calibrate};
 use ad_core::history::SavePoint;
 use ad_core::map_context::MapContext;
-use ad_io::config_xml::{self, LoadedConfig};
+use ad_io::config_xml::{self, GameVersion, LoadedConfig};
+use ad_io::dds;
 use ad_io::map_image::{self, MapImage};
 use ad_io::settings::Settings;
 use ad_io::vehicles::{self, VehiclesFile};
@@ -33,6 +34,16 @@ pub type Loaded = (
 /// A `vehicles.xml` to patch after the config save, and where it is.
 pub type VehiclesSave = (Arc<VehiclesFile>, PathBuf);
 
+/// An encoded map image and the path it would replace.
+pub type ImageSave = (PathBuf, Vec<u8>);
+
+/// A DDS decoded, cropped and scaled to 2048x2048; `replace` is set when the target already
+/// existed, so it was not written.
+pub struct Imported {
+    pub image: MapImage,
+    pub replace: Option<ImageSave>,
+}
+
 pub enum JobResult {
     Loaded {
         path: PathBuf,
@@ -46,6 +57,90 @@ pub enum JobResult {
         /// Why `vehicles.xml` was not saved after the config was.
         warning: Option<String>,
     },
+    Imported {
+        epoch: u64,
+        result: Result<Box<Imported>, String>,
+    },
+    /// The write of an imported map image over an existing one.
+    ImageSaved { result: Result<(), String> },
+}
+
+/// The folder of the running executable, where `mapImages` is looked up first (AD-14).
+pub fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+}
+
+/// Where an image imported for `doc` is saved; an error when the config names no map.
+pub fn import_target(doc: &Document, exe_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let name = doc
+        .config
+        .map_name()
+        .ok_or("Cannot import the map image: the config names no map")?;
+    let dir = exe_dir.ok_or("Cannot import the map image: the program folder is unknown")?;
+    Ok(map_image::map_image_target(dir, name))
+}
+
+/// Reads, decodes, crops (by `version`, AD-11) and scales the DDS, then saves it as PNG to
+/// `target` unless a file is there already. Any failure names the file.
+pub fn import_dds(path: &Path, version: GameVersion, target: &Path) -> Result<Imported, String> {
+    let fail = |why: &dyn std::fmt::Display| format!("Cannot import {}: {why}", path.display());
+    let bytes = std::fs::read(path).map_err(|e| fail(&e))?;
+    let decoded = dds::decode(&bytes).map_err(|e| fail(&e))?;
+    let image = map_image::to_2048(map_image::crop_for(version, decoded));
+    let png = map_image::encode_png(&image).map_err(|e| fail(&e))?;
+    if target.exists() {
+        return Ok(Imported {
+            image,
+            replace: Some((target.to_path_buf(), png)),
+        });
+    }
+    map_image::save_map_image(target, &png)
+        .map_err(|e| format!("Cannot save {}: {e}", target.display()))?;
+    Ok(Imported {
+        image,
+        replace: None,
+    })
+}
+
+/// Runs `import_dds` on a background thread, then calls `notify`.
+pub fn spawn_import(
+    path: PathBuf,
+    version: GameVersion,
+    target: PathBuf,
+    epoch: u64,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        tracing::info!("importing {} as {version:?}", path.display());
+        let result = import_dds(&path, version, &target).map(Box::new);
+        match &result {
+            Ok(_) => tracing::info!("imported {}", path.display()),
+            Err(e) => tracing::warn!("{e}"),
+        }
+        let _ = tx.send(JobResult::Imported { epoch, result });
+        notify();
+    });
+}
+
+/// Writes an imported map image over the existing one on a background thread.
+pub fn spawn_image_save(
+    (target, png): ImageSave,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        let result = map_image::save_map_image(&target, &png)
+            .map_err(|e| format!("Cannot save {}: {e}", target.display()));
+        match &result {
+            Ok(()) => tracing::info!("saved {}", target.display()),
+            Err(e) => tracing::warn!("{e}"),
+        }
+        let _ = tx.send(JobResult::ImageSaved { result });
+        notify();
+    });
 }
 
 /// Reads and parses the file, then finds and loads the map image and the heightmap. The error
@@ -292,7 +387,45 @@ pub fn apply_result(
             }
             Err(message) => Some(message),
         },
+        // The image changes neither the config nor the history; a result for a document
+        // replaced meanwhile is dropped (AD-18).
+        JobResult::Imported { epoch, result } => {
+            let d = doc.as_mut().filter(|d| d.epoch == epoch)?;
+            match result {
+                Ok(imported) => {
+                    d.map_image = Some(imported.image);
+                    d.image_to_replace = imported.replace;
+                    None
+                }
+                Err(message) => Some(message),
+            }
+        }
+        JobResult::ImageSaved { result } => result.err(),
     }
+}
+
+/// An 8x8 A8R8G8B8 DDS filled with `rgba`.
+#[cfg(test)]
+pub(crate) fn test_dds([r, g, b, a]: [u8; 4]) -> Vec<u8> {
+    let mut file = Vec::new();
+    let mut put = |v: u32| file.extend_from_slice(&v.to_le_bytes());
+    put(u32::from_le_bytes(*b"DDS "));
+    put(124);
+    put(0x1007); // CAPS | HEIGHT | WIDTH | PIXELFORMAT
+    put(8);
+    put(8);
+    (0..14).for_each(|_| put(0)); // pitch, depth, mipmaps, reserved
+    put(32);
+    put(0x41); // RGB | ALPHAPIXELS
+    put(0);
+    put(32);
+    [0xff_0000, 0xff00, 0xff, 0xff00_0000]
+        .into_iter()
+        .for_each(&mut put);
+    put(0x1000); // caps: TEXTURE
+    (0..4).for_each(|_| put(0));
+    (0..64).for_each(|_| file.extend_from_slice(&[b, g, r, a]));
+    file
 }
 
 #[cfg(test)]
@@ -858,6 +991,56 @@ mod tests {
             Some("vehicles.xml was not saved".to_owned())
         );
         assert!(!doc.expect("doc").is_dirty());
+    }
+
+    #[test]
+    fn the_import_target_needs_a_map_name() {
+        let exe = Path::new("exe");
+        let message =
+            import_target(&open(&inline_text("1.000,2.500")), Some(exe)).expect_err("no map name");
+        assert!(message.contains("the config names no map"), "{message}");
+        let doc = open(&named(&inline_text("1.000,2.500")));
+        assert_eq!(
+            import_target(&doc, Some(exe)),
+            Ok(exe.join("mapImages").join("Tiny").join("Tiny.png"))
+        );
+        assert!(import_target(&doc, None).is_err());
+    }
+
+    #[test]
+    fn an_import_saves_a_new_target_and_keeps_an_existing_one() {
+        let dir = temp_dir("import");
+        let dds = dir.join("map.dds");
+        std::fs::write(&dds, test_dds([1, 2, 3, 255])).expect("write");
+        let target = map_image::map_image_target(&dir, "Tiny");
+        let imported = import_dds(&dds, GameVersion::FS19, &target).expect("imports");
+        assert!(imported.replace.is_none());
+        assert_eq!(map_image::load_map_image(&target), (imported.image, None));
+        // Present now: not written, the PNG waits for the question.
+        std::fs::write(&target, b"old").expect("write");
+        let imported = import_dds(&dds, GameVersion::FS25, &target).expect("imports");
+        let (path, png) = imported.replace.expect("asks");
+        assert_eq!(path, target);
+        assert_eq!(std::fs::read(&target).expect("read"), b"old");
+        assert_eq!(&imported.image.rgba[..4], &[1, 2, 3, 255]);
+        assert!(!png.is_empty());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_bad_dds_is_an_error_naming_it_and_saves_nothing() {
+        let dir = temp_dir("import_bad");
+        let dds = dir.join("broken.dds");
+        std::fs::write(&dds, &test_dds([1, 2, 3, 255])[..150]).expect("write");
+        let target = map_image::map_image_target(&dir, "Tiny");
+        let message = import_dds(&dds, GameVersion::FS25, &target)
+            .err()
+            .expect("truncated");
+        let missing = import_dds(&dir.join("missing.dds"), GameVersion::FS25, &target).is_err();
+        let written = target.exists();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(message.contains("broken.dds"), "{message}");
+        assert!(missing && !written);
     }
 
     /// Needs the gitignored `terrain.heightmap.png` beside the fixture.

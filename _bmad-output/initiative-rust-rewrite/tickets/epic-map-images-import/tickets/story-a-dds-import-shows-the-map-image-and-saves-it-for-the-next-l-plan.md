@@ -57,9 +57,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] ad-io crop, scale, save -- tests for FS25, FS19, Odd size, the path
-- [ ] job and UI -- tests for Exists (both answers), Bad file, No map name, Replaced, read-only allowed
-- [ ] the FS25 sample end to end in a test (skipped when the gitignored file is absent): decode, crop, 2048²
+- [x] ad-io crop, scale, save -- tests for FS25, FS19, Odd size, the path
+- [x] job and UI -- tests for Exists (both answers), Bad file, No map name, Replaced, read-only allowed
+- [x] the FS25 sample end to end in a test (skipped when the gitignored file is absent): decode, crop, 2048²
 
 **Acceptance Criteria:**
 - Given the fixture open, when the user imports `pda_map_H.dds` as FS22/FS25, then the map background appears at once, and after reopening the fixture it is still there.
@@ -73,6 +73,14 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **ad-io (`map_image.rs`):** `map_image_target`, `crop_for(version, image)` (FS19 whole; anything else the rectangle `w/4, h/4, w/2 × h/2`, as Java and the Odd-size row, so 3000×2000 gives 1500×1000, not a square), `to_2048` (Lanczos3, untouched when already 2048²), `encode_png`, `save_map_image(target, png)` (creates the folders, `atomic::write`). The existing PNG load path keeps its Triangle filter.
+- **Job (`jobs.rs`):** `import_dds` reads, decodes, crops, scales and encodes the PNG off the UI thread. When the target is absent it writes it in the job, so a write error fails the import and the image stays unchanged. When it exists the PNG comes back in `Imported.replace` and nothing is written. `JobResult::Imported { epoch, .. }` is dropped, errors too, when the document's epoch changed (AD-18). `JobResult::ImageSaved` carries the write after a Yes.
+- **Target and version:** `import_target` needs the config's map name (error "the config names no map") and the exe dir, and it is checked before the file dialog opens. The exe-dir lookup moved from `App::open` to `jobs::exe_dir()`. The version comes from the menu item: "DDS for FS19…" passes FS19, "DDS for FS22/FS25…" passes FS25 (same crop as FS22).
+- **UI:** an "Import" menu in the top bar, enabled with a document (read-only too) while no load or import runs, and an "Importing…" label. A successful result sets `doc.map_image`, which the map panel uploads and then drops, as on a load. The pending replace (`Document.image_to_replace`) lives on the document, so a new document drops it. The modal "Replace the existing map image?": Yes spawns the write, No or Escape keeps the image shown without saving. While it is up it counts as a dialog (`dialog_shown`), so shortcuts and map input are off.
+- **Known gaps:** a write error after Yes shows the error while the image stays shown, like No. A job for a replaced document that found no target has already written the file, and the new document ignores the result.
+- **Tests:** ad-io `fs22_and_fs25_crop_the_centre_half`, `fs19_keeps_the_whole_image_and_scales_it`, `an_odd_size_crops_the_centre_half_and_scales_to_2048`, `a_saved_image_is_found_and_loaded_at_the_next_load`, `fs25_sample_decodes_crops_and_scales` (ran here: 4096² → 2048², first pixel = source (1024, 1024)). jobs `the_import_target_needs_a_map_name`, `an_import_saves_a_new_target_and_keeps_an_existing_one`, `a_bad_dds_is_an_error_naming_it_and_saves_nothing`. main `import_tests::{an_import_shows_the_image_and_saves_it, an_existing_image_is_replaced_only_on_yes, a_bad_file_shows_an_error_and_keeps_the_image, a_result_for_a_replaced_document_is_ignored, a_read_only_document_takes_an_imported_image}`.
+- **Verification:** `cargo fmt --all --check` exit 0. `cargo clippy --workspace --all-targets -- -D warnings` exit 0. `cargo test --workspace` all pass (ad-app 355 + 2 ignored, ad-io 57, ad-core 71, the rest). In the release frame_time run every case was under 16 ms; the worst best-round max was 9.2 ms (rotate tool idle, min zoom, all selected). The GUI acceptance (background shows at once, still there after reopening) needs a human run.
 
 ## Plan Change Log
 

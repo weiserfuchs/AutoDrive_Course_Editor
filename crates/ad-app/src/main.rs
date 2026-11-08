@@ -62,6 +62,8 @@ struct App {
     rx: Receiver<JobResult>,
     loading: bool,
     saving: bool,
+    /// A DDS import job is running.
+    importing: bool,
     error: Option<String>,
     settings: Settings,
     view: MapView,
@@ -109,6 +111,7 @@ impl App {
             rx,
             loading: false,
             saving: false,
+            importing: false,
             error: None,
             settings,
             view,
@@ -210,6 +213,8 @@ impl App {
                         self.pending = None;
                     }
                 }
+                JobResult::Imported { .. } => self.importing = false,
+                JobResult::ImageSaved { .. } => {}
             }
             let before = self.doc.as_ref().map(|d| d.epoch);
             if let Some(message) = jobs::apply_result(
@@ -249,9 +254,16 @@ impl App {
         self.doc.as_ref().is_some_and(document::Document::editable)
     }
 
-    /// Whether a modal dialog (Edit location, marker or groups) is shown.
+    /// Whether a modal dialog (Edit location, marker, groups or the map image replace
+    /// question) is shown.
     fn dialog_shown(&self) -> bool {
-        self.location.is_some() || self.marker.is_some() || self.groups.is_some()
+        self.location.is_some()
+            || self.marker.is_some()
+            || self.groups.is_some()
+            || self
+                .doc
+                .as_ref()
+                .is_some_and(|d| d.image_to_replace.is_some())
     }
 
     /// Runs a toolbar or shortcut action.
@@ -667,18 +679,63 @@ impl App {
         };
         self.loading = true;
         let ctx = ctx.clone();
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
         jobs::spawn_load(
             path,
-            exe_dir,
+            jobs::exe_dir(),
             self.settings.clone(),
             self.tx.clone(),
             move || {
                 ctx.request_repaint();
             },
         );
+    }
+
+    /// Asks for a DDS and imports it as the open document's map image, cropped for
+    /// `version`, the game the menu item names. Read-only documents too: no data changes.
+    fn import(&mut self, version: ad_io::config_xml::GameVersion, ctx: &egui::Context) {
+        let Some(doc) = &self.doc else {
+            return;
+        };
+        let target = match jobs::import_target(doc, jobs::exe_dir().as_deref()) {
+            Ok(target) => target,
+            Err(message) => {
+                self.error = Some(message);
+                return;
+            }
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("DDS", &["dds"])
+            .pick_file()
+        else {
+            return;
+        };
+        let ctx = ctx.clone();
+        self.start_import(path, version, target, move || ctx.request_repaint());
+    }
+
+    fn start_import(
+        &mut self,
+        path: std::path::PathBuf,
+        version: ad_io::config_xml::GameVersion,
+        target: std::path::PathBuf,
+        notify: impl FnOnce() + Send + 'static,
+    ) {
+        let Some(doc) = &self.doc else {
+            return;
+        };
+        self.importing = true;
+        jobs::spawn_import(path, version, target, doc.epoch, self.tx.clone(), notify);
+    }
+
+    /// The answer to "Replace the existing map image?": Yes writes the shown image over it,
+    /// No keeps it shown without saving.
+    fn answer_replace(&mut self, replace: bool, notify: impl FnOnce() + Send + 'static) {
+        let Some(save) = self.doc.as_mut().and_then(|d| d.image_to_replace.take()) else {
+            return;
+        };
+        if replace {
+            jobs::spawn_image_save(save, self.tx.clone(), notify);
+        }
     }
 
     /// Asks for a target and starts the save. Returns false when no save started.
@@ -734,6 +791,7 @@ impl eframe::App for App {
         ui::location_dialog(self, &ctx);
         ui::marker_dialog(self, &ctx);
         ui::groups_window(self, &ctx);
+        ui::replace_image_prompt(self, &ctx);
         ui::unsaved_prompt(self, &ctx);
     }
 }
@@ -3150,5 +3208,183 @@ mod tests {
         app.run(Action::Undo);
         assert_eq!(snapshot(&app), before);
         assert_eq!(app.doc.as_ref().expect("doc").selection, junction);
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    #![allow(clippy::expect_used)]
+
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use ad_io::config_xml::{self, GameVersion};
+    use ad_io::map_image;
+
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ad_app_import_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    fn text(version: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<AutoDrive>\n    \
+             {version}\n    <waypoints>\n        <id>1</id>\n        <x>1.000</x>\n        \
+             <y>0.000</y>\n        <z>2.000</z>\n        <out>-1</out>\n        \
+             <incoming>-1</incoming>\n        <flags>0</flags>\n    </waypoints>\n</AutoDrive>\n"
+        )
+    }
+
+    /// An app with a one-node config of `version`, its image already uploaded (taken).
+    fn app(version: &str) -> App {
+        let mut app = App::new(Settings::default());
+        let config = config_xml::load(text(version).as_bytes()).expect("loads");
+        app.tx
+            .send(JobResult::Loaded {
+                path: PathBuf::from("a.xml"),
+                result: Ok(Box::new((config, map_image::blank(), None, None, None))),
+            })
+            .expect("send");
+        app.poll_jobs();
+        app.doc.as_mut().expect("doc").map_image = None;
+        app
+    }
+
+    /// Writes a DDS of `rgba` to `dir` and imports it into `app` towards `target`.
+    fn start(app: &mut App, dir: &Path, rgba: [u8; 4], target: &Path) {
+        let dds = dir.join("map.dds");
+        std::fs::write(&dds, jobs::test_dds(rgba)).expect("write");
+        app.start_import(dds, GameVersion::FS25, target.to_path_buf(), || {});
+        assert!(app.importing);
+    }
+
+    /// Waits for the next job result and applies it as a frame would.
+    fn finish(app: &mut App) {
+        let result = app.rx.recv_timeout(Duration::from_secs(60)).expect("job");
+        app.tx.send(result).expect("send");
+        app.poll_jobs();
+    }
+
+    fn shown(app: &App) -> Option<[u8; 4]> {
+        let image = app.doc.as_ref().expect("doc").map_image.as_ref()?;
+        Some([image.rgba[0], image.rgba[1], image.rgba[2], image.rgba[3]])
+    }
+
+    fn unchanged_data(app: &App) {
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(!doc.is_dirty() && !doc.history.can_undo());
+        assert_eq!(doc.config.network.len(), 1);
+    }
+
+    #[test]
+    fn an_import_shows_the_image_and_saves_it() {
+        let dir = temp_dir("new");
+        let target = map_image::map_image_target(&dir, "M");
+        let mut app = app("<version>3</version>");
+        start(&mut app, &dir, [1, 2, 3, 255], &target);
+        finish(&mut app);
+        let saved = map_image::load_map_image(&target);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(!app.importing && app.error.is_none());
+        assert_eq!(shown(&app), Some([1, 2, 3, 255]));
+        assert!(!app.dialog_shown());
+        assert_eq!(saved.1, None);
+        assert_eq!(&saved.0.rgba[..4], &[1, 2, 3, 255]);
+        unchanged_data(&app);
+    }
+
+    #[test]
+    fn an_existing_image_is_replaced_only_on_yes() {
+        for replace in [true, false] {
+            let dir = temp_dir(&format!("exists_{replace}"));
+            let target = map_image::map_image_target(&dir, "M");
+            std::fs::create_dir_all(target.parent().expect("dir")).expect("dir");
+            std::fs::write(&target, b"old").expect("write");
+            let mut app = app("<version>3</version>");
+            start(&mut app, &dir, [4, 5, 6, 255], &target);
+            finish(&mut app);
+            // Shown while asking; nothing written yet.
+            assert_eq!(shown(&app), Some([4, 5, 6, 255]));
+            assert!(app.dialog_shown());
+            assert_eq!(std::fs::read(&target).expect("read"), b"old");
+            app.answer_replace(replace, || {});
+            assert!(!app.dialog_shown());
+            if replace {
+                finish(&mut app);
+            }
+            let after = std::fs::read(&target).expect("read");
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+            assert!(app.error.is_none());
+            assert_eq!(after != b"old", replace, "replace {replace}");
+            assert_eq!(shown(&app), Some([4, 5, 6, 255]));
+            unchanged_data(&app);
+        }
+    }
+
+    #[test]
+    fn a_bad_file_shows_an_error_and_keeps_the_image() {
+        let dir = temp_dir("bad");
+        let target = map_image::map_image_target(&dir, "M");
+        let mut app = app("<version>3</version>");
+        let dds = dir.join("broken.dds");
+        std::fs::write(&dds, &jobs::test_dds([1, 2, 3, 255])[..150]).expect("write");
+        app.start_import(dds, GameVersion::FS19, target.clone(), || {});
+        finish(&mut app);
+        let written = target.exists();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(!app.importing && !written);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|e| e.contains("broken.dds"))
+        );
+        assert_eq!(shown(&app), None);
+        unchanged_data(&app);
+    }
+
+    #[test]
+    fn a_result_for_a_replaced_document_is_ignored() {
+        let dir = temp_dir("replaced");
+        let target = map_image::map_image_target(&dir, "M");
+        std::fs::create_dir_all(target.parent().expect("dir")).expect("dir");
+        std::fs::write(&target, b"old").expect("write");
+        let mut app = app("<version>3</version>");
+        start(&mut app, &dir, [7, 8, 9, 255], &target);
+        // Another file opens before the job ends.
+        let result = app.rx.recv_timeout(Duration::from_secs(60)).expect("job");
+        let config = config_xml::load(text("<version>3</version>").as_bytes()).expect("loads");
+        app.tx
+            .send(JobResult::Loaded {
+                path: PathBuf::from("b.xml"),
+                result: Ok(Box::new((config, map_image::blank(), None, None, None))),
+            })
+            .expect("send");
+        app.poll_jobs();
+        app.doc.as_mut().expect("doc").map_image = None;
+        app.tx.send(result).expect("send");
+        app.poll_jobs();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(!app.importing && app.error.is_none());
+        assert_eq!(shown(&app), None);
+        assert!(!app.dialog_shown());
+    }
+
+    #[test]
+    fn a_read_only_document_takes_an_imported_image() {
+        let dir = temp_dir("read_only");
+        let target = map_image::map_image_target(&dir, "M");
+        let mut app = app("<markerID>1</markerID>");
+        assert!(!app.editable());
+        start(&mut app, &dir, [1, 2, 3, 255], &target);
+        finish(&mut app);
+        let written = target.is_file();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(app.error.is_none() && written);
+        assert_eq!(shown(&app), Some([1, 2, 3, 255]));
+        unchanged_data(&app);
     }
 }

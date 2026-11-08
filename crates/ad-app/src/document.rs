@@ -25,6 +25,8 @@ pub struct Document {
     /// Decoded image waiting for the UI thread to upload it; taken right after (AD-14).
     pub map_image: Option<MapImage>,
     pub map_texture: Option<eframe::egui::TextureHandle>,
+    /// An imported map image, shown, whose save waits for "Replace the existing map image?".
+    pub image_to_replace: Option<crate::jobs::ImageSave>,
     /// A warning about the map image, shown until the next document loads.
     pub notice: Option<String>,
     /// Selected nodes, kept outside the history and pruned to existing ids after every
@@ -67,6 +69,7 @@ impl Document {
             map,
             map_image: Some(map_image),
             map_texture: None,
+            image_to_replace: None,
             notice,
             selection: BTreeSet::new(),
             revision: 0,
