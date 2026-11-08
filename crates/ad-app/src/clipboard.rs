@@ -71,19 +71,13 @@ pub fn copy(net: &Network, selection: &BTreeSet<NodeId>) -> Option<Clipboard> {
             let Some(&j) = index.get(b) else {
                 continue;
             };
-            let Some(nb) = net.node(*b) else {
+            let Some(shape) = net.link_shape(ids[i], *b) else {
                 continue;
             };
-            let a_id = ids[i];
-            let b_in = nb.incoming().contains(&a_id);
-            let dual = b_in && nb.outgoing().contains(&a_id) && a.incoming().contains(b);
-            let shape = match (dual, b_in) {
-                // A dual link is listed from both ends; it is kept once, from the lower index.
-                (true, _) if i > j => continue,
-                (true, _) => ConnectionShape::Dual,
-                (false, true) => ConnectionShape::OneWay,
-                (false, false) => ConnectionShape::Reverse,
-            };
+            // A dual link is listed from both ends; it is kept once, from the lower index.
+            if shape == ConnectionShape::Dual && i > j {
+                continue;
+            }
             links.push((i, j, shape));
         }
     }

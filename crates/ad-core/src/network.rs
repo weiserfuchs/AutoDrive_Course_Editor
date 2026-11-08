@@ -77,7 +77,7 @@ pub struct LoadedNode {
 }
 
 /// What `connect` and `set_shape` create between `a` and `b`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConnectionShape {
     /// a.out + b, b.in + a.
     OneWay,
@@ -583,6 +583,26 @@ impl Network {
     pub fn connection_kind(&self, a: NodeId, b: NodeId) -> ConnectionKind {
         self.link_look(a, b)
             .map_or(ConnectionKind::None, |l| l.kind)
+    }
+
+    /// The shape whose `connect(a, b, shape)` recreates the entries of `a.out` listing `b`:
+    /// `Dual` when both ends list each other both ways, `OneWay` when `b.in` lists `a`,
+    /// else `Reverse`. `None` when a node is missing or `a.out` does not list `b`.
+    pub fn link_shape(&self, a: NodeId, b: NodeId) -> Option<ConnectionShape> {
+        let (na, nb) = (self.nodes.get(&a)?, self.nodes.get(&b)?);
+        if !na.outgoing.contains(&b) {
+            return None;
+        }
+        let b_in = nb.incoming.contains(&a);
+        Some(
+            if b_in && nb.outgoing.contains(&a) && na.incoming.contains(&b) {
+                ConnectionShape::Dual
+            } else if b_in {
+                ConnectionShape::OneWay
+            } else {
+                ConnectionShape::Reverse
+            },
+        )
     }
 
     /// Kind of the link `a -> b` with the flags of both ends, for drawing. `None` when a

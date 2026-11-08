@@ -1,9 +1,10 @@
-//! Network scans that change nothing: they report nodes for the user to look at.
+//! Network scans that change nothing: they report nodes for the user to look at. The
+//! merge of overlapping nodes is planned here as one transaction for the caller to apply.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::command::{Command, Transaction};
-use crate::network::{Network, NodeId};
+use crate::command::{Command, Connect, DeleteNodes, Transaction};
+use crate::network::{ConnectionShape, Network, NodeId};
 
 /// How far apart in height two overlapping nodes may be. Stored heights of a road and of a
 /// copy pasted onto it differ by up to about 2 m (the heightmap sample is not the stored
@@ -84,6 +85,156 @@ pub fn remark(
         } else {
             marks.remove(&id);
         }
+    }
+}
+
+/// Marked nodes that overlap each other, joined transitively: `keep` stays, `removed` are
+/// merged into it, in network order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Group {
+    pub keep: NodeId,
+    pub removed: Vec<NodeId>,
+}
+
+/// The root of `i` in a union-find forest, halving the path on the way.
+fn root(parent: &mut [usize], mut i: usize) -> usize {
+    while parent[i] != i {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+    }
+    i
+}
+
+/// The groups of `marks`: two marked nodes are in one group when they overlap by the scan's
+/// rule (within `distance` in x/z and [`HEIGHT_TOLERANCE`] in height), and so on
+/// transitively. Each group keeps its first node in network order that has a marker, else
+/// its first node. Groups come in network order of their first node; a marked node without
+/// a marked neighbour is a group of its own with nothing removed.
+pub fn overlap_groups(net: &Network, distance: f64, marks: &BTreeSet<NodeId>) -> Vec<Group> {
+    let members: Vec<NodeId> = net
+        .order()
+        .iter()
+        .copied()
+        .filter(|id| marks.contains(id))
+        .collect();
+    let index: HashMap<NodeId, usize> =
+        members.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let mut parent: Vec<usize> = (0..members.len()).collect();
+    for (i, id) in members.iter().enumerate() {
+        let Some(n) = net.node(*id) else {
+            continue;
+        };
+        for other in net.within(n.x, n.z, distance) {
+            let Some(&j) = index.get(&other) else {
+                continue;
+            };
+            let close = net
+                .node(other)
+                .is_some_and(|o| (o.y - n.y).abs() <= HEIGHT_TOLERANCE);
+            if j == i || !close {
+                continue;
+            }
+            let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+            // The lower index becomes the root, so a group's root is its first node.
+            parent[a.max(b)] = a.min(b);
+        }
+    }
+    let with_marker: HashSet<NodeId> = net.markers().iter().map(|m| m.node).collect();
+    let mut groups: Vec<Vec<NodeId>> = Vec::new();
+    let mut slot: HashMap<usize, usize> = HashMap::new();
+    for (i, id) in members.iter().enumerate() {
+        let r = root(&mut parent, i);
+        let g = *slot.entry(r).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[g].push(*id);
+    }
+    groups
+        .into_iter()
+        .filter_map(|nodes| {
+            let keep = nodes
+                .iter()
+                .copied()
+                .find(|id| with_marker.contains(id))
+                .or_else(|| nodes.first().copied())?;
+            Some(Group {
+                keep,
+                removed: nodes.into_iter().filter(|id| *id != keep).collect(),
+            })
+        })
+        .collect()
+}
+
+/// The merge of `groups` as one transaction, and the names of the markers deleted with the
+/// removed nodes, in marker order. Every link between a removed node and a node outside its
+/// group is recreated with its direction and shape ([`Network::link_shape`]) between the
+/// kept nodes of its ends (a node in no group stands for itself), unless it is there
+/// already; links inside a group are dropped. Then the removed nodes are deleted with their
+/// links and markers. No node moves.
+pub fn merge_plan(net: &Network, groups: &[Group]) -> (Transaction, Vec<String>) {
+    let kept: HashMap<NodeId, NodeId> = groups
+        .iter()
+        .flat_map(|g| g.removed.iter().map(move |r| (*r, g.keep)))
+        .collect();
+    let rep = |id: NodeId| kept.get(&id).copied().unwrap_or(id);
+    let mut planned = HashSet::new();
+    let mut commands = Vec::new();
+    // Every node's outgoing list, as a reverse link into a removed node is listed only there.
+    for &a in net.order() {
+        let Some(node) = net.node(a) else {
+            continue;
+        };
+        for &b in node.outgoing() {
+            if !kept.contains_key(&a) && !kept.contains_key(&b) {
+                continue;
+            }
+            let Some(shape) = net.link_shape(a, b) else {
+                continue;
+            };
+            // A dual link is listed from both ends; it is taken once, from the lower id.
+            if shape == ConnectionShape::Dual && a > b {
+                continue;
+            }
+            let (ka, kb) = (rep(a), rep(b));
+            if ka == kb || has(net, ka, kb, shape) {
+                continue;
+            }
+            let key = match shape {
+                ConnectionShape::Dual => (ka.min(kb), ka.max(kb), shape),
+                _ => (ka, kb, shape),
+            };
+            if planned.insert(key) {
+                commands.push(Command::Connect(Connect::new(ka, kb, shape)));
+            }
+        }
+    }
+    let removed: Vec<NodeId> = net
+        .order()
+        .iter()
+        .copied()
+        .filter(|id| kept.contains_key(id))
+        .collect();
+    let markers = net
+        .markers()
+        .iter()
+        .filter(|m| kept.contains_key(&m.node))
+        .map(|m| m.name.clone())
+        .collect();
+    if !removed.is_empty() {
+        commands.push(Command::DeleteNodes(DeleteNodes::new(removed)));
+    }
+    (Transaction::new(commands), markers)
+}
+
+/// Whether every list entry `connect(a, b, shape)` would add is there already.
+fn has(net: &Network, a: NodeId, b: NodeId, shape: ConnectionShape) -> bool {
+    let out = |x: NodeId, y: NodeId| net.node(x).is_some_and(|n| n.outgoing().contains(&y));
+    let inc = |x: NodeId, y: NodeId| net.node(x).is_some_and(|n| n.incoming().contains(&y));
+    match shape {
+        ConnectionShape::Reverse => out(a, b),
+        ConnectionShape::OneWay => out(a, b) && inc(b, a),
+        ConnectionShape::Dual => out(a, b) && inc(b, a) && out(b, a) && inc(a, b),
     }
 }
 
@@ -203,6 +354,219 @@ mod tests {
             done.push(tx);
         }
         assert!(!marks.is_empty());
+    }
+
+    use crate::command::tests::{round_trip, snap};
+    use crate::network::{ConnectionKind, ConnectionShape, Marker};
+
+    /// Groups and plan of every node marked at 0.1.
+    fn plan(n: &Network) -> (Vec<Group>, Transaction, Vec<String>) {
+        let groups = overlap_groups(n, 0.1, &overlaps(n, 0.1));
+        let (tx, markers) = merge_plan(n, &groups);
+        (groups, tx, markers)
+    }
+
+    fn lists(n: &Network, id: NodeId) -> (Vec<NodeId>, Vec<NodeId>) {
+        let x = n.node(id).expect("node");
+        (x.outgoing().to_vec(), x.incoming().to_vec())
+    }
+
+    fn marker(n: &mut Network, node: NodeId, name: &str) {
+        n.push_marker(Marker {
+            node,
+            name: name.into(),
+            group: "g".into(),
+            parked_vehicles: Vec::new(),
+        });
+    }
+
+    #[test]
+    fn a_chain_pasted_in_place_merges_into_the_original_without_new_links() {
+        // Original A -> B -> C and A -> X; the copy a -> b -> c on top, added later.
+        let (mut n, ids) = net(&[
+            (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0),
+            (20.0, 0.0, 0.0),
+            (0.0, 0.0, 30.0),
+            (0.0, 0.5, 0.0),
+            (10.0, 0.5, 0.0),
+            (20.0, 0.5, 0.0),
+        ]);
+        let [a0, b0, c0, x, a, b, c] = ids[..] else {
+            panic!("seven nodes");
+        };
+        for (p, q) in [(a0, b0), (b0, c0), (a0, x), (a, b), (b, c)] {
+            n.connect(p, q, ConnectionShape::OneWay).expect("ok");
+        }
+        let before: Vec<_> = [a0, b0, c0, x].iter().map(|&id| lists(&n, id)).collect();
+        let (groups, tx, markers) = plan(&n);
+        let keeps: Vec<NodeId> = groups.iter().map(|g| g.keep).collect();
+        assert_eq!(keeps, [a0, b0, c0]);
+        assert!(markers.is_empty());
+        assert!(
+            !tx.0.iter().any(|c| matches!(c, Command::Connect(_))),
+            "every link is there already"
+        );
+        let (n, _) = round_trip(n, tx);
+        assert_eq!(n.order(), &[a0, b0, c0, x]);
+        let after: Vec<_> = [a0, b0, c0, x].iter().map(|&id| lists(&n, id)).collect();
+        assert_eq!(after, before);
+    }
+
+    /// `k` with `r` on it; outside nodes p, q, s, t, u, v. r has one-way p -> r, one-way
+    /// r -> q, reverse r -> s, reverse t -> r, dual r <-> u; k has its own one-way k -> v.
+    /// Markers "K" on k (vehicle "v1" parked) and "R" on r (vehicle "v2").
+    fn shapes() -> (Network, [NodeId; 8]) {
+        let (mut n, ids) = net(&[
+            (0.0, 0.0, 0.0),
+            (0.05, 0.0, 0.0),
+            (-10.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0),
+            (0.0, 0.0, 10.0),
+            (0.0, 0.0, -10.0),
+            (10.0, 0.0, 10.0),
+            (-10.0, 0.0, -10.0),
+        ]);
+        let [k, r, p, q, s, t, u, v] = ids[..] else {
+            panic!("eight nodes");
+        };
+        n.connect(p, r, ConnectionShape::OneWay).expect("ok");
+        n.connect(r, q, ConnectionShape::OneWay).expect("ok");
+        n.connect(r, s, ConnectionShape::Reverse).expect("ok");
+        n.connect(t, r, ConnectionShape::Reverse).expect("ok");
+        n.connect(r, u, ConnectionShape::Dual).expect("ok");
+        n.connect(k, v, ConnectionShape::OneWay).expect("ok");
+        marker(&mut n, k, "K");
+        marker(&mut n, r, "R");
+        assert!(n.park_vehicle(0, "v1".into()));
+        assert!(n.park_vehicle(1, "v2".into()));
+        (n, [k, r, p, q, s, t, u, v])
+    }
+
+    #[test]
+    fn every_link_shape_is_recreated_on_the_kept_node_and_reverts_exactly() {
+        let (n, [k, r, p, q, s, t, u, v]) = shapes();
+        let (groups, tx, markers) = plan(&n);
+        assert_eq!(
+            groups,
+            [Group {
+                keep: k,
+                removed: vec![r]
+            }]
+        );
+        assert_eq!(markers, ["R"]);
+        // `round_trip`: undo restores every node, link, marker and parked vehicle exactly.
+        let (n, _) = round_trip(n, tx);
+        assert!(n.node(r).is_none());
+        assert_eq!(n.connection_kind(p, k), ConnectionKind::Regular);
+        assert_eq!(n.connection_kind(k, q), ConnectionKind::Regular);
+        assert_eq!(n.connection_kind(k, s), ConnectionKind::Reverse);
+        assert!(!lists(&n, s).1.contains(&k));
+        assert_eq!(n.connection_kind(t, k), ConnectionKind::Reverse);
+        assert!(!lists(&n, k).1.contains(&t));
+        assert_eq!(n.connection_kind(k, u), ConnectionKind::Dual);
+        assert_eq!(n.connection_kind(k, v), ConnectionKind::Regular);
+        let (out, inc) = lists(&n, k);
+        assert_eq!(out, [v, q, s, u]);
+        assert_eq!(inc, [u, p]);
+        assert_eq!(n.markers().len(), 1);
+        assert_eq!(n.markers()[0].parked_vehicles, ["v1"]);
+        assert!(
+            n.node(k).is_some_and(|x| (x.x, x.z) == (0.0, 0.0)),
+            "not moved"
+        );
+    }
+
+    #[test]
+    fn links_inside_a_group_are_dropped_without_self_links() {
+        let (mut n, ids) = net(&[(0.0, 0.0, 0.0), (0.05, 0.0, 0.0), (0.0, 0.0, 0.05)]);
+        let [k, r1, r2] = ids[..] else {
+            panic!("three nodes");
+        };
+        n.connect(k, r1, ConnectionShape::Dual).expect("ok");
+        n.connect(r1, r2, ConnectionShape::OneWay).expect("ok");
+        n.connect(r2, k, ConnectionShape::Reverse).expect("ok");
+        let (_, tx, _) = plan(&n);
+        assert!(!tx.0.iter().any(|c| matches!(c, Command::Connect(_))));
+        let (n, _) = round_trip(n, tx);
+        assert_eq!(n.order(), &[k]);
+        assert_eq!(lists(&n, k), (vec![], vec![]));
+    }
+
+    #[test]
+    fn the_node_with_the_marker_is_kept_and_of_two_the_first() {
+        let points = [(0.0, 0.0, 0.0), (0.05, 0.0, 0.0), (0.0, 0.0, 0.05)];
+        let (mut n, ids) = net(&points);
+        marker(&mut n, ids[1], "M");
+        let (groups, _, markers) = plan(&n);
+        assert_eq!(groups[0].keep, ids[1]);
+        assert_eq!(groups[0].removed, [ids[0], ids[2]]);
+        assert!(markers.is_empty());
+        // Markers on the third and second node: the second (first in network order) stays.
+        let (mut n, ids) = net(&points);
+        marker(&mut n, ids[2], "Third");
+        marker(&mut n, ids[1], "Second");
+        let (groups, tx, markers) = plan(&n);
+        assert_eq!(groups[0].keep, ids[1]);
+        assert_eq!(markers, ["Third"]);
+        let (n, _) = round_trip(n, tx);
+        assert_eq!(n.markers().len(), 1);
+        assert_eq!(
+            (n.markers()[0].node, &*n.markers()[0].name),
+            (ids[1], "Second")
+        );
+    }
+
+    #[test]
+    fn three_nodes_overlapping_transitively_are_one_group() {
+        // The ends are 0.16 apart, each 0.08 from the middle one.
+        let (n, ids) = net(&[(0.0, 0.0, 0.0), (0.08, 0.0, 0.0), (0.16, 0.0, 0.0)]);
+        let (groups, tx, _) = plan(&n);
+        assert_eq!(
+            groups,
+            [Group {
+                keep: ids[0],
+                removed: vec![ids[1], ids[2]]
+            }]
+        );
+        let (n, _) = round_trip(n, tx);
+        assert_eq!(n.order(), &[ids[0]]);
+    }
+
+    #[test]
+    fn links_between_two_groups_join_their_kept_nodes_and_unmarked_nodes_stay() {
+        // Pairs (k1, r1) and (k2, r2), r1 -> r2 one-way; w overlaps k1 but is not marked.
+        let (mut n, ids) = net(&[
+            (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0),
+            (0.05, 0.0, 0.0),
+            (10.05, 0.0, 0.0),
+            (0.0, 0.0, 0.05),
+        ]);
+        let [k1, k2, r1, r2, w] = ids[..] else {
+            panic!("five nodes");
+        };
+        n.connect(r1, r2, ConnectionShape::OneWay).expect("ok");
+        let mut marks = overlaps(&n, 0.1);
+        marks.remove(&w);
+        let groups = overlap_groups(&n, 0.1, &marks);
+        let (tx, _) = merge_plan(&n, &groups);
+        let (n, _) = round_trip(n, tx);
+        assert_eq!(n.order(), &[k1, k2, w]);
+        assert_eq!(n.connection_kind(k1, k2), ConnectionKind::Regular);
+    }
+
+    #[test]
+    fn an_empty_marking_plans_nothing() {
+        let (n, _) = shapes();
+        let groups = overlap_groups(&n, 0.1, &BTreeSet::new());
+        assert!(groups.is_empty());
+        let before = snap(&n);
+        let (mut tx, markers) = merge_plan(&n, &groups);
+        assert!(tx.0.is_empty() && markers.is_empty());
+        let mut n = n;
+        tx.apply(&mut n).expect("applies");
+        assert_eq!(snap(&n), before);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Background load and save jobs, and how their results apply (AD-9, AD-16, AD-18).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -9,6 +10,7 @@ use ad_core::geometry::MapGeometry;
 use ad_core::heightmap::{Heightmap, calibrate};
 use ad_core::history::SavePoint;
 use ad_core::map_context::MapContext;
+use ad_core::network::NodeId;
 use ad_io::config_xml::{self, GameVersion, LoadedConfig};
 use ad_io::dds;
 use ad_io::download::{self, DownloadError};
@@ -124,6 +126,60 @@ pub enum JobResult {
         image: Option<Arc<[u8]>>,
         result: Result<(), String>,
     },
+    /// The backup before a merge of overlapping nodes written; the merge waits for it.
+    MergeBackup {
+        start: MergeStart,
+        result: Result<(), String>,
+    },
+}
+
+/// The document state a merge's backup was written from: the merge applies only while it
+/// is still the document's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeStart {
+    pub epoch: u64,
+    pub revision: u64,
+    /// The overlap distance and marks the user confirmed.
+    pub overlap: (f64, BTreeSet<NodeId>),
+}
+
+/// The notice line when a merge was not applied because the document changed meanwhile.
+pub const MERGE_CHANGED: &str =
+    "Merge not applied: the document changed while the backup was written";
+
+/// `<config dir>/<config stem>_mergeBackup.xml` (Java `saveMergeBackupConfigFile`).
+pub fn merge_backup_path(config: &Path) -> PathBuf {
+    let stem = config
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    config.with_file_name(format!("{stem}_mergeBackup.xml"))
+}
+
+/// Writes the backup of `snapshot` before a merge on a background thread, atomically
+/// (AD-16); path, saved state and `vehicles.xml` stay as they are. Then calls `notify`.
+pub fn spawn_merge_backup(
+    snapshot: LoadedConfig,
+    start: MergeStart,
+    target: PathBuf,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        tracing::info!("saving the merge backup {}", target.display());
+        let result = config_xml::save_to(&snapshot, &target).map_err(|e| {
+            format!(
+                "Merge cancelled: cannot write the backup {}: {e}",
+                target.display()
+            )
+        });
+        match &result {
+            Ok(()) => tracing::info!("saved {}", target.display()),
+            Err(e) => tracing::warn!("{e}"),
+        }
+        let _ = tx.send(JobResult::MergeBackup { start, result });
+        notify();
+    });
 }
 
 /// What an export writes.
@@ -702,6 +758,19 @@ pub fn apply_result(
         },
         // Taken by `App::poll_jobs` before this is called.
         JobResult::ZipRead { .. } => None,
+        // The merge runs only after its backup was written, on the document, revision and
+        // marks the backup was taken of (AD-18).
+        JobResult::MergeBackup { start, result } => {
+            if let Err(message) = result {
+                return Some(message);
+            }
+            let d = doc.as_mut().filter(|d| d.epoch == start.epoch)?;
+            if d.revision != start.revision || d.overlap.as_ref() != Some(&start.overlap) {
+                d.add_notice(MERGE_CHANGED.to_owned());
+                return None;
+            }
+            d.merge_overlaps().err().map(|e| e.to_string())
+        }
         // The files are saved either way; they attach only to the document they were
         // imported for, and only when its map name is the folder name.
         JobResult::ZipSaved {

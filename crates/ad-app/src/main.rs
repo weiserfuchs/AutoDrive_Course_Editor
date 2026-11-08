@@ -110,6 +110,10 @@ struct App {
     groups: Option<tools::marker::GroupsWindow>,
     /// The text of the overlap scan's distance field, while its dialog is shown.
     overlap_dialog: Option<String>,
+    /// The merge question, while it is shown: how many nodes are marked and how many stay.
+    merge_prompt: Option<(usize, usize)>,
+    /// A merge's backup is being written; the merge follows when it was.
+    merging: bool,
     /// A tool's info for the toolbar's notice line, shown until the next click on the map.
     tool_notice: Option<&'static str>,
     /// Set once closing was agreed; the next close request is not intercepted.
@@ -154,6 +158,8 @@ impl App {
             marker: None,
             groups: None,
             overlap_dialog: None,
+            merge_prompt: None,
+            merging: false,
             tool_notice: None,
             allow_close: false,
             title: window_title(None),
@@ -260,6 +266,7 @@ impl App {
                 | JobResult::ImageLoaded { .. }
                 | JobResult::HeightmapLoaded { .. } => self.importing = false,
                 JobResult::Exported { .. } => self.exporting = false,
+                JobResult::MergeBackup { .. } => self.merging = false,
                 JobResult::ImageSaved { .. } => {}
                 JobResult::ZipRead { .. } => {
                     self.importing = false;
@@ -285,6 +292,7 @@ impl App {
                 self.marker = None;
                 self.groups = None;
                 self.overlap_dialog = None;
+                self.merge_prompt = None;
                 self.tool_notice = None;
                 self.zip_preview = None;
                 if let Some(name) = download {
@@ -351,13 +359,14 @@ impl App {
         self.doc.as_ref().is_some_and(document::Document::editable)
     }
 
-    /// Whether a modal dialog (Edit location, marker, groups, overlap scan, the map image
-    /// replace question or the zip preview) is shown.
+    /// Whether a modal dialog (Edit location, marker, groups, overlap scan, the merge
+    /// question, the map image replace question or the zip preview) is shown.
     fn dialog_shown(&self) -> bool {
         self.location.is_some()
             || self.marker.is_some()
             || self.groups.is_some()
             || self.overlap_dialog.is_some()
+            || self.merge_prompt.is_some()
             || self.zip_preview.is_some()
             || self
                 .doc
@@ -711,6 +720,52 @@ impl App {
         if ok && let (Some(doc), Ok(distance)) = (&mut self.doc, overlap_distance(&text)) {
             doc.scan_overlaps(distance);
         }
+    }
+
+    /// Whether "Merge overlapping nodes…" may run: overlap marks are shown on an editable
+    /// document and no merge backup is being written.
+    fn can_merge(&self) -> bool {
+        !self.merging
+            && self.editable()
+            && self
+                .doc
+                .as_ref()
+                .and_then(|d| d.overlap.as_ref())
+                .is_some_and(|(_, marks)| !marks.is_empty())
+    }
+
+    /// Shows the merge question with its counts, when a merge may run.
+    fn ask_merge(&mut self) {
+        if self.can_merge() {
+            self.merge_prompt = self.doc.as_ref().and_then(Document::merge_counts);
+        }
+    }
+
+    /// Closes the merge question. With `ok`, writes the backup beside the config in the
+    /// background; the merge follows once it was written (see `jobs::apply_result`).
+    fn finish_merge(&mut self, ok: bool, notify: impl FnOnce() + Send + 'static) {
+        if self.merge_prompt.take().is_none() || !ok || !self.can_merge() {
+            return;
+        }
+        let Some(doc) = &self.doc else {
+            return;
+        };
+        let Some(overlap) = doc.overlap.clone() else {
+            return;
+        };
+        let start = jobs::MergeStart {
+            epoch: doc.epoch,
+            revision: doc.revision,
+            overlap,
+        };
+        self.merging = true;
+        jobs::spawn_merge_backup(
+            doc.config.clone(),
+            start,
+            jobs::merge_backup_path(&doc.path),
+            self.tx.clone(),
+            notify,
+        );
     }
 
     /// Closes the marker dialog. With `ok`, sets its node's marker in one transaction,
@@ -1069,6 +1124,7 @@ impl eframe::App for App {
         ui::marker_dialog(self, &ctx);
         ui::groups_window(self, &ctx);
         ui::overlap_dialog(self, &ctx);
+        ui::merge_prompt(self, &ctx);
         ui::zip_preview_window(self, &ctx);
         ui::replace_image_prompt(self, &ctx);
         ui::unsaved_prompt(self, &ctx);
@@ -3268,6 +3324,178 @@ mod tests {
         scan(&mut app, "0.1");
         assert_eq!(overlap_marks(&app), Some(vec![]));
         assert!(!app.dirty());
+    }
+
+    /// A document at `<temp>/<name>/AutoDrive_config.xml` (not written) holding `group`
+    /// and its copy pasted in place, scanned at 0.1. Returns the app, the config path,
+    /// [a, b, c] and the copies of a and b.
+    fn merge_case(name: &str) -> (App, PathBuf, [NodeId; 3], Vec<NodeId>) {
+        let dir = std::env::temp_dir().join(format!("ad_app_merge_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("AutoDrive_config.xml");
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        let doc = app.doc.as_mut().expect("doc");
+        doc.path = path.clone();
+        doc.opened_path = path.clone();
+        let abc = group(&mut app);
+        app.run(Action::Copy);
+        app.run(Action::PasteInPlace);
+        let copies = selection(&app);
+        scan(&mut app, "0.1");
+        (app, path, abc, copies)
+    }
+
+    /// Answers the merge question with `ok`, waits for the backup job and polls it.
+    fn merge(app: &mut App, ok: bool, between: impl FnOnce(&mut App)) {
+        app.ask_merge();
+        assert!(app.dialog_shown());
+        let (done_tx, done_rx) = mpsc::channel();
+        app.finish_merge(ok, move || {
+            let _ = done_tx.send(());
+        });
+        assert!(!app.dialog_shown());
+        if ok {
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("backup job finished");
+        }
+        between(app);
+        app.poll_jobs();
+        assert!(!app.merging);
+    }
+
+    #[test]
+    fn a_merge_writes_the_backup_then_merges_selects_the_kept_nodes_and_undoes_in_one_step() {
+        let (mut app, path, [a, b, c], copies) = merge_case("ok");
+        assert!(app.can_merge());
+        app.ask_merge();
+        assert_eq!(app.merge_prompt, Some((4, 2)));
+        app.merge_prompt = None;
+        let before = snapshot(&app);
+        merge(&mut app, true, |_| {});
+        assert_eq!(app.error, None);
+        // The backup holds the state before the merge, the unsaved paste included.
+        let backup = path.with_file_name("AutoDrive_config_mergeBackup.xml");
+        let bytes = std::fs::read(&backup).expect("backup written");
+        assert_eq!(config_xml::load(&bytes).expect("loads").network.len(), 5);
+        assert!(!path.exists(), "the config itself is not written");
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.path, path);
+        assert!(doc.is_dirty());
+        // The copies are gone, the originals keep their links, b keeps its marker.
+        let net = &doc.config.network;
+        assert_eq!(net.order(), &[a, b, c]);
+        assert!(copies.iter().all(|id| net.node(*id).is_none()));
+        assert_eq!(net.connection_kind(a, b), ConnectionKind::Regular);
+        assert_eq!(net.connection_kind(b, c), ConnectionKind::SubPrio);
+        assert_eq!(marker_names(&app), ["Hof"]);
+        assert_eq!(selection(&app), [a, b]);
+        assert_eq!(overlap_marks(&app), Some(vec![]));
+        assert_eq!(
+            app.doc.as_ref().expect("doc").notice.as_deref(),
+            Some("No overlapping nodes\nMarkers deleted with merged nodes: Hof_2")
+        );
+        // One undo brings the copies, their marks and the selection before back.
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(selection(&app), copies);
+        assert_eq!(overlap_marks(&app).map(|m| m.len()), Some(4));
+        // Undoing the paste too reaches the saved state: the backup did not move it.
+        app.run(Action::Undo);
+        assert!(!app.dirty());
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn a_failed_backup_merges_nothing_and_names_the_reason() {
+        let (mut app, path, ..) = merge_case("fails");
+        // The folder is gone, so the backup cannot be written.
+        std::fs::remove_dir_all(path.parent().expect("dir")).expect("removed");
+        let before = snapshot(&app);
+        merge(&mut app, true, |_| {});
+        let error = app.error.clone().expect("an error");
+        assert!(
+            error.starts_with("Merge cancelled: cannot write the backup"),
+            "{error}"
+        );
+        assert!(
+            error.contains("AutoDrive_config_mergeBackup.xml"),
+            "{error}"
+        );
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(overlap_marks(&app).map(|m| m.len()), Some(4));
+    }
+
+    #[test]
+    fn an_edit_while_the_backup_is_written_cancels_the_merge_with_a_notice() {
+        let (mut app, path, ..) = merge_case("changed");
+        let mut before = String::new();
+        merge(&mut app, true, |app| {
+            edit(app);
+            before = snapshot(app);
+        });
+        assert_eq!(app.error, None);
+        assert_eq!(snapshot(&app), before);
+        let notice = app.doc.as_ref().and_then(|d| d.notice.clone());
+        assert!(notice.is_some_and(|n| n.ends_with(jobs::MERGE_CHANGED)));
+        // Clearing the marks meanwhile cancels it too.
+        merge(&mut app, true, |app| {
+            if let Some(doc) = &mut app.doc {
+                doc.clear_overlaps();
+            }
+        });
+        assert_eq!(snapshot(&app), before);
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn cancel_merges_nothing_and_writes_no_backup() {
+        let (mut app, path, ..) = merge_case("cancel");
+        let before = snapshot(&app);
+        merge(&mut app, false, |_| {});
+        assert_eq!(snapshot(&app), before);
+        assert!(!jobs::merge_backup_path(&path).exists());
+        let _ = std::fs::remove_dir_all(path.parent().expect("dir"));
+    }
+
+    #[test]
+    fn a_read_only_document_or_no_marks_disable_the_merge() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        assert!(!app.can_merge(), "no marks");
+        group(&mut app);
+        scan(&mut app, "0.1");
+        assert!(!app.can_merge(), "no node marked");
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        let a = first(&app);
+        let net = &mut app.doc.as_mut().expect("doc").config.network;
+        let n = net.node(a).map(|n| (n.x, n.y, n.z)).expect("node");
+        net.add_node(n.0, n.1, n.2, NodeFlag::REGULAR);
+        scan(&mut app, "0.1");
+        assert_eq!(overlap_marks(&app).map(|m| m.len()), Some(2));
+        assert!(!app.can_merge());
+        app.ask_merge();
+        assert!(app.merge_prompt.is_none());
+        let before = snapshot(&app);
+        app.merge_prompt = Some((2, 1));
+        app.finish_merge(true, || {});
+        assert!(!app.merging);
+        assert_eq!(snapshot(&app), before);
+    }
+
+    #[test]
+    fn backup_path_is_beside_the_config_with_the_merge_suffix() {
+        assert_eq!(
+            jobs::merge_backup_path(Path::new("dir/AutoDrive_config.xml")),
+            Path::new("dir/AutoDrive_config_mergeBackup.xml")
+        );
+        assert_eq!(
+            jobs::merge_backup_path(Path::new("routes")),
+            Path::new("routes_mergeBackup.xml")
+        );
     }
 
     #[test]

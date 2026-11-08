@@ -114,6 +114,15 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                     {
                         doc.clear_overlaps();
                     }
+                    if ui
+                        .add_enabled(
+                            app.can_merge(),
+                            egui::Button::new("Merge overlapping nodes…"),
+                        )
+                        .clicked()
+                    {
+                        app.ask_merge();
+                    }
                 });
             });
             ui.checkbox(&mut app.view.show_grid, "Grid");
@@ -125,6 +134,9 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             }
             if app.saving {
                 ui.label("Saving…");
+            }
+            if app.merging {
+                ui.label("Writing merge backup…");
             }
             if app.importing {
                 ui.label("Importing…");
@@ -645,6 +657,37 @@ pub(crate) fn overlap_dialog(app: &mut App, ctx: &egui::Context) {
         app.finish_overlap(true);
     } else if cancel || closed {
         app.finish_overlap(false);
+    }
+}
+
+/// "Merge N marked nodes into M nodes?" with the backup's path. Merge writes the backup,
+/// then merges; Cancel, Escape or a click beside it merges nothing.
+pub(crate) fn merge_prompt(app: &mut App, ctx: &egui::Context) {
+    let (Some((marked, kept)), Some(doc)) = (app.merge_prompt, &app.doc) else {
+        return;
+    };
+    let backup = crate::jobs::merge_backup_path(&doc.path);
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::unique("merge_overlaps")).show(ctx, |ui| {
+        ui.label(format!(
+            "Merge {marked} marked nodes into {kept} nodes? A backup is written first."
+        ));
+        ui.label(backup.display().to_string());
+        ui.horizontal(|ui| {
+            if ui.button("Merge").clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    if let Some(ok) = answer {
+        let ctx = ctx.clone();
+        app.finish_merge(ok, move || ctx.request_repaint());
     }
 }
 
