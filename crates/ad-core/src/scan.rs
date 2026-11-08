@@ -1,9 +1,13 @@
 //! Network scans that change nothing: they report nodes for the user to look at. The
-//! merge of overlapping nodes is planned here as one transaction for the caller to apply.
+//! merge of overlapping nodes, the move of nodes outside the map to its edge and the fill
+//! of missing heights are planned here as one transaction each for the caller to apply.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::command::{Command, Connect, DeleteNodes, Transaction};
+use crate::command::{Command, Connect, DeleteNodes, MoveNodes, Position, Transaction};
+use crate::geometry::{MAP_PIXELS, MapGeometry};
+use crate::heightmap::sample_height;
+use crate::map_context::MapContext;
 use crate::network::{ConnectionShape, Network, NodeId};
 
 /// How far apart in height two overlapping nodes may be. Stored heights of a road and of a
@@ -236,6 +240,56 @@ fn has(net: &Network, a: NodeId, b: NodeId, shape: ConnectionShape) -> bool {
         ConnectionShape::OneWay => out(a, b) && inc(b, a),
         ConnectionShape::Dual => out(a, b) && inc(b, a) && out(b, a) && inc(a, b),
     }
+}
+
+/// The height of a node saved without one (AutoDrive's and Java's `-1`).
+pub const NO_HEIGHT: f64 = -1.0;
+
+/// `moves` as one transaction; empty when there are none.
+fn moving(moves: Vec<(NodeId, Position, Position)>) -> Transaction {
+    if moves.is_empty() {
+        return Transaction::new(Vec::new());
+    }
+    Transaction::new(vec![Command::MoveNodes(MoveNodes { moves })])
+}
+
+/// Half the side of the map in world units: x and z run from minus this to this.
+pub fn map_half_size(geometry: MapGeometry) -> f64 {
+    MAP_PIXELS / 2.0 * geometry.scale
+}
+
+/// Moves every node outside the map (x or z beyond [`map_half_size`]) to the nearest point
+/// of the map edge, x and z clamped and y kept, as one transaction of absolute moves in
+/// network order; empty when every node is inside. A node on the edge is inside. Java
+/// (`OutOfBoundsFixMenu`) moved them all to (0, 0).
+pub fn out_of_bounds_plan(net: &Network, geometry: MapGeometry) -> Transaction {
+    let half = map_half_size(geometry);
+    let moves = net
+        .order()
+        .iter()
+        .filter_map(|&id| {
+            let n = net.node(id)?;
+            let (x, z) = (n.x.clamp(-half, half), n.z.clamp(-half, half));
+            ((x, z) != (n.x, n.z)).then_some((id, (n.x, n.y, n.z), (x, n.y, z)))
+        })
+        .collect();
+    moving(moves)
+}
+
+/// Gives every node without a height ([`NO_HEIGHT`]) the terrain height at its place, as
+/// one transaction of absolute moves in network order; empty when no node lacks a height
+/// or the map has no heightmap. x and z stay.
+pub fn missing_heights_plan(net: &Network, map: &MapContext) -> Transaction {
+    let moves = net
+        .order()
+        .iter()
+        .filter_map(|&id| {
+            let n = net.node(id).filter(|n| n.y == NO_HEIGHT)?;
+            let y = sample_height(map, n.x, n.z)?;
+            Some((id, (n.x, n.y, n.z), (n.x, y, n.z)))
+        })
+        .collect();
+    moving(moves)
 }
 
 #[cfg(test)]
@@ -572,5 +626,68 @@ mod tests {
     #[test]
     fn an_empty_network_has_none() {
         assert!(overlaps(&Network::new(), 0.1).is_empty());
+    }
+
+    fn positions(n: &Network) -> Vec<Position> {
+        n.order()
+            .iter()
+            .map(|id| n.node(*id).map(|p| (p.x, p.y, p.z)).expect("node"))
+            .collect()
+    }
+
+    #[test]
+    fn nodes_outside_the_map_move_to_its_edge_and_back_on_revert() {
+        let (n, ids) = net(&[
+            (1500.0, 5.0, 0.0),
+            (-2000.0, 5.0, 300.0),
+            (100.0, 5.0, 1100.0),
+            (1200.0, 5.0, -1300.0),
+            (10.0, 5.0, 10.0),
+        ]);
+        let tx = out_of_bounds_plan(&n, MapGeometry::new(1.0));
+        assert_eq!(placed_nodes(&tx), ids[..4]);
+        let (n, _) = round_trip(n, tx);
+        assert_eq!(
+            positions(&n),
+            [
+                (1024.0, 5.0, 0.0),
+                (-1024.0, 5.0, 300.0),
+                (100.0, 5.0, 1024.0),
+                (1024.0, 5.0, -1024.0),
+                (10.0, 5.0, 10.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_bounds_grow_with_the_scale_and_the_edge_is_inside() {
+        let (n, _) = net(&[(2000.0, 0.0, 0.0)]);
+        assert!(out_of_bounds_plan(&n, MapGeometry::new(2.0)).0.is_empty());
+        assert!(!out_of_bounds_plan(&n, MapGeometry::new(1.0)).0.is_empty());
+        let (n, _) = net(&[(1024.0, 0.0, -1024.0), (-1024.0, 0.0, 1024.0)]);
+        assert!(out_of_bounds_plan(&n, MapGeometry::new(1.0)).0.is_empty());
+    }
+
+    #[test]
+    fn missing_heights_are_sampled_and_other_heights_stay() {
+        use crate::heightmap::Heightmap;
+        let (n, ids) = net(&[(0.0, -1.0, 0.0), (5.0, 3.0, 5.0), (-5.0, -1.0, 7.0)]);
+        let mut map = MapContext::new(None, 1, 2.0, (2.0, 2.0));
+        // 100 m everywhere.
+        let hm = Heightmap::new(4, 4, vec![25600; 16]).expect("size");
+        map.heightmap = Some(std::sync::Arc::new(hm));
+        let tx = missing_heights_plan(&n, &map);
+        assert_eq!(placed_nodes(&tx), [ids[0], ids[2]]);
+        let (n, _) = round_trip(n, tx);
+        assert_eq!(
+            positions(&n),
+            [(0.0, 100.0, 0.0), (5.0, 3.0, 5.0), (-5.0, 100.0, 7.0)]
+        );
+        // Without a missing height, or without a heightmap, nothing is planned.
+        let (n, _) = net(&[(0.0, 0.0, 0.0), (1.0, -0.5, 1.0)]);
+        assert!(missing_heights_plan(&n, &map).0.is_empty());
+        map.heightmap = None;
+        let (n, _) = net(&[(0.0, -1.0, 0.0)]);
+        assert!(missing_heights_plan(&n, &map).0.is_empty());
     }
 }

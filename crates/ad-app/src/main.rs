@@ -23,7 +23,7 @@ use eframe::egui;
 use ad_core::command::{Command, DeleteNodes, Transaction};
 use ad_core::geometry::MAP_PIXELS;
 use ad_io::settings::Settings;
-use document::Document;
+use document::{Document, Fix};
 use input::Action;
 use jobs::JobResult;
 use tools::Tool;
@@ -112,6 +112,9 @@ struct App {
     overlap_dialog: Option<String>,
     /// The merge question, while it is shown: how many nodes are marked and how many stay.
     merge_prompt: Option<(usize, usize)>,
+    /// The question of a Scan menu fix, while it is shown: which fix and how many nodes it
+    /// changes.
+    fix_prompt: Option<(Fix, usize)>,
     /// A merge's backup is being written; the merge follows when it was.
     merging: bool,
     /// A tool's info for the toolbar's notice line, shown until the next click on the map.
@@ -159,6 +162,7 @@ impl App {
             groups: None,
             overlap_dialog: None,
             merge_prompt: None,
+            fix_prompt: None,
             merging: false,
             tool_notice: None,
             allow_close: false,
@@ -293,6 +297,7 @@ impl App {
                 self.groups = None;
                 self.overlap_dialog = None;
                 self.merge_prompt = None;
+                self.fix_prompt = None;
                 self.tool_notice = None;
                 self.zip_preview = None;
                 if let Some(name) = download {
@@ -360,13 +365,15 @@ impl App {
     }
 
     /// Whether a modal dialog (Edit location, marker, groups, overlap scan, the merge
-    /// question, the map image replace question or the zip preview) is shown.
+    /// question, a fix question, the map image replace question or the zip preview) is
+    /// shown.
     fn dialog_shown(&self) -> bool {
         self.location.is_some()
             || self.marker.is_some()
             || self.groups.is_some()
             || self.overlap_dialog.is_some()
             || self.merge_prompt.is_some()
+            || self.fix_prompt.is_some()
             || self.zip_preview.is_some()
             || self
                 .doc
@@ -768,6 +775,44 @@ impl App {
         );
     }
 
+    /// Whether the Scan menu's `fix` may run: the document is editable and, to fill
+    /// heights, has a heightmap.
+    fn can_fix(&self, fix: Fix) -> bool {
+        self.editable()
+            && (fix == Fix::OutOfBounds
+                || self.doc.as_ref().is_some_and(|d| d.map.heightmap.is_some()))
+    }
+
+    /// Shows the question of `fix` with the count of nodes it changes; with none, only a
+    /// notice says so.
+    fn ask_fix(&mut self, fix: Fix) {
+        if !self.can_fix(fix) {
+            return;
+        }
+        let Some(doc) = &mut self.doc else {
+            return;
+        };
+        match doc.fix_count(fix) {
+            0 => doc.fix_notice(fix, 0),
+            count => self.fix_prompt = Some((fix, count)),
+        }
+    }
+
+    /// Closes the fix question. With `ok`, runs the fix in one undoable entry.
+    fn finish_fix(&mut self, ok: bool) {
+        let Some((fix, _)) = self.fix_prompt.take() else {
+            return;
+        };
+        if !ok || !self.can_fix(fix) {
+            return;
+        }
+        if let Some(doc) = &mut self.doc
+            && let Err(e) = doc.apply_fix(fix)
+        {
+            self.error = Some(e.to_string());
+        }
+    }
+
     /// Closes the marker dialog. With `ok`, sets its node's marker in one transaction,
     /// unless the name is refused, an edit changed nothing or the document is read-only.
     fn finish_marker(&mut self, ok: bool) {
@@ -1125,6 +1170,7 @@ impl eframe::App for App {
         ui::groups_window(self, &ctx);
         ui::overlap_dialog(self, &ctx);
         ui::merge_prompt(self, &ctx);
+        ui::fix_prompt(self, &ctx);
         ui::zip_preview_window(self, &ctx);
         ui::replace_image_prompt(self, &ctx);
         ui::unsaved_prompt(self, &ctx);
@@ -3496,6 +3542,157 @@ mod tests {
             jobs::merge_backup_path(Path::new("routes")),
             Path::new("routes_mergeBackup.xml")
         );
+    }
+
+    fn position(app: &App, id: NodeId) -> (f64, f64, f64) {
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        net.node(id).map(|n| (n.x, n.y, n.z)).expect("node")
+    }
+
+    /// Adds nodes at `points` to the open document's network, outside the history.
+    fn plant(app: &mut App, points: &[(f64, f64, f64)]) -> Vec<NodeId> {
+        let net = &mut app.doc.as_mut().expect("doc").config.network;
+        points
+            .iter()
+            .map(|&(x, y, z)| net.add_node(x, y, z, NodeFlag::REGULAR))
+            .collect()
+    }
+
+    /// A flat heightmap 100 m high for the open document.
+    fn flat_heightmap(app: &mut App) {
+        let hm = ad_core::heightmap::Heightmap::new(4, 4, vec![25600; 16]).expect("size");
+        app.doc.as_mut().expect("doc").map.heightmap = Some(std::sync::Arc::new(hm));
+    }
+
+    fn notice(app: &App) -> Option<String> {
+        app.doc.as_ref().and_then(|d| d.notice.clone())
+    }
+
+    /// Runs `fix` through its question, answering OK.
+    fn fix(app: &mut App, fix: Fix) {
+        app.ask_fix(fix);
+        assert!(app.dialog_shown());
+        app.finish_fix(true);
+        assert!(!app.dialog_shown());
+    }
+
+    #[test]
+    fn nodes_outside_the_map_move_to_its_edge_selected_and_one_undo_restores_them() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        let a = first(&app);
+        let out = plant(&mut app, &[(1500.0, 5.0, 0.0), (100.0, 5.0, -1100.0)]);
+        app.doc.as_mut().expect("doc").selection.insert(a);
+        let before = snapshot(&app);
+        app.ask_fix(Fix::OutOfBounds);
+        assert_eq!(app.fix_prompt, Some((Fix::OutOfBounds, 2)));
+        // Cancel moves nothing.
+        app.finish_fix(false);
+        assert_eq!(snapshot(&app), before);
+        fix(&mut app, Fix::OutOfBounds);
+        assert_eq!(position(&app, out[0]), (1024.0, 5.0, 0.0));
+        assert_eq!(position(&app, out[1]), (100.0, 5.0, -1024.0));
+        assert_eq!(position(&app, a), (1.0, 0.0, 2.0));
+        assert_eq!(selection(&app), out);
+        assert_eq!(
+            notice(&app).as_deref(),
+            Some("2 nodes moved to the map edge")
+        );
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(selection(&app), [a]);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        app.run(Action::Redo);
+        assert_eq!(selection(&app), out);
+        // Run again: nothing outside, a notice replaces the count and no question shows.
+        app.ask_fix(Fix::OutOfBounds);
+        assert!(app.fix_prompt.is_none());
+        assert_eq!(notice(&app).as_deref(), Some("No nodes outside the map"));
+    }
+
+    #[test]
+    fn missing_heights_are_sampled_selected_and_one_undo_restores_them() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        let a = first(&app);
+        let ids = plant(&mut app, &[(10.0, -1.0, 10.0), (20.0, 3.0, 20.0)]);
+        assert!(!app.can_fix(Fix::MissingHeights), "no heightmap");
+        assert!(app.can_fix(Fix::OutOfBounds));
+        flat_heightmap(&mut app);
+        assert!(app.can_fix(Fix::MissingHeights));
+        let before = snapshot(&app);
+        app.ask_fix(Fix::MissingHeights);
+        assert_eq!(app.fix_prompt, Some((Fix::MissingHeights, 1)));
+        app.finish_fix(true);
+        assert_eq!(position(&app, ids[0]), (10.0, 100.0, 10.0));
+        assert_eq!(position(&app, ids[1]), (20.0, 3.0, 20.0));
+        assert_eq!(position(&app, a), (1.0, 0.0, 2.0));
+        assert_eq!(selection(&app), [ids[0]]);
+        assert_eq!(notice(&app).as_deref(), Some("1 node heights filled"));
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert!(selection(&app).is_empty());
+        app.run(Action::Redo);
+        app.ask_fix(Fix::MissingHeights);
+        assert!(app.fix_prompt.is_none());
+        assert_eq!(notice(&app).as_deref(), Some("No nodes without height"));
+    }
+
+    #[test]
+    fn the_fixture_has_no_node_without_height_and_after_its_fix_none_outside() {
+        let mut settings = Settings::default();
+        settings.maps.insert(
+            "NF_Marsch_4fach".to_owned(),
+            ad_io::settings::MapSettings {
+                scale: 2,
+                ..Default::default()
+            },
+        );
+        let mut app = App::new(settings);
+        load_fixture(&mut app);
+        flat_heightmap(&mut app);
+        let before = snapshot(&app);
+        assert!(app.can_fix(Fix::MissingHeights));
+        app.ask_fix(Fix::MissingHeights);
+        assert!(app.fix_prompt.is_none());
+        assert_eq!(notice(&app).as_deref(), Some("No nodes without height"));
+        assert_eq!(snapshot(&app), before);
+        assert!(!app.dirty());
+        // At scale 2 the fixture holds two nodes far beyond x = -2048 (file ids 35400 and
+        // 35401, at x = -9626.506 and -9615.043); they land on the west edge.
+        app.ask_fix(Fix::OutOfBounds);
+        assert_eq!(app.fix_prompt, Some((Fix::OutOfBounds, 2)));
+        app.finish_fix(true);
+        let moved = selection(&app);
+        assert_eq!(moved.len(), 2);
+        assert!(moved.iter().all(|&id| position(&app, id).0 == -2048.0));
+        // Now nothing is outside: a notice, nothing committed.
+        app.ask_fix(Fix::OutOfBounds);
+        assert!(app.fix_prompt.is_none());
+        assert_eq!(notice(&app).as_deref(), Some("No nodes outside the map"));
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert!(!app.dirty());
+    }
+
+    #[test]
+    fn a_read_only_document_disables_both_fixes() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        plant(&mut app, &[(1500.0, -1.0, 0.0)]);
+        flat_heightmap(&mut app);
+        let before = snapshot(&app);
+        for f in [Fix::OutOfBounds, Fix::MissingHeights] {
+            assert!(!app.can_fix(f));
+            app.ask_fix(f);
+            assert!(app.fix_prompt.is_none());
+            // A question left open from before is answered without a change.
+            app.fix_prompt = Some((f, 1));
+            app.finish_fix(true);
+            assert_eq!(app.error, None);
+        }
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(notice(&app), None);
     }
 
     #[test]

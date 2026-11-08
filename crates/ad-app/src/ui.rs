@@ -11,6 +11,7 @@ use ad_core::map_context::MapContext;
 use ad_core::network::{ConnectionShape, Network, NodeFlag, NodeId};
 use ad_io::config_xml::GameVersion;
 
+use crate::document::Fix;
 use crate::input::{self, Action};
 use crate::tools::align::{AlignTool, Axis};
 use crate::tools::arc::ArcTool;
@@ -122,6 +123,18 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                         .clicked()
                     {
                         app.ask_merge();
+                    }
+                    ui.separator();
+                    for (fix, label) in [
+                        (Fix::OutOfBounds, "Fix nodes outside the map…"),
+                        (Fix::MissingHeights, "Fix missing node heights…"),
+                    ] {
+                        if ui
+                            .add_enabled(app.can_fix(fix), egui::Button::new(label))
+                            .clicked()
+                        {
+                            app.ask_fix(fix);
+                        }
                     }
                 });
             });
@@ -688,6 +701,46 @@ pub(crate) fn merge_prompt(app: &mut App, ctx: &egui::Context) {
     if let Some(ok) = answer {
         let ctx = ctx.clone();
         app.finish_merge(ok, move || ctx.request_repaint());
+    }
+}
+
+/// The question of a Scan menu fix with its count (and, for nodes outside the map, the
+/// bounds). OK fixes in one undoable entry; Cancel, Escape or a click beside it fixes
+/// nothing.
+pub(crate) fn fix_prompt(app: &mut App, ctx: &egui::Context) {
+    let (Some((fix, count)), Some(doc)) = (app.fix_prompt, &app.doc) else {
+        return;
+    };
+    let half = ad_core::scan::map_half_size(doc.map.geometry);
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::unique("fix_nodes")).show(ctx, |ui| {
+        match fix {
+            Fix::OutOfBounds => {
+                ui.label(format!(
+                    "Move {count} nodes outside the map to the nearest point of its edge?"
+                ));
+                ui.label(format!("X: {} to {half}\nZ: {} to {half}", -half, -half));
+            }
+            Fix::MissingHeights => {
+                ui.label(format!(
+                    "Set the height of {count} nodes without one from the heightmap?"
+                ));
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui.button("OK").clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    if let Some(ok) = answer {
+        app.finish_fix(ok);
     }
 }
 

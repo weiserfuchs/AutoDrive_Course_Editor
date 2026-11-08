@@ -19,6 +19,20 @@ const NO_OVERLAPS: &str = "No overlapping nodes";
 const OVERLAPS_FOUND_SUFFIX: &str = " overlapping nodes found";
 /// The notice line naming the markers deleted with merged nodes, before their names.
 pub const MARKERS_MERGED_PREFIX: &str = "Markers deleted with merged nodes: ";
+/// The notice lines of the two fixes (story 8.3): nothing to fix, and after the count of
+/// fixed nodes.
+const NO_OUTSIDE: &str = "No nodes outside the map";
+const OUTSIDE_MOVED_SUFFIX: &str = " nodes moved to the map edge";
+const NO_MISSING_HEIGHT: &str = "No nodes without height";
+const HEIGHTS_FILLED_SUFFIX: &str = " node heights filled";
+
+/// A fix of the Scan menu: nodes outside the map move to its edge, or nodes without a
+/// height get the terrain height.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fix {
+    OutOfBounds,
+    MissingHeights,
+}
 
 /// [`scan::around`] `nodes`, or `None` (rescan the whole network) when they are more than 64
 /// and an eighth of it: remarking around every node of the fixture costs about 43 ms, a full
@@ -239,6 +253,51 @@ impl Document {
             ));
         }
         Ok(())
+    }
+
+    /// The moves of `fix` on the current network; empty when it has nothing to fix.
+    fn fix_plan(&self, fix: Fix) -> Transaction {
+        let net = &self.config.network;
+        match fix {
+            Fix::OutOfBounds => scan::out_of_bounds_plan(net, self.map.geometry),
+            Fix::MissingHeights => scan::missing_heights_plan(net, &self.map),
+        }
+    }
+
+    /// How many nodes `fix` would change now.
+    pub fn fix_count(&self, fix: Fix) -> usize {
+        scan::placed_nodes(&self.fix_plan(fix)).len()
+    }
+
+    /// Runs `fix` in one entry; the changed nodes become the selection (undo restores the
+    /// one before) and a notice gives their count. With nothing to fix, a notice says so
+    /// and nothing is committed. Returns how many nodes changed.
+    pub fn apply_fix(&mut self, fix: Fix) -> Result<usize, NetworkError> {
+        let tx = self.fix_plan(fix);
+        let count = scan::placed_nodes(&tx).len();
+        if count > 0 {
+            self.apply_selecting(tx, |tx| scan::placed_nodes(tx).into_iter().collect())?;
+        }
+        self.fix_notice(fix, count);
+        Ok(count)
+    }
+
+    /// Replaces the notice line of an earlier fix with the result of `fix`: `count` nodes
+    /// fixed, or none to fix.
+    pub fn fix_notice(&mut self, fix: Fix, count: usize) {
+        self.drop_notice_lines_where(|line| {
+            line == NO_OUTSIDE
+                || line == NO_MISSING_HEIGHT
+                || line.ends_with(OUTSIDE_MOVED_SUFFIX)
+                || line.ends_with(HEIGHTS_FILLED_SUFFIX)
+        });
+        let line = match (fix, count) {
+            (Fix::OutOfBounds, 0) => NO_OUTSIDE.to_owned(),
+            (Fix::OutOfBounds, n) => format!("{n}{OUTSIDE_MOVED_SUFFIX}"),
+            (Fix::MissingHeights, 0) => NO_MISSING_HEIGHT.to_owned(),
+            (Fix::MissingHeights, n) => format!("{n}{HEIGHTS_FILLED_SUFFIX}"),
+        };
+        self.add_notice(line);
     }
 
     /// The nodes whose overlap mark `tx` can change, from where its nodes are now; none

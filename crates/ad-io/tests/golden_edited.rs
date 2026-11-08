@@ -1155,3 +1155,54 @@ fn merged_pasted_copy_saves_and_reloads_as_the_original_and_undo_brings_it_back(
     assert!(model(&cfg.network) == original_model);
     Ok(())
 }
+
+#[test]
+fn nodes_fixed_to_the_map_edge_and_a_filled_height_save_and_reload() -> Result<(), Error> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    let mut cfg = load(&original)?;
+    // A node saved without a height, as the file would hold it.
+    let low = cfg.network.order()[1];
+    let (x, _, z) = cfg
+        .network
+        .node(low)
+        .map(|n| (n.x, n.y, n.z))
+        .ok_or("node")?;
+    cfg.network.move_node(low, x, -1.0, z)?;
+    let before = model(&cfg.network);
+    // The fixture's map at scale 2 (±2048), with a flat heightmap 100 m high.
+    let mut map = MapContext::new(None, 2, 2.0, (2.0, 2.0));
+    map.heightmap = Some(Arc::new(
+        Heightmap::new(4, 4, vec![25600; 16]).ok_or("heightmap")?,
+    ));
+    let edge = ad_core::scan::out_of_bounds_plan(&cfg.network, map.geometry);
+    let outside = ad_core::scan::placed_nodes(&edge);
+    assert_eq!(outside.len(), 2, "the fixture's two nodes west of the map");
+    let heights = ad_core::scan::missing_heights_plan(&cfg.network, &map);
+    assert_eq!(ad_core::scan::placed_nodes(&heights), [low]);
+    let mut history = History::default();
+    history.apply(&mut cfg.network, edge)?;
+    history.apply(&mut cfg.network, heights)?;
+    let fixed = model(&cfg.network);
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_fixed_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    let reloaded = load(&written)?;
+    assert!(model(&reloaded.network) == fixed);
+    let at = |id: NodeId| reloaded.network.node(id).map(|n| (n.x, n.y, n.z));
+    for id in &outside {
+        assert_eq!(at(*id).map(|p| p.0), Some(-2048.0));
+    }
+    assert_eq!(at(low), Some((x, 100.0, z)));
+    assert!(untouched(&original)? == untouched(&written)?);
+    // One undo each.
+    assert!(history.undo(&mut cfg.network));
+    assert!(history.undo(&mut cfg.network));
+    assert!(model(&cfg.network) == before);
+    Ok(())
+}
