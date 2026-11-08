@@ -18,6 +18,8 @@ pub(crate) enum Action {
     ConnectTool,
     PriorityTool,
     FlipTool,
+    /// Selects the Bézier curve tool; a previewed curve is dropped.
+    BezierTool,
     ToggleSnap,
     /// Continuous connections: after a commit the end node starts the next link.
     ToggleContinuous,
@@ -38,7 +40,7 @@ pub(crate) enum Action {
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 19] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 20] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -78,6 +80,10 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 19] = [
     (
         Action::FlipTool,
         KeyboardShortcut::new(Modifiers::NONE, Key::F),
+    ),
+    (
+        Action::BezierTool,
+        KeyboardShortcut::new(Modifiers::NONE, Key::B),
     ),
     (
         Action::ToggleSnap,
@@ -227,6 +233,7 @@ mod tests {
         assert_eq!(press(Modifiers::NONE, Key::R), [Action::RotateTool]);
         assert_eq!(press(Modifiers::NONE, Key::P), [Action::PriorityTool]);
         assert_eq!(press(Modifiers::NONE, Key::F), [Action::FlipTool]);
+        assert_eq!(press(Modifiers::NONE, Key::B), [Action::BezierTool]);
         assert_eq!(press(Modifiers::NONE, Key::S), [Action::ToggleSnap]);
         assert_eq!(press(Modifiers::NONE, Key::Delete), [Action::DeleteHovered]);
         assert_eq!(press(Modifiers::NONE, Key::L), [Action::ConnectTool]);
@@ -307,6 +314,9 @@ mod tests {
         assert!(press(Modifiers::SHIFT, Key::L).is_empty());
         assert!(press(CTRL, Key::L).is_empty());
         assert!(press(CTRL, Key::Semicolon).is_empty());
+        assert!(press(Modifiers::SHIFT, Key::B).is_empty());
+        assert!(press(CTRL, Key::B).is_empty());
+        assert!(press(Modifiers::ALT, Key::B).is_empty());
     }
 
     #[test]

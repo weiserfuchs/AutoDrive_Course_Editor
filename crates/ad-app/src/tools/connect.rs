@@ -119,23 +119,21 @@ pub fn line_points(
         .collect()
 }
 
-/// One `PasteNodes` of regular `nodes` (world x, y, z), linked `start` → nodes → `end`
-/// (when given) with `shape` on every segment.
+/// One `PasteNodes` of `nodes` (world x, y, z) with `flag`, linked `start` → nodes →
+/// `end` (when given) with `shape` on every segment.
 pub(crate) fn chain(
     start: NodeId,
     nodes: Vec<(f64, f64, f64)>,
     end: Option<NodeId>,
     shape: ConnectionShape,
+    flag: NodeFlag,
 ) -> Transaction {
     let ends: Vec<LinkEnd> = std::iter::once(LinkEnd::Existing(start))
         .chain((0..nodes.len()).map(LinkEnd::New))
         .chain(end.map(LinkEnd::Existing))
         .collect();
     let links = ends.windows(2).map(|w| (w[0], w[1], shape)).collect();
-    let nodes = nodes
-        .into_iter()
-        .map(|(x, y, z)| (x, y, z, NodeFlag::REGULAR))
-        .collect();
+    let nodes = nodes.into_iter().map(|(x, y, z)| (x, y, z, flag)).collect();
     Transaction::new(vec![Command::PasteNodes(PasteNodes::new(
         nodes,
         Vec::new(),
@@ -146,7 +144,8 @@ pub(crate) fn chain(
 /// The transaction of a line from `start` through `points` (from [`line_points`]) to the
 /// node `end`, or ending at the last point when `end` is `None`. Each new node's height
 /// is sampled, or without a heightmap runs linearly by fraction from the start's y to the
-/// end node's y (the start's y for a new end point) (AD-7). `None` for a missing node.
+/// end node's y (the start's y for a new end point) (AD-7). The new nodes get `flag`.
+/// `None` for a missing node.
 pub fn plan_line(
     net: &Network,
     map: &MapContext,
@@ -154,6 +153,7 @@ pub fn plan_line(
     points: &[(f64, f64, f64)],
     end: Option<NodeId>,
     shape: ConnectionShape,
+    flag: NodeFlag,
 ) -> Option<Transaction> {
     let y0 = net.node(start)?.y;
     let y1 = match end {
@@ -167,7 +167,7 @@ pub fn plan_line(
             (x, y, z)
         })
         .collect();
-    Some(chain(start, nodes, end, shape))
+    Some(chain(start, nodes, end, shape, flag))
 }
 
 /// Whether the links between `a` and `b` are exactly `shape` from `a` to `b`.
@@ -241,7 +241,15 @@ impl Tool for ConnectTool {
             let tx = if points.is_empty() {
                 plan(ctx.net, start.id, id, self.shape)
             } else {
-                plan_line(ctx.net, ctx.map, start.id, &points, Some(id), self.shape)
+                plan_line(
+                    ctx.net,
+                    ctx.map,
+                    start.id,
+                    &points,
+                    Some(id),
+                    self.shape,
+                    NodeFlag::REGULAR,
+                )
             };
             self.start = self.continuous.then_some(Start { id, x: n.x, z: n.z });
             return tx;
@@ -255,7 +263,15 @@ impl Tool for ConnectTool {
             (ctx.x, ctx.z)
         };
         let points = line_points(from, end, self.line.node_distance, false);
-        let tx = plan_line(ctx.net, ctx.map, start.id, &points, None, self.shape);
+        let tx = plan_line(
+            ctx.net,
+            ctx.map,
+            start.id,
+            &points,
+            None,
+            self.shape,
+            NodeFlag::REGULAR,
+        );
         self.start = None;
         self.from_new_end = self.continuous && tx.is_some();
         tx

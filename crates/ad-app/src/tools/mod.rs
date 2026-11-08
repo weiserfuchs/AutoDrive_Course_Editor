@@ -2,6 +2,7 @@
 //! draw their preview on top of the map view. Exactly one tool is active at a time.
 
 pub mod align;
+pub mod bezier;
 pub mod connect;
 pub mod delete;
 pub mod edit_location;
@@ -66,6 +67,15 @@ pub trait Tool {
         None
     }
 
+    /// A right click on the map (which also selects, AD-15); only the Bézier tool uses it,
+    /// to cancel its pending start.
+    fn on_secondary_click(&mut self) {}
+
+    /// The previewed curve the curve panel edits; only the Bézier tool has one.
+    fn curve_mut(&mut self) -> Option<&mut bezier::Curve> {
+        None
+    }
+
     /// A primary drag starts at `ctx`, on `hovered` if it started on a node. Returning
     /// true claims the drag: the view does not pan it and reports its moves and end here.
     fn on_drag_start(&mut self, _ctx: &ToolContext, _hovered: Option<NodeId>) -> bool {
@@ -78,6 +88,12 @@ pub trait Tool {
     /// A claimed drag was released at `ctx`; returns the transaction to commit, if any.
     fn on_drag_end(&mut self, _ctx: &ToolContext) -> Option<Transaction> {
         None
+    }
+
+    /// A claimed drag ended without a release position (the pointer was lost); by default
+    /// the tool's whole preview is cancelled.
+    fn on_drag_cancel(&mut self) {
+        self.cancel();
     }
 
     /// The nodes the view draws, with their connections, at world (x, z) instead of their
