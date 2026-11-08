@@ -6,6 +6,7 @@
 
 use crate::network::{
     ConnectionShape, LinkDelta, MarkerDelta, Network, NetworkError, NodeFlag, NodeId, RemovedNode,
+    Side,
 };
 
 /// A node position as `(x, y, z)`.
@@ -129,6 +130,32 @@ impl RenameGroup {
             to,
             moved: Vec::new(),
         }
+    }
+}
+
+/// Removes single adjacency list entries, each as `(node, side, index)` into the lists as
+/// they are before the apply; revert puts every entry back at its index. Adds no link and
+/// removes no node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoveLinkEntries {
+    pub entries: Vec<(NodeId, Side, usize)>,
+    delta: LinkDelta,
+}
+
+impl RemoveLinkEntries {
+    pub fn new(entries: Vec<(NodeId, Side, usize)>) -> Self {
+        Self {
+            entries,
+            delta: LinkDelta::default(),
+        }
+    }
+
+    /// The nodes whose lists the command changes, in id order without repeats.
+    pub fn nodes(&self) -> Vec<NodeId> {
+        let mut nodes: Vec<NodeId> = self.entries.iter().map(|e| e.0).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
     }
 }
 
@@ -258,6 +285,7 @@ pub enum Command {
     EditMarker(EditMarker),
     RenameGroup(RenameGroup),
     SetFlag(SetFlag),
+    RemoveLinkEntries(RemoveLinkEntries),
 }
 
 fn move_to(net: &mut Network, id: NodeId, p: Position) -> Result<(), NetworkError> {
@@ -347,6 +375,10 @@ impl Command {
                 c.old = Some(old);
                 Ok(())
             }
+            Command::RemoveLinkEntries(c) => {
+                c.delta = net.remove_entries(&c.entries)?;
+                Ok(())
+            }
         }
     }
 
@@ -394,6 +426,10 @@ impl Command {
                 Some(old) => net.set_flag(c.node, old),
                 None => Ok(()),
             },
+            Command::RemoveLinkEntries(c) => {
+                net.revert_links(&c.delta);
+                Ok(())
+            }
         }
     }
 }

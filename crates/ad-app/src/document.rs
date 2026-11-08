@@ -25,6 +25,8 @@ const NO_OUTSIDE: &str = "No nodes outside the map";
 const OUTSIDE_MOVED_SUFFIX: &str = " nodes moved to the map edge";
 const NO_MISSING_HEIGHT: &str = "No nodes without height";
 const HEIGHTS_FILLED_SUFFIX: &str = " node heights filled";
+/// The notice line of a connection check that found no broken entry (story 8.4).
+const CONNECTIONS_CONSISTENT: &str = "Connections are consistent";
 
 /// A fix of the Scan menu: nodes outside the map move to its edge, or nodes without a
 /// height get the terrain height.
@@ -298,6 +300,29 @@ impl Document {
             (Fix::MissingHeights, n) => format!("{n}{HEIGHTS_FILLED_SUFFIX}"),
         };
         self.add_notice(line);
+    }
+
+    /// The dangling incoming, duplicate and self entries of the network. With none, the
+    /// notice says the connections are consistent (replacing that line of an earlier
+    /// check). Changes no data, so it works on a read-only document too.
+    pub fn check_connections(&mut self) -> scan::Defects {
+        let defects = scan::connection_defects(&self.config.network);
+        if defects.is_empty() {
+            self.drop_notice_lines_where(|line| line == CONNECTIONS_CONSISTENT);
+            self.add_notice(CONNECTIONS_CONSISTENT.to_owned());
+        }
+        defects
+    }
+
+    /// Removes every entry the connection check reports in one entry; the nodes whose
+    /// lists changed become the selection (undo restores the one before). With none,
+    /// nothing is committed.
+    pub fn fix_connections(&mut self) -> Result<(), NetworkError> {
+        let tx = scan::connection_fix_plan(&self.config.network);
+        if !tx.0.is_empty() {
+            self.apply_selecting(tx, |tx| scan::relinked_nodes(tx).into_iter().collect())?;
+        }
+        Ok(())
     }
 
     /// The nodes whose overlap mark `tx` can change, from where its nodes are now; none

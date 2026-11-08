@@ -136,6 +136,10 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                             app.ask_fix(fix);
                         }
                     }
+                    ui.separator();
+                    if ui.button("Check connections…").clicked() {
+                        app.check_connections();
+                    }
                 });
             });
             ui.checkbox(&mut app.view.show_grid, "Grid");
@@ -741,6 +745,42 @@ pub(crate) fn fix_prompt(app: &mut App, ctx: &egui::Context) {
     }
     if let Some(ok) = answer {
         app.finish_fix(ok);
+    }
+}
+
+/// The connection check's counts per kind. With an editable document, Fix removes the
+/// entries in one undoable entry; Close, Escape or a click beside it changes nothing.
+pub(crate) fn connection_report(app: &mut App, ctx: &egui::Context) {
+    let Some(defects) = &app.connection_report else {
+        return;
+    };
+    let editable = app.editable();
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::unique("connection_report")).show(ctx, |ui| {
+        ui.heading("Connection check");
+        ui.label(format!(
+            "Dangling incoming entries: {}\nDuplicate entries: {}\nSelf-links: {}",
+            defects.dangling.len(),
+            defects.duplicates.len(),
+            defects.self_links.len()
+        ));
+        if !editable {
+            ui.label("The config is read-only.");
+        }
+        ui.horizontal(|ui| {
+            if editable && ui.button("Fix").clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Close").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    if let Some(fix) = answer {
+        app.finish_connections(fix);
     }
 }
 

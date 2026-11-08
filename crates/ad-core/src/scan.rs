@@ -1,14 +1,17 @@
 //! Network scans that change nothing: they report nodes for the user to look at. The
-//! merge of overlapping nodes, the move of nodes outside the map to its edge and the fill
-//! of missing heights are planned here as one transaction each for the caller to apply.
+//! merge of overlapping nodes, the move of nodes outside the map to its edge, the fill of
+//! missing heights and the removal of broken connection entries are planned here as one
+//! transaction each for the caller to apply.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::command::{Command, Connect, DeleteNodes, MoveNodes, Position, Transaction};
+use crate::command::{
+    Command, Connect, DeleteNodes, MoveNodes, Position, RemoveLinkEntries, Transaction,
+};
 use crate::geometry::{MAP_PIXELS, MapGeometry};
 use crate::heightmap::sample_height;
 use crate::map_context::MapContext;
-use crate::network::{ConnectionShape, Network, NodeId};
+use crate::network::{ConnectionShape, Network, NodeId, Side};
 
 /// How far apart in height two overlapping nodes may be. Stored heights of a road and of a
 /// copy pasted onto it differ by up to about 2 m (the heightmap sample is not the stored
@@ -54,7 +57,8 @@ pub fn placed_nodes(tx: &Transaction) -> Vec<NodeId> {
             | Command::Disconnect(_)
             | Command::EditMarker(_)
             | Command::RenameGroup(_)
-            | Command::SetFlag(_) => {}
+            | Command::SetFlag(_)
+            | Command::RemoveLinkEntries(_) => {}
         }
     }
     ids
@@ -290,6 +294,105 @@ pub fn missing_heights_plan(net: &Network, map: &MapContext) -> Transaction {
         })
         .collect();
     moving(moves)
+}
+
+/// The broken adjacency entries of a network, in network order. A reverse link (`a.out`
+/// lists `b`, `b.in` does not list `a`) is valid and never reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Defects {
+    /// `(b, a)`: `b.in` lists `a`, but `a.out` does not list `b` (or `a` is gone). Once
+    /// per pair.
+    pub dangling: Vec<(NodeId, NodeId)>,
+    /// `(node, side, value)`: `value` more than once in the list. Once per value.
+    pub duplicates: Vec<(NodeId, Side, NodeId)>,
+    /// `(node, side)`: the node lists itself. Once per list.
+    pub self_links: Vec<(NodeId, Side)>,
+}
+
+impl Defects {
+    pub fn is_empty(&self) -> bool {
+        self.dangling.is_empty() && self.duplicates.is_empty() && self.self_links.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Defect {
+    SelfLink,
+    Duplicate,
+    Dangling,
+}
+
+/// Calls `f(node, side, index, value, defect, earlier)` for every broken entry; `earlier`
+/// counts the entries before it in the same list that hold `value`. An entry has at most
+/// one defect: a node's own id is a self-link, a repeat of another id a duplicate, and the
+/// first occurrence of an incoming id may be dangling.
+fn each_defect(net: &Network, mut f: impl FnMut(NodeId, Side, usize, NodeId, Defect, usize)) {
+    for &id in net.order() {
+        let Some(n) = net.node(id) else {
+            continue;
+        };
+        for (side, list) in [(Side::Out, n.outgoing()), (Side::In, n.incoming())] {
+            for (i, &value) in list.iter().enumerate() {
+                let earlier = list[..i].iter().filter(|v| **v == value).count();
+                let defect = if value == id {
+                    Defect::SelfLink
+                } else if earlier > 0 {
+                    Defect::Duplicate
+                } else if side == Side::In
+                    && !net.node(value).is_some_and(|a| a.outgoing().contains(&id))
+                {
+                    Defect::Dangling
+                } else {
+                    continue;
+                };
+                f(id, side, i, value, defect, earlier);
+            }
+        }
+    }
+}
+
+/// The dangling incoming, duplicate and self entries of `net` (AD-3: the loader keeps
+/// them, this check reports them).
+pub fn connection_defects(net: &Network) -> Defects {
+    let mut d = Defects::default();
+    each_defect(net, |node, side, _, value, defect, earlier| match defect {
+        Defect::SelfLink if earlier == 0 => d.self_links.push((node, side)),
+        Defect::Duplicate if earlier == 1 => d.duplicates.push((node, side, value)),
+        Defect::Dangling => d.dangling.push((node, value)),
+        _ => {}
+    });
+    d
+}
+
+/// Removes every entry [`connection_defects`] reports: self-links, every occurrence after
+/// the first of a duplicate, and dangling incoming entries, as one transaction of one
+/// [`RemoveLinkEntries`]; empty when there are none. Adds no link and removes no node.
+pub fn connection_fix_plan(net: &Network) -> Transaction {
+    let mut entries = Vec::new();
+    each_defect(net, |node, side, index, _, _, _| {
+        entries.push((node, side, index));
+    });
+    if entries.is_empty() {
+        return Transaction::new(Vec::new());
+    }
+    Transaction::new(vec![Command::RemoveLinkEntries(RemoveLinkEntries::new(
+        entries,
+    ))])
+}
+
+/// The nodes whose lists `tx` changes through [`RemoveLinkEntries`], in id order.
+pub fn relinked_nodes(tx: &Transaction) -> Vec<NodeId> {
+    let mut ids: Vec<NodeId> =
+        tx.0.iter()
+            .filter_map(|c| match c {
+                Command::RemoveLinkEntries(c) => Some(c.nodes()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 #[cfg(test)]
@@ -689,5 +792,145 @@ mod tests {
         map.heightmap = None;
         let (n, _) = net(&[(0.0, -1.0, 0.0)]);
         assert!(missing_heights_plan(&n, &map).0.is_empty());
+    }
+
+    /// Nodes 10 apart on x with the given `(outgoing, incoming)` lists as order indexes.
+    fn with_lists(nodes: &[(&[usize], &[usize])]) -> (Network, Vec<NodeId>) {
+        use crate::network::LoadedNode;
+        let loaded = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, (out, inc))| LoadedNode {
+                x: 10.0 * i as f64,
+                y: 0.0,
+                z: 0.0,
+                flag: NodeFlag::REGULAR,
+                outgoing: out.to_vec(),
+                incoming: inc.to_vec(),
+            })
+            .collect();
+        let n = Network::from_loaded(loaded).expect("loads");
+        let ids = n.order().to_vec();
+        (n, ids)
+    }
+
+    #[test]
+    fn a_dangling_incoming_entry_is_reported_and_removed() {
+        // b.in = [a, c]: a does not list b, c does.
+        let (n, ids) = with_lists(&[(&[], &[]), (&[], &[0, 2]), (&[1], &[])]);
+        let [a, b, c] = [ids[0], ids[1], ids[2]];
+        let d = connection_defects(&n);
+        assert_eq!(d.dangling, [(b, a)]);
+        assert!(d.duplicates.is_empty() && d.self_links.is_empty());
+        let tx = connection_fix_plan(&n);
+        assert_eq!(relinked_nodes(&tx), [b]);
+        assert!(placed_nodes(&tx).is_empty());
+        let (n, _) = round_trip(n, tx);
+        assert_eq!(lists(&n, b), (vec![], vec![c]));
+        assert_eq!(lists(&n, c), (vec![b], vec![]));
+        assert!(connection_defects(&n).is_empty());
+        // An entry naming a deleted node is dangling too.
+        let (mut n, ids) = with_lists(&[(&[], &[]), (&[], &[0])]);
+        n.remove_node(ids[0]).expect("remove");
+        assert_eq!(connection_defects(&n).dangling, [(ids[1], ids[0])]);
+        let (n, _) = round_trip(n.clone(), connection_fix_plan(&n));
+        assert!(connection_defects(&n).is_empty());
+    }
+
+    #[test]
+    fn reverse_one_way_and_dual_links_are_not_reported() {
+        // a -> b reverse, b -> c one-way, c <-> d dual.
+        let (n, _) = with_lists(&[(&[1], &[]), (&[2], &[]), (&[3], &[1, 3]), (&[2], &[2])]);
+        assert_eq!(connection_defects(&n), Defects::default());
+        assert!(connection_fix_plan(&n).0.is_empty());
+    }
+
+    #[test]
+    fn a_duplicate_is_reported_once_and_only_its_repeats_are_removed() {
+        // a.out = [b, c, b], b.in = [a]; a -> c is a reverse link.
+        let (n, ids) = with_lists(&[(&[1, 2, 1], &[]), (&[], &[0]), (&[], &[])]);
+        let [a, b, c] = [ids[0], ids[1], ids[2]];
+        let d = connection_defects(&n);
+        assert_eq!(d.duplicates, [(a, Side::Out, b)]);
+        assert!(d.dangling.is_empty() && d.self_links.is_empty());
+        let (n, _) = round_trip(n.clone(), connection_fix_plan(&n));
+        assert_eq!(lists(&n, a), (vec![b, c], vec![]));
+        assert_eq!(lists(&n, b), (vec![], vec![a]));
+        assert_eq!(n.edges_near(0.0, 0.0, 1e9), [(a, b), (a, c)]);
+        // Three times in an incoming list: once, and two repeats removed.
+        let (n, ids) = with_lists(&[(&[1], &[]), (&[], &[0, 0, 0])]);
+        assert_eq!(
+            connection_defects(&n).duplicates,
+            [(ids[1], Side::In, ids[0])]
+        );
+        let (n, _) = round_trip(n.clone(), connection_fix_plan(&n));
+        assert_eq!(lists(&n, ids[1]), (vec![], vec![ids[0]]));
+    }
+
+    #[test]
+    fn a_self_link_is_reported_and_removed() {
+        // a.out = [a, b], b.in = [a]; c lists itself twice in both lists.
+        let (n, ids) = with_lists(&[(&[0, 1], &[]), (&[], &[0]), (&[2, 2], &[2])]);
+        let [a, b, c] = [ids[0], ids[1], ids[2]];
+        let d = connection_defects(&n);
+        assert_eq!(
+            d.self_links,
+            [(a, Side::Out), (c, Side::Out), (c, Side::In)]
+        );
+        assert!(d.dangling.is_empty() && d.duplicates.is_empty());
+        let (n, _) = round_trip(n.clone(), connection_fix_plan(&n));
+        assert_eq!(lists(&n, a), (vec![b], vec![]));
+        assert_eq!(lists(&n, c), (vec![], vec![]));
+        assert_eq!(n.edges_near(0.0, 0.0, 1e9), [(a, b)]);
+        assert_eq!(n.connection_kind(a, b), ConnectionKind::Regular);
+    }
+
+    #[test]
+    fn one_undo_restores_every_removed_entry_at_its_index() {
+        // a.out = [b, a, c, b, c], b.in = [d, a, a], c.in = [a], d.in = [d].
+        let (n, ids) = with_lists(&[
+            (&[1, 0, 2, 1, 2], &[]),
+            (&[], &[3, 0, 0]),
+            (&[], &[0]),
+            (&[], &[3]),
+        ]);
+        let [a, b, c, d] = [ids[0], ids[1], ids[2], ids[3]];
+        let found = connection_defects(&n);
+        assert_eq!(found.dangling, [(b, d)]);
+        assert_eq!(
+            found.duplicates,
+            [(a, Side::Out, b), (a, Side::Out, c), (b, Side::In, a)]
+        );
+        assert_eq!(found.self_links, [(a, Side::Out), (d, Side::In)]);
+        let tx = connection_fix_plan(&n);
+        assert_eq!(relinked_nodes(&tx), [a, b, d]);
+        // `round_trip`: undo gives the exact lists, in order, and the edge index back.
+        let before = snap(&n);
+        let (mut n, mut tx) = round_trip(n, tx);
+        assert_eq!(lists(&n, a), (vec![b, c], vec![]));
+        assert_eq!(lists(&n, b), (vec![], vec![a]));
+        assert_eq!(lists(&n, d), (vec![], vec![]));
+        assert!(connection_defects(&n).is_empty());
+        tx.revert(&mut n).expect("undo");
+        assert_eq!(snap(&n), before);
+        assert_eq!(lists(&n, a), (vec![b, a, c, b, c], vec![]));
+    }
+
+    #[test]
+    fn removing_entries_that_are_not_there_fails_and_changes_nothing() {
+        let (mut n, ids) = with_lists(&[(&[1], &[]), (&[], &[0])]);
+        let before = snap(&n);
+        let gone = n.add_node(5.0, 0.0, 5.0, NodeFlag::REGULAR);
+        n.remove_node(gone).expect("remove");
+        for entries in [
+            vec![(ids[0], Side::Out, 0), (ids[1], Side::In, 1)],
+            vec![(ids[0], Side::Out, 0), (gone, Side::Out, 0)],
+        ] {
+            let mut tx = Transaction::new(vec![Command::RemoveLinkEntries(
+                RemoveLinkEntries::new(entries),
+            )]);
+            assert!(tx.apply(&mut n).is_err());
+            assert_eq!(snap(&n), before);
+        }
     }
 }
