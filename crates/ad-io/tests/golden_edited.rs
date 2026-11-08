@@ -741,3 +741,79 @@ fn committed_line_saves_and_reloads() -> Result<(), Error> {
     assert!(model(&cfg.network) == before);
     Ok(())
 }
+
+#[test]
+fn committed_curve_saves_and_reloads() -> Result<(), Error> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    let mut cfg = load(&original)?;
+    let len = cfg.network.len();
+    // What the Bézier tool commits for a quadratic curve with 5 interpolation points, the
+    // control point pushed 30 units off the midpoint: sub-priority nodes at t = i / 6,
+    // heights linear by t, every segment dual. Positions are kept to the 3 decimals the
+    // file holds, so the reloaded model compares equal.
+    let (start, end) = (cfg.network.order()[2], cfg.network.order()[len - 1]);
+    let (s, e) = match (cfg.network.node(start), cfg.network.node(end)) {
+        (Some(s), Some(e)) => ((s.x, s.y, s.z), (e.x, e.y, e.z)),
+        _ => return Err("fixture nodes".into()),
+    };
+    let control = ((s.0 + e.0) / 2.0 + 30.0, (s.2 + e.2) / 2.0);
+    let round = |v: f64| (v * 1000.0).round() / 1000.0;
+    let at = |t: f64| {
+        let u = 1.0 - t;
+        let bezier = |a: f64, c: f64, b: f64| u * u * a + 2.0 * u * t * c + t * t * b;
+        (
+            round(bezier(s.0, control.0, e.0)),
+            round(s.1 + t * (e.1 - s.1)),
+            round(bezier(s.2, control.1, e.2)),
+            NodeFlag::SUB_PRIO,
+        )
+    };
+    let nodes: Vec<_> = (1..=5).map(|i| at(f64::from(i) / 6.0)).collect();
+    let ends: Vec<LinkEnd> = std::iter::once(LinkEnd::Existing(start))
+        .chain((0..5).map(LinkEnd::New))
+        .chain([LinkEnd::Existing(end)])
+        .collect();
+    let curve = PasteNodes::new(
+        nodes,
+        Vec::new(),
+        ends.windows(2)
+            .map(|w| (w[0], w[1], ConnectionShape::Dual))
+            .collect(),
+    );
+    let before = model(&cfg.network);
+    let mut history = History::default();
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::PasteNodes(curve)]),
+    )?;
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_curve_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    let reloaded = load(&written)?;
+    assert!(model(&cfg.network) == model(&reloaded.network));
+    assert!(untouched(&original)? == untouched(&written)?);
+    let net = &reloaded.network;
+    assert_eq!(net.len(), len + 5);
+    let chain: Vec<NodeId> = std::iter::once(start)
+        .chain(net.order()[len..].iter().copied())
+        .chain([end])
+        .collect();
+    for pair in chain.windows(2) {
+        assert_eq!(net.connection_kind(pair[0], pair[1]), ConnectionKind::Dual);
+    }
+    assert!(
+        net.order()[len..]
+            .iter()
+            .all(|id| net.node(*id).is_some_and(|n| n.flag == NodeFlag::SUB_PRIO))
+    );
+    // One undo removes the whole curve.
+    history.undo(&mut cfg.network);
+    assert!(model(&cfg.network) == before);
+    Ok(())
+}

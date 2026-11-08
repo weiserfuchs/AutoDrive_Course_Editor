@@ -12,6 +12,7 @@ use ad_core::network::{ConnectionShape, Network, NodeFlag, NodeId};
 
 use crate::input::{self, Action};
 use crate::tools::align::{AlignTool, Axis};
+use crate::tools::bezier::{self, BezierTool, Curve};
 use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
 use crate::tools::edit_location::{self, EditLocationTool};
@@ -73,7 +74,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
     let line = app.line();
-    let tools: [Box<dyn Tool>; 14] = [
+    let tools: [Box<dyn Tool>; 15] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
@@ -88,6 +89,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         Box::new(ConnectTool::new(ConnectionShape::OneWay, continuous, line)),
         Box::new(ConnectTool::new(ConnectionShape::Dual, continuous, line)),
         Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous, line)),
+        Box::new(BezierTool::default()),
     ];
     for tool in tools {
         let selected = active == Some(tool.name());
@@ -218,6 +220,9 @@ pub(crate) fn select(
 
 impl ViewHooks for ToolHooks<'_> {
     fn select(&mut self, event: SelectEvent) {
+        if let (SelectEvent::Click { .. }, Some(tool)) = (&event, self.tool.as_deref_mut()) {
+            tool.on_secondary_click();
+        }
         self.select_event = Some(event);
     }
 
@@ -383,6 +388,61 @@ pub(crate) fn error_window(app: &mut App, ctx: &egui::Context) {
             app.error = None;
         }
     }
+}
+
+/// What the curve panel's buttons ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CurveChoice {
+    Commit,
+    Cancel,
+}
+
+/// The curve panel, a non-modal window shown while the Bézier tool previews a curve: it
+/// edits the curve directly (the preview follows), Commit applies it, Cancel drops it.
+pub(crate) fn curve_panel(app: &mut App, ctx: &egui::Context) {
+    let Some(curve) = app.tool.as_deref_mut().and_then(Tool::curve_mut) else {
+        return;
+    };
+    let mut choice = None;
+    egui::Window::new("Bézier curve")
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| choice = curve_controls(ui, curve));
+    if let Some(choice) = choice {
+        app.finish_curve(choice);
+    }
+}
+
+/// The curve panel's controls (Java `CurvePanel`); returns the button pressed, if any.
+fn curve_controls(ui: &mut egui::Ui, curve: &mut Curve) -> Option<CurveChoice> {
+    ui.add(
+        egui::Slider::new(&mut curve.points, 1..=bezier::MAX_POINTS).text("Interpolation points"),
+    );
+    ui.add(egui::Slider::new(&mut curve.controls, 1..=bezier::MAX_CONTROLS).text("Control points"));
+    ui.horizontal(|ui| {
+        ui.label("Priority");
+        ui.selectable_value(&mut curve.flag, NodeFlag::REGULAR, "Regular");
+        ui.selectable_value(&mut curve.flag, NodeFlag::SUB_PRIO, "Sub-priority");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Connection");
+        ui.selectable_value(&mut curve.shape, ConnectionShape::OneWay, "Regular");
+        ui.selectable_value(&mut curve.shape, ConnectionShape::Dual, "Dual");
+        ui.selectable_value(&mut curve.shape, ConnectionShape::Reverse, "Reverse");
+    });
+    if ui.button("Swap direction").clicked() {
+        curve.swap();
+    }
+    let mut choice = None;
+    ui.horizontal(|ui| {
+        if ui.button("Commit").clicked() {
+            choice = Some(CurveChoice::Commit);
+        }
+        if ui.button("Cancel").clicked() {
+            choice = Some(CurveChoice::Cancel);
+        }
+    });
+    choice
 }
 
 /// The Edit location dialog: x, y and z fields, each with a red note while its text is

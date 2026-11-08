@@ -274,6 +274,10 @@ impl App {
             Action::FlipTool if self.editable() => {
                 self.set_tool(Some(Box::new(tools::flip::FlipTool)));
             }
+            // A new Bézier tool, so a previewed curve is dropped (AD-10).
+            Action::BezierTool if self.editable() => {
+                self.set_tool(Some(Box::new(tools::bezier::BezierTool::default())));
+            }
             Action::Undo if self.editable() => {
                 // A preview built on the old network must not commit afterwards.
                 if let Some(tool) = &mut self.tool {
@@ -314,6 +318,7 @@ impl App {
             | Action::ConnectTool
             | Action::PriorityTool
             | Action::FlipTool
+            | Action::BezierTool
             | Action::Undo
             | Action::Redo
             | Action::DeleteHovered => {}
@@ -455,6 +460,27 @@ impl App {
         }
     }
 
+    /// Ends the previewed curve: Commit applies it in one transaction (not on a read-only
+    /// document), Cancel drops it. Either way the tool then waits for a new start.
+    fn finish_curve(&mut self, choice: ui::CurveChoice) {
+        let editable = self.editable();
+        let Some(tool) = &mut self.tool else {
+            return;
+        };
+        let tx = match (choice, &self.doc, tool.curve_mut()) {
+            (ui::CurveChoice::Commit, Some(doc), Some(curve)) if editable => {
+                tools::bezier::plan(&doc.config.network, &doc.map, curve)
+            }
+            _ => None,
+        };
+        tool.cancel();
+        if let (Some(tx), Some(doc)) = (tx, &mut self.doc)
+            && let Err(e) = doc.apply(tx)
+        {
+            self.error = Some(e.to_string());
+        }
+    }
+
     /// Closes the Edit location dialog. With `ok`, sets its node to the typed position in
     /// one transaction, unless a field is invalid, nothing changed, the node is gone or
     /// the document is read-only.
@@ -549,6 +575,7 @@ impl eframe::App for App {
         input::handle_shortcuts(self, &ctx);
         ui::top_bar(self, ui, &ctx);
         egui::CentralPanel::default().show(ui, |ui| ui::map_panel(self, ui));
+        ui::curve_panel(self, &ctx);
         ui::error_window(self, &ctx);
         // Before the prompt, so a prompt from a window close shows on top of it.
         ui::location_dialog(self, &ctx);
@@ -849,6 +876,151 @@ mod tests {
         let doc = app.doc.as_ref().expect("doc");
         assert!(!doc.history.can_undo(), "one undo step");
         assert_eq!(positions(&app), start);
+    }
+
+    /// The loaded node a (1, 0, 2) and b (41, 10, 2), the Bézier tool active and seen at
+    /// zoom 4 (0.25 world units per px), and a curve previewed from a to b.
+    fn bezier_curve(app: &mut App) -> [NodeId; 2] {
+        let a = first(app);
+        let doc = app.doc.as_mut().expect("doc");
+        let b = doc
+            .config
+            .network
+            .add_node(41.0, 10.0, 2.0, NodeFlag::REGULAR);
+        let geometry = doc.map.geometry;
+        app.run(Action::BezierTool);
+        assert_eq!(active(app), Some(tools::bezier::NAME));
+        let tool = tools::bezier::BezierTool::default();
+        let mut t = crate::view::ViewTransform::new((512.0, 512.0), (1024.0, 1024.0));
+        t.zoom = 4.0;
+        tool.see(&t, geometry);
+        app.set_tool(Some(Box::new(tool)));
+        for id in [a, b] {
+            app.view.hovered_node = Some(id);
+            app.click(0.0, 0.0, false);
+        }
+        app.view.hovered_node = None;
+        assert!(app.tool.as_mut().and_then(|t| t.curve_mut()).is_some());
+        [a, b]
+    }
+
+    #[test]
+    fn b_previews_a_curve_that_bends_commits_from_the_panel_and_undoes_in_one_step() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        let [a, b] = bezier_curve(&mut app);
+        let before = snapshot(&app);
+        // The handle sits at the midpoint (21, 2), map px (1045, 1026); drag it 10 down.
+        for event in [
+            DragEvent::Start {
+                at: (1045.0, 1026.0),
+                node: None,
+            },
+            DragEvent::Move {
+                at: (1045.0, 1031.0),
+            },
+            DragEvent::End {
+                at: (1045.0, 1036.0),
+            },
+        ] {
+            drag(&mut app, event, false);
+        }
+        assert_eq!(snapshot(&app), before, "a handle drag changes no data");
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        let curve = app
+            .tool
+            .as_mut()
+            .and_then(|t| t.curve_mut())
+            .expect("curve");
+        assert_eq!(curve.control_points(), [(21.0, 32.0)]);
+        curve.points = 3;
+        curve.shape = ConnectionShape::Dual;
+        app.finish_curve(ui::CurveChoice::Commit);
+        assert!(app.error.is_none());
+        assert!(app.tool.as_mut().and_then(|t| t.curve_mut()).is_none());
+        assert_eq!(
+            active(&app),
+            Some(tools::bezier::NAME),
+            "waits for a new start"
+        );
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        assert_eq!(net.len(), 5);
+        let chain = [a, net.order()[2], net.order()[3], net.order()[4], b];
+        for pair in chain.windows(2) {
+            assert_eq!(net.connection_kind(pair[0], pair[1]), ConnectionKind::Dual);
+        }
+        // Bent off the line z = 2; heights linear from 0 to 10.
+        let mid = net.node(chain[2]).expect("node");
+        assert!(mid.z > 2.0);
+        assert!((mid.y - 5.0).abs() < 1e-9);
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert!(
+            !app.doc.as_ref().expect("doc").history.can_undo(),
+            "one step"
+        );
+    }
+
+    #[test]
+    fn the_curve_is_dropped_by_cancel_a_tool_switch_b_and_a_new_file() {
+        let curve = |app: &mut App| app.tool.as_mut().and_then(|t| t.curve_mut()).is_some();
+        let switches: [fn(&mut App); 4] = [
+            |app| app.finish_curve(ui::CurveChoice::Cancel),
+            |app| app.run(Action::MoveTool),
+            |app| app.run(Action::BezierTool),
+            |app| load(app, "<version>3</version>"),
+        ];
+        for switch in switches {
+            let mut app = App::new(Settings::default());
+            load(&mut app, "<version>3</version>");
+            bezier_curve(&mut app);
+            let before = snapshot(&app);
+            switch(&mut app);
+            assert!(!curve(&mut app));
+            if app
+                .doc
+                .as_ref()
+                .is_some_and(|d| d.config.network.len() == 2)
+            {
+                assert_eq!(snapshot(&app), before);
+            }
+            assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        }
+    }
+
+    #[test]
+    fn a_right_click_cancels_the_pending_curve_start() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        app.run(Action::BezierTool);
+        let a = first(&app);
+        app.view.hovered_node = Some(a);
+        app.click(0.0, 0.0, false);
+        let doc = app.doc.as_mut().expect("doc");
+        let b = doc
+            .config
+            .network
+            .add_node(41.0, 10.0, 2.0, NodeFlag::REGULAR);
+        let mut hooks = ui::ToolHooks::new(
+            app.tool.as_deref_mut(),
+            &doc.map,
+            &doc.config.network,
+            &doc.selection,
+            false,
+        );
+        hooks.select(crate::view::SelectEvent::Click { node: None });
+        // The next click on a node starts a curve instead of ending one.
+        app.view.hovered_node = Some(b);
+        app.click(0.0, 0.0, false);
+        assert!(app.tool.as_mut().and_then(|t| t.curve_mut()).is_none());
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_bezier_tool() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        app.run(Action::BezierTool);
+        assert!(app.tool.is_none());
     }
 
     #[test]

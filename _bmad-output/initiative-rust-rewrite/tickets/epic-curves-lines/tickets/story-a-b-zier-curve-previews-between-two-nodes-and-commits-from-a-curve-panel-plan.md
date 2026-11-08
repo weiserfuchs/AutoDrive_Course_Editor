@@ -63,9 +63,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `tools/bezier.rs` -- math, handle drag and plan; tests for Points, Drag handle, Hidden handles, Panel, N = 1, Heights, Swap
-- [ ] tool, panel and wiring -- tests for Preview, Cancel, Undo, Read-only, B shortcut
-- [ ] golden -- curve round-trip
+- [x] `tools/bezier.rs` -- math, handle drag and plan; tests for Points, Drag handle, Hidden handles, Panel, N = 1, Heights, Swap
+- [x] tool, panel and wiring -- tests for Preview, Cancel, Undo, Read-only, B shortcut
+- [x] golden -- curve round-trip
 
 **Acceptance Criteria:**
 - Given the fixture, when the user presses B, clicks two nodes, bends the curve by dragging a control point, sets interpolation points and type in the panel and commits, then the curve's nodes and links appear and one Ctrl+Z removes them.
@@ -79,6 +79,20 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **Math:** `bezier::bernstein` is the general Bernstein form over start, the used control points and end; a test checks it against Java's written-out quadratic to quintic formulas for k = 1..4. `curve_points` samples t = i/(N+1), i = 1..N.
+- **Commit:** `bezier::plan` reuses `connect::plan_line` (heights per AD-7: `sample_height`, else linear by t, so N = 1 gives the mean height with no division). `plan_line` and `chain` got a `flag` parameter; the connect tools pass `NodeFlag::REGULAR`.
+- **Curve state:** `Curve` keeps the start/end ids (positions are read from the network when painted or planned), 4 handles and 4 virtual control points, all at the midpoint, plus the panel fields. `controls` picks the first k; hidden ones keep their place. Swap reverses only the used k (Java `swapCurveDirection`).
+- **Handle drag:** same mechanism as the rotate handle: `paint_selection` records world units per px (`see`), `on_drag_start` claims a press within 8 px of the nearest used handle, so the view neither pans nor offers it elsewhere; `on_drag` moves the handle by the pointer delta and its control point by 3x (Java `controlPointMoveScaler` default); `on_drag_end` returns no transaction, so no history entry.
+- **Panel access:** a default trait method `Tool::curve_mut() -> Option<&mut bezier::Curve>`, overridden only by the Bézier tool. Chosen over downcasting because the panel needs only the curve, and it keeps `ui.rs` free of `Any`. The panel is a non-modal `egui::Window` drawn after the map panel while a curve exists; it edits the curve in place (the preview follows the next frame), and its Commit/Cancel go through `App::finish_curve` (Commit: `Document::apply`, gated on `editable()`; both then cancel the tool so it waits for a new start).
+- **Right click:** a new default trait method `Tool::on_secondary_click()`, called from `ToolHooks::select` for a right click (which still selects, AD-15); the Bézier tool clears its pending start there. A previewed curve stays.
+- **Clicks while previewing** do nothing. A new curve needs Commit, Cancel, or picking the tool again (B or the toolbar), which drops the preview (AD-10).
+- **Shortcut:** B, exact modifiers; `Action::BezierTool` gated on `editable()` like the other tools.
+- **Not done / open:** `DragEvent::Cancel` (a claimed drag released where no pointer position is known) calls `Tool::cancel`, which drops the whole curve and not only the drag; the same path exists for the other tools. The panel's widgets have no UI-level test; its logic is covered through `finish_curve` and the `Curve` methods.
+
+**Tests:** `tools::bezier::tests::{bernstein_matches_javas_quadratic_to_quintic_formulas, curve_points_sit_at_i_over_n_plus_one_without_the_ends, two_clicks_preview_six_points_on_the_straight_line, a_click_on_the_start_or_a_right_click_cancels_the_pending_start, dragging_a_handle_moves_it_and_its_control_point_three_times_as_far, a_press_off_the_handles_is_not_claimed, hidden_handles_keep_their_place_and_are_not_used, the_panels_settings_shape_the_commit, one_point_sits_half_way_at_the_mean_height, heights_are_sampled_or_run_linearly_by_t, swap_reverses_the_links_and_keeps_the_shape, cancel_drops_the_curve_and_the_pending_start}`; `tests::{b_previews_a_curve_that_bends_commits_from_the_panel_and_undoes_in_one_step, the_curve_is_dropped_by_cancel_a_tool_switch_b_and_a_new_file, a_right_click_cancels_the_pending_curve_start, read_only_document_ignores_the_bezier_tool}` in `main.rs`; B added to `input::tests`; `golden_edited::committed_curve_saves_and_reloads`.
+
+**Verification:** `cargo fmt --all --check` ok; `cargo clippy --workspace --all-targets -- -D warnings` ok; `cargo test --workspace` all pass (ad-app 286, golden_edited 5, golden_roundtrip ok). Frame time (release): every case under 16 ms; worst maxima of the best rounds: rotate min zoom whole network 11.6 ms, drag min zoom whole network 8.4 ms, rotate tool idle 7.8 ms, static min zoom all selected 6.8 ms.
 
 ## Plan Change Log
 

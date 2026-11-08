@@ -2,6 +2,7 @@
 //! draw their preview on top of the map view. Exactly one tool is active at a time.
 
 pub mod align;
+pub mod bezier;
 pub mod connect;
 pub mod delete;
 pub mod edit_location;
@@ -63,6 +64,15 @@ pub trait Tool {
     /// The node whose Edit location dialog the last click asked for; the app takes it
     /// right after the click. Only the Edit location tool asks.
     fn take_location_request(&mut self) -> Option<NodeId> {
+        None
+    }
+
+    /// A right click on the map (which also selects, AD-15); only the Bézier tool uses it,
+    /// to cancel its pending start.
+    fn on_secondary_click(&mut self) {}
+
+    /// The previewed curve the curve panel edits; only the Bézier tool has one.
+    fn curve_mut(&mut self) -> Option<&mut bezier::Curve> {
         None
     }
 
