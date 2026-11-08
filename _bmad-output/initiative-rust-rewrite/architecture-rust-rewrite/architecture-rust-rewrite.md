@@ -321,6 +321,8 @@ graph TD
 | tracing / tracing-subscriber / tracing-appender | 0.1.44 / 0.3.23 / 0.2.5 |
 | directories | 6.0.0 |
 
+DDS coverage (settled by the story 7.1 spike, `ad_io::dds::decode`, top mip, at most 16384²): `image_dds` decodes DXT1–DXT5 and the masks A8R8G8B8, A8B8G8R8, R8G8B8, A4R4G4B4 and A1R5G5B5 (it also maps BC4–BC7 and DX10 headers, not tested). ad-io decodes X8R8G8B8 and X8B8G8R8 itself. X1R5G5B5, X4R4G4B4, R5G6B5, cube maps, arrays, volumes and every other format are refused with an error naming the format.
+
 ## Structural Seed
 
 ```text
@@ -401,7 +403,6 @@ sequenceDiagram
 ## Deferred
 
 - **Undo cap value and memory budget.** Set it when commands exist; AD-4 fixes only the mechanism.
-- **DDS format coverage beyond BC1–BC3 and RGBA8** (DXT2/DXT4, legacy uncompressed masks). A spike with real FS19, FS22 and FS25 DDS samples runs before the image-import epic. Missing formats get a small decoder in ad-io.
 - **Localisation mechanism.** Java ships only `en_US`, and the string-table convention keeps the option open.
 - **Themes.** egui light and dark stand in for FlatLaf for now.
 - **Route-manager semantics in detail, and the experimental Java tools** (ArcSpline is marked WIP; ScaleButton, RoadConnection). They are sliced in their own epics and bound by AD-2, AD-3, AD-4, AD-10 and AD-17.
