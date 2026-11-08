@@ -10,6 +10,10 @@ pub(crate) enum Action {
     NodeTool,
     MoveTool,
     RotateTool,
+    /// Aligns the selection's z to a clicked node.
+    AlignHorizontalTool,
+    /// Aligns the selection's x to a clicked node.
+    AlignVerticalTool,
     /// Selects the regular connect tool, then cycles regular, dual, reverse.
     ConnectTool,
     PriorityTool,
@@ -26,7 +30,7 @@ pub(crate) enum Action {
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 13] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 15] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -46,6 +50,14 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 13] = [
     (
         Action::RotateTool,
         KeyboardShortcut::new(Modifiers::NONE, Key::R),
+    ),
+    (
+        Action::AlignHorizontalTool,
+        KeyboardShortcut::new(Modifiers::SHIFT, Key::X),
+    ),
+    (
+        Action::AlignVerticalTool,
+        KeyboardShortcut::new(Modifiers::SHIFT, Key::Y),
     ),
     (
         Action::ConnectTool,
@@ -199,5 +211,19 @@ mod tests {
         assert!(press(Modifiers::SHIFT, Key::L).is_empty());
         assert!(press(CTRL, Key::L).is_empty());
         assert!(press(CTRL, Key::Semicolon).is_empty());
+    }
+
+    #[test]
+    fn shift_x_and_shift_y_pick_the_align_tools_and_plain_x_y_do_nothing() {
+        assert_eq!(
+            press(Modifiers::SHIFT, Key::X),
+            [Action::AlignHorizontalTool]
+        );
+        assert_eq!(press(Modifiers::SHIFT, Key::Y), [Action::AlignVerticalTool]);
+        for key in [Key::X, Key::Y] {
+            assert!(press(Modifiers::NONE, key).is_empty());
+            assert!(press(CTRL.plus(Modifiers::SHIFT), key).is_empty());
+            assert!(press(Modifiers::SHIFT.plus(Modifiers::ALT), key).is_empty());
+        }
     }
 }

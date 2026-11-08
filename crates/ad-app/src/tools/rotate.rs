@@ -255,6 +255,7 @@ impl Tool for RotateTool {
         map: &MapContext,
         net: &Network,
         selection: &BTreeSet<NodeId>,
+        _hovered: Option<NodeId>,
         revision: u64,
     ) {
         self.see(t, map.geometry, map.node_size);
@@ -567,7 +568,7 @@ mod tests {
         let paint = |net: &Network, selection: &BTreeSet<NodeId>, revision: u64| {
             let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
                 let t = ViewTransform::new((512.0, 512.0), (1024.0, 1024.0));
-                tool.paint_selection(ui.painter(), &t, &map, net, selection, revision);
+                tool.paint_selection(ui.painter(), &t, &map, net, selection, None, revision);
             });
             out.textures_delta.clear();
             tool.reach.get().and_then(|(_, r)| r).map(|r| r.0)

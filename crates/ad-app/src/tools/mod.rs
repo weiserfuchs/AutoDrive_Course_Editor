@@ -1,6 +1,7 @@
 //! Editing tools (AD-10): stateful controllers that turn input into one transaction and
 //! draw their preview on top of the map view. Exactly one tool is active at a time.
 
+pub mod align;
 pub mod connect;
 pub mod delete;
 pub mod flip;
@@ -79,8 +80,10 @@ pub trait Tool {
     }
 
     /// Draws what the tool shows for the selection (the rotate handle) on top of the map
-    /// view, before [`Tool::paint`]; `map` gives the geometry and the node size. `revision`
-    /// changes whenever the network or the selection may have changed.
+    /// view, before [`Tool::paint`]; `map` gives the geometry and the node size. `hovered`
+    /// is this frame's node under the pointer. `revision` changes whenever the
+    /// network or the selection may have changed.
+    #[allow(clippy::too_many_arguments)]
     fn paint_selection(
         &self,
         _painter: &egui::Painter,
@@ -88,6 +91,7 @@ pub trait Tool {
         _map: &MapContext,
         _net: &Network,
         _selection: &BTreeSet<NodeId>,
+        _hovered: Option<NodeId>,
         _revision: u64,
     ) {
     }

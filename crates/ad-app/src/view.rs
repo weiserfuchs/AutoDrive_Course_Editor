@@ -309,13 +309,15 @@ pub trait ViewHooks {
     }
 
     /// Draws on top of the view; `cursor` is the pointer while it is over the view.
-    /// `hovered_edge` is the drawn screen segment of the hovered connection.
+    /// `hovered_node` is this frame's hovered node; `hovered_edge` is the drawn screen
+    /// segment of the hovered connection.
     fn paint(
         &self,
         _painter: &egui::Painter,
         _t: &ViewTransform,
         _geometry: MapGeometry,
         _cursor: Option<egui::Pos2>,
+        _hovered_node: Option<NodeId>,
         _hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     ) {
     }
@@ -618,7 +620,14 @@ impl MapView {
                 (p(a), p(b))
             });
         // Last, so tools draw on top of everything.
-        hooks.paint(&painter, &t, geometry, response.hover_pos(), hovered_edge);
+        hooks.paint(
+            &painter,
+            &t,
+            geometry,
+            response.hover_pos(),
+            self.hovered_node,
+            hovered_edge,
+        );
         if response.dragged_by(secondary)
             && let Some((mx, my)) = self.select_start
             && let Some(b) = ui.input(|i| i.pointer.interact_pos())
@@ -1641,6 +1650,7 @@ mod tests {
                 t: &ViewTransform,
                 geometry: MapGeometry,
                 _cursor: Option<egui::Pos2>,
+                _hovered_node: Option<NodeId>,
                 _hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
             ) {
                 self.seen.set(Some((t.zoom, geometry)));

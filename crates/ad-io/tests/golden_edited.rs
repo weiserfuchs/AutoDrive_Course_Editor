@@ -351,13 +351,43 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
             moves: rotated.clone(),
         })]),
     )?;
-    // The delete tool or key on a selection: three unmarked nodes no other edit touches go
-    // in one DeleteNodes, in id order.
+    // The align tool (Shift+X) on a selection: three more untouched nodes take the z of a
+    // fourth, the reference, in one MoveNodes; x and y kept, the reference stays put.
     let busy = [
         &busy[..],
         &rotated.iter().map(|g| g.0).collect::<Vec<_>>()[..],
     ]
     .concat();
+    let free: Vec<NodeId> = cfg
+        .network
+        .order()
+        .iter()
+        .copied()
+        .filter(|id| !busy.contains(id))
+        .take(4)
+        .collect();
+    let [reference, ref aligning @ ..] = free[..] else {
+        return Err("fixture has too few free nodes".into());
+    };
+    let ref_z = cfg.network.node(reference).ok_or("reference")?.z;
+    let aligned: Vec<(NodeId, Position, Position)> = aligning
+        .iter()
+        .filter_map(|&id| {
+            let n = cfg.network.node(id)?;
+            Some((id, (n.x, n.y, n.z), (n.x, n.y, ref_z)))
+        })
+        .collect();
+    assert_eq!(aligned.len(), 3);
+    assert!(aligned.iter().all(|(_, before, after)| before != after));
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::MoveNodes(MoveNodes {
+            moves: aligned.clone(),
+        })]),
+    )?;
+    // The delete tool or key on a selection: three unmarked nodes no other edit touches go
+    // in one DeleteNodes, in id order.
+    let busy = [&busy[..], &free[..]].concat();
     let mut gone: Vec<NodeId> = cfg
         .network
         .order()
@@ -409,6 +439,12 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .filter_map(|&(id, _, after)| Some((index_of(id)?, after)))
         .collect();
     assert_eq!(rotated_moved.len(), 3);
+    let aligned_moved: Vec<(usize, (f64, f64, f64))> = aligned
+        .iter()
+        .filter_map(|&(id, _, after)| Some((index_of(id)?, after)))
+        .collect();
+    assert_eq!(aligned_moved.len(), 3);
+    let ref_index = index_of(reference).ok_or("reference")?;
     assert_eq!(cfg.network.len(), order.len() - 4);
 
     let dir = std::env::temp_dir().join(format!("ad_golden_edited_{}", std::process::id()));
@@ -449,6 +485,13 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
     for (i, after) in group_moved {
         let m = net.node(net.order()[i]).ok_or("group node")?;
         assert_eq!((m.x, m.y, m.z), after);
+    }
+    // The aligned group reloads on the reference's z exactly.
+    let ref_z = net.node(net.order()[ref_index]).ok_or("reference")?.z;
+    for (i, after) in aligned_moved {
+        let m = net.node(net.order()[i]).ok_or("aligned node")?;
+        assert_eq!((m.x, m.y, m.z), after);
+        assert_eq!(m.z, ref_z);
     }
     let kinds: Vec<_> = net
         .node(new_last)
