@@ -3,14 +3,14 @@ title: 'A route-manager file opens with its markers, groups and map'
 type: 'feature'
 ticket: '1'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '81c3ffc'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -89,3 +89,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: 1 medium patched.
+  - medium, patch: a merge on a route ran without a backup, against AD-16 and story 8.2 ("the merge never runs without a written backup"). It is now refused on a route with the notice "Not merged: a merge needs a backup, and route backups come with story 11.2"; story 11.2 adds route backups. Test `a_merge_on_a_route_is_refused_until_routes_have_backups`.
+  - accepted: more values than `c` is an error (the mod never writes more); the group list is kept as read (the mod's "All is id 1" renumbering is for 11.2).
+- Verification after the patch: fmt, clippy and workspace tests pass (ad-app 424).

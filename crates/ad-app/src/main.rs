@@ -877,19 +877,15 @@ impl App {
             revision: doc.revision,
             overlap,
         };
-        self.merging = true;
-        // A route's backup needs the route writer (story 11.2): merge without one.
+        // A merge never runs without a backup (AD-16), and a route's backup needs the route
+        // writer (story 11.2): refuse until then.
         if doc.is_route() {
-            let _ = self.tx.send(JobResult::MergeBackup {
-                start,
-                result: Ok(()),
-            });
-            notify();
             if let Some(doc) = &mut self.doc {
                 doc.add_notice(jobs::ROUTE_MERGE_NO_BACKUP.to_owned());
             }
             return;
         }
+        self.merging = true;
         jobs::spawn_merge_backup(
             doc.config.clone(),
             start,
@@ -3638,18 +3634,19 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_on_a_route_runs_without_a_backup() {
+    fn a_merge_on_a_route_is_refused_until_routes_have_backups() {
         let (mut app, dir) = route_case("merge");
         let before = files(&dir);
         scan(&mut app, "0.1");
         assert_eq!(overlap_marks(&app).map(|m| m.len()), Some(2));
-        merge(&mut app, true, |_| {});
+        app.ask_merge();
+        app.finish_merge(true, || {});
+        app.poll_jobs();
         assert_eq!(app.error, None);
-        assert_eq!(nodes(&app), 2);
+        assert_eq!(nodes(&app), 3, "nothing merged");
         assert!(notice(&app).is_some_and(|n| n.contains(jobs::ROUTE_MERGE_NO_BACKUP)));
-        assert_eq!(files(&dir), before);
-        app.run(Action::Undo);
-        assert_eq!(nodes(&app), 3);
+        assert!(!app.merging);
+        assert_eq!(files(&dir), before, "no backup written");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

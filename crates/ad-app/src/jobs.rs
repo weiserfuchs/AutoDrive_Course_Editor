@@ -270,7 +270,7 @@ pub const ROUTE_SAVE_LATER: &str = "Saving routes comes with story 11.2";
 
 /// The notice of a merge on a route document: its backup needs the route writer (11.2).
 pub const ROUTE_MERGE_NO_BACKUP: &str =
-    "Merged without a backup: route backups come with story 11.2";
+    "Not merged: a merge needs a backup, and route backups come with story 11.2";
 
 /// How the load's notice for a missing heightmap starts; an attached heightmap drops it.
 pub const NO_HEIGHTMAP: &str = "No heightmap found";
