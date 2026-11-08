@@ -55,9 +55,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `tools/edit_location.rs` -- parse and plan; tests for Edit (rounding), Unchanged, Invalid text, Out of range, Comma
-- [ ] dialog and wiring -- tests: a click opens the dialog for the hovered node, a click off a node does not, OK commits and one undo restores, Cancel commits nothing, read-only does nothing, a shortcut pressed while the dialog is open does nothing
-- [ ] `golden_edited.rs` -- edited node round-trip
+- [x] `tools/edit_location.rs` -- parse and plan; tests for Edit (rounding), Unchanged, Invalid text, Out of range, Comma
+- [x] dialog and wiring -- tests: a click opens the dialog for the hovered node, a click off a node does not, OK commits and one undo restores, Cancel commits nothing, read-only does nothing, a shortcut pressed while the dialog is open does nothing
+- [x] `golden_edited.rs` -- edited node round-trip
 
 **Acceptance Criteria:**
 - Given the fixture, when the user picks Edit location, clicks a node, types new x, y and z and presses OK, then the node moves there and one Ctrl+Z restores it.
@@ -71,6 +71,14 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- Opening the dialog: `Tool` got one default method, `take_location_request() -> Option<NodeId>` (always `None`). `EditLocationTool::on_click` stores `ctx.hovered_node` and returns no transaction; `App::click` takes the request right after `on_click` and opens `LocationDialog` (node id and the three field strings) in `App::location`. `App::finish_location(ok)` closes it and, with OK, commits the one `MoveNodes` through `Document::apply`.
+- Rounding: half-up (away from zero on a tie) to 3 decimals on the decimal text, not on the binary value. The parsed f64 is printed with Rust's shortest round-trip `Display` (never an exponent), the first three decimals plus the fourth digit decide, and the result is `milli / 1000.0` (exact operands, so the nearest f64). A typed `0.0005` or `1.0005` therefore gives `0.001` / `1.001`, where Java's `new BigDecimal(double)` sees the binary value just below the tie and would round down. A tiny negative that rounds to 0 gives `+0.0`, not `-0.000`. The range is checked on the unrounded value; the bounds are whole numbers, so rounding cannot leave the range.
+- Parsing: trimmed, commas read as the decimal point, `str::parse::<f64>`; empty, non-numeric and non-finite (`1e999`, `NaN`, `inf`) give "Not a number", out of range gives "Must be between min and max". Ranges x, z within ±1024·scale, y 0..=1024·scale (`MapContext.geometry.scale`).
+- Dialog: `ui::location_dialog`, an `egui::Modal` drawn before the unsaved prompt (so a prompt from a window close stays on top). OK and Enter commit only with every field valid; Cancel, Escape and a backdrop click (`ModalResponse::should_close`) commit nothing.
+- Input blocking while the dialog is shown: `input::handle_shortcuts` returns early (the unsaved-prompt check moved in there too), so no shortcut fires, Ctrl+Z / Ctrl+Shift+Z included, and no key is consumed; `map_panel` hands the view no tool and drops selection gestures; `App::click` ignores clicks. The modal backdrop covers the toolbar in the GUI. A new document (finished load) closes the dialog with the tool.
+- Tests: `tools::edit_location::tests` (`values_round_half_up_to_three_decimals`, `a_comma_is_read_as_the_decimal_point`, `invalid_text_is_refused`, `values_out_of_range_are_refused`, `the_dialog_prefills_three_decimals_and_parses_each_field_against_its_range`, `an_edit_moves_the_node_in_one_move_nodes_and_reverts`, `an_unchanged_position_or_a_missing_node_commits_nothing`, `a_click_asks_for_the_dialog_only_on_a_node`); main.rs (`an_edit_location_click_opens_the_dialog_for_the_hovered_node_only`, `edit_location_ok_commits_one_move_and_one_undo_restores_it`, `edit_location_cancel_unchanged_or_invalid_commits_nothing`, `read_only_document_ignores_the_edit_location_tool`, `shortcuts_and_clicks_do_nothing_while_the_edit_location_dialog_is_shown`, `a_new_document_closes_the_edit_location_dialog`); ui.rs (`enter_commits_a_valid_dialog_and_escape_cancels_it`, `a_click_with_edit_location_opens_the_dialog_and_the_map_then_ignores_selection`); `golden_edited` sets one more untouched node to (123.457, 45.25, -678.901) and checks it reloads exactly.
+- Verified: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` (incl. `golden_roundtrip`, `golden_edited`) pass. `frame_time` (release): the first two runs had the min-zoom whole/west-half selected drag and rotate cases at 17-23 ms; the same cases were over budget on the baseline without this change (machine load), and the third run had every case under 16 ms (worst: west half selected drag max 13.4 ms, rotate min zoom max 10.8 ms). The GUI hand check of the acceptance criterion is still for a human.
 
 ## Plan Change Log
 

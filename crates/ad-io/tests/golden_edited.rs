@@ -385,9 +385,32 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
             moves: aligned.clone(),
         })]),
     )?;
+    // Edit location: one more untouched node is set to typed x, y and z, already rounded to
+    // three decimals by the dialog, in one MoveNodes with absolute positions.
+    let busy = [&busy[..], &free[..]].concat();
+    let located = cfg
+        .network
+        .order()
+        .iter()
+        .copied()
+        .find(|id| !busy.contains(id))
+        .ok_or("fixture has no free node to edit")?;
+    let located_before = cfg
+        .network
+        .node(located)
+        .map(|n| (n.x, n.y, n.z))
+        .ok_or("located node")?;
+    let located_after = (123.457, 45.25, -678.901);
+    assert_ne!(located_before, located_after);
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::MoveNodes(MoveNodes {
+            moves: vec![(located, located_before, located_after)],
+        })]),
+    )?;
     // The delete tool or key on a selection: three unmarked nodes no other edit touches go
     // in one DeleteNodes, in id order.
-    let busy = [&busy[..], &free[..]].concat();
+    let busy = [&busy[..], &[located]].concat();
     let mut gone: Vec<NodeId> = cfg
         .network
         .order()
@@ -445,6 +468,7 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .collect();
     assert_eq!(aligned_moved.len(), 3);
     let ref_index = index_of(reference).ok_or("reference")?;
+    let located_index = index_of(located).ok_or("located node")?;
     assert_eq!(cfg.network.len(), order.len() - 4);
 
     let dir = std::env::temp_dir().join(format!("ad_golden_edited_{}", std::process::id()));
@@ -493,6 +517,9 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         assert_eq!((m.x, m.y, m.z), after);
         assert_eq!(m.z, ref_z);
     }
+    // The located node reloads on the typed values exactly.
+    let m = net.node(net.order()[located_index]).ok_or("located node")?;
+    assert_eq!((m.x, m.y, m.z), located_after);
     let kinds: Vec<_> = net
         .node(new_last)
         .ok_or("added")?
