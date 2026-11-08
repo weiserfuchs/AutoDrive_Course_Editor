@@ -3,14 +3,14 @@ title: 'A DDS spike settles which formats decode'
 type: 'spike'
 ticket: '1'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '5b613cd'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -94,3 +94,5 @@ Result (tests in `crates/ad-io/src/dds.rs`, 8×8 samples built in the test):
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator, inline): no finding. Accepted: the error type is `DdsError`, not `ImageError` (named formats need their own variant); X8R8G8B8/X8B8G8R8 count as the 32-bit RGBA family; cube maps, arrays and volumes are refused. Noted for later: CI has no AD-1 dependency check yet (only fmt, clippy, test).
