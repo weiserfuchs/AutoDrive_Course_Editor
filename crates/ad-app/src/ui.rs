@@ -30,7 +30,9 @@ use crate::{App, Choice, Pending};
 /// The top bar: Open, Save, the Grid toggle and the status labels.
 pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     egui::Panel::top("top_bar").show(ui, |ui| {
-        ui.horizontal(|ui| {
+        // Wraps onto further rows when the window is narrower than all the buttons, so no
+        // tool or notice is cut off at the right edge.
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(!app.loading && !app.saving, egui::Button::new("Open…"))
                 .clicked()
@@ -1282,6 +1284,41 @@ mod tests {
             }
         }
         texts.join("|")
+    }
+
+    #[test]
+    fn the_top_bar_wraps_so_every_button_stays_inside_a_narrow_window() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        let width = 800.0;
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 600.0),
+                )),
+                time: Some(ctx.input(|i| i.time) + 0.016),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| top_bar(&mut app, ui, &ctx.clone()));
+            out.textures_delta.clear();
+            texts = out
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => Some((t.galley.text().to_owned(), t.pos.x)),
+                    _ => None,
+                })
+                .collect();
+        }
+        for name in ["Open…", "Node", "Delete marker", "Groups"] {
+            let (_, x) = texts
+                .iter()
+                .find(|(t, _)| t == name)
+                .unwrap_or_else(|| panic!("{name} drawn: {texts:?}"));
+            assert!(*x < width, "{name} at x = {x}");
+        }
     }
 
     #[test]
