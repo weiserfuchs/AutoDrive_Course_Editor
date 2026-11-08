@@ -3,14 +3,14 @@ title: 'Vehicles parked at markers load, survive edits and save into vehicles.xm
 type: 'feature'
 ticket: '1'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '73c4e39'
 route: 'full'
 route_source: 'auto'
 risk: 'high'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -108,3 +108,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - checked: first/second references are kept as nodes from the load, so patching from the loaded bytes on every Save is idempotent; the root fixtures stay unchanged (tests use temp copies).
+  - accepted: a Save overwrites a vehicles.xml the game changed while the editor was open, as the config save does; a pending close is cancelled when the vehicles warning arrives, so the message is seen.
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 306, vehicles_roundtrip 6).
