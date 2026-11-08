@@ -61,3 +61,7 @@
 - source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-selection-clipboard/tickets/story-dragging-the-whole-network-selected-stays-within-the-frame-b-plan.md`
   summary: Add a frame-time case that drags a large selection far on both axes at minimum zoom (the view's whole-map "joint" preview query), and, if it is near the budget on the developer's machine, a uniform-offset query (view shifted back into stored coordinates plus the view) that keeps the drawn result identical.
   evidence: No frame-time case reaches that branch; forced on, it measured up to 12.1 ms best-round max on the implementer's machine, which ran about 1.4x faster than the developer's on earlier code, so it is unverified against 16 ms there (medium if true).
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-selection-clipboard/tickets/story-copy-cut-and-paste-to-the-view-centre-or-the-original-place-plan.md`
+  summary: Let Ctrl+C/X/V reach a focused or highlighted text widget outside the modal dialogs before the editor's clipboard shortcuts take them.
+  evidence: input.rs consumes egui's Copy/Cut/Paste events before the UI is drawn; today only the error window shows selectable text.

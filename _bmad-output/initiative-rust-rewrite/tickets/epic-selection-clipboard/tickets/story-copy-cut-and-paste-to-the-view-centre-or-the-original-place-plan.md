@@ -3,14 +3,14 @@ title: 'Copy, cut and paste to the view centre or the original place'
 type: 'feature'
 ticket: '9'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '56f7bea'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -96,3 +96,8 @@ context: []
 - `view.rs`: added the read-only `MapView::centre()` accessor despite "Do not touch: view"; paste needs the view centre and the transform is private.
 
 ## Review Triage Log
+
+- Quick review, pass 1: no patch; 1 low deferred.
+  - low, defer: Ctrl+C/X/V events are consumed before the UI draws, so Ctrl+C on text highlighted in a non-modal window (the error window) copies nodes instead of the text. No such text the user needs to copy exists today; revisit with the settings UI.
+  - checked, no finding: inner links rebuild their shape exactly, since `Network::connect` only adds links; select-after records are bounded by the history.
+- Verification: fmt, clippy and workspace tests pass (re-run by the orchestrator).
