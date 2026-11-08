@@ -3,14 +3,14 @@ title: 'An arc spline previews with handles and commits with heightmap heights'
 type: 'feature'
 ticket: '6'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '58c61fa'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -91,3 +91,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - checked: a lost pointer ends only the handle drag (`on_drag_cancel`); the radius handle's clamp to the start follows Java's `clampNodeToLine` and still lets a continuous drag grow the radius.
+  - accepted: no grid snap on placement and no shortcut, as Java; the read-only gate is the toolbar's, as for the other toolbar-only tools.
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 299, golden_edited 6).
