@@ -41,6 +41,18 @@ impl Network {
         }
     }
 
+    /// Sets the group of the marker at `index`; its name, place and parked vehicles stay.
+    /// Returns false when there is no such marker.
+    pub fn set_marker_group(&mut self, index: usize, group: String) -> bool {
+        match self.markers.get_mut(index) {
+            Some(marker) => {
+                marker.group = group;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Sets the marker of `node`, replacing it in place or appending a new one. A
     /// replaced marker keeps its parked vehicles; a new one has none.
     pub fn set_marker(

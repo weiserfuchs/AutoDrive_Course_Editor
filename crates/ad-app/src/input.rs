@@ -198,9 +198,9 @@ pub(crate) fn pressed(ctx: &egui::Context) -> Vec<Action> {
     })
 }
 
-/// Handles the shortcuts pressed this frame. The unsaved prompt and the Edit location and
-/// marker dialogs are modal: no shortcut acts, nor is its key consumed, while one is
-/// shown, so a text field there keeps its own copy and paste.
+/// Handles the shortcuts pressed this frame. The unsaved prompt, the Edit location and
+/// marker dialogs and the groups window are modal: no shortcut acts, nor is its key
+/// consumed, while one is shown, so a text field there keeps its own copy and paste.
 pub(crate) fn handle_shortcuts(app: &mut App, ctx: &egui::Context) {
     if app.prompt.is_some() || app.dialog_shown() {
         return;

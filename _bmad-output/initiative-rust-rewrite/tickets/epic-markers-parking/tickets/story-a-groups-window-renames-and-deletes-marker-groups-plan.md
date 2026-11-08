@@ -61,9 +61,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `RenameGroup` -- command and tests
-- [ ] window -- counts, rename, delete, refusals; tests for List, Refused, All, Read-only, modal blocking
-- [ ] golden -- renamed group round-trip
+- [x] `RenameGroup` -- command and tests
+- [x] window -- counts, rename, delete, refusals; tests for List, Refused, All, Read-only, modal blocking
+- [x] golden -- renamed group round-trip
 
 **Acceptance Criteria:**
 - Given the fixture, when the user opens Groups, renames one group and deletes another, then the markers change groups as shown and each step undoes in one Ctrl+Z.
@@ -77,6 +77,13 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **Command:** `RenameGroup::new(from, to)` keeps `moved: Vec<usize>`, the marker-order indexes of the markers in `from` at apply. Revert sets exactly those back to `from`, so a merge leaves the target group's own markers alone. A redo recomputes the list (same state, same result). Only the group string changes, through the new `Network::set_marker_group(index, group)`; names, order and `parked_vehicles` stay. A `from` without markers applies as a no-op; the app never plans one.
+- **Pure logic (`tools::marker`):** `group_counts(net)` gives "All" first (also with count 0), then `groups(net)` order with counts. `GroupsWindow { rename: Option<(from, text)> }`. `start_rename` does nothing for "All". `validate()` gives the trimmed name or `GroupNote::{EmptyName, SameName, Reserved}`; the compares are exact, as in the marker dialog. `GroupNote` is a separate enum, so the marker dialog's `Note` gets no variants it never returns. `rename_plan` and `delete_group_plan` (rename to "All"; `None` for "All" or a group without markers) build one `RenameGroup` each. A rename to "All" plans the same transaction as a delete.
+- **App:** `App.groups: Option<GroupsWindow>` is included in `dialog_shown()`, so shortcuts, map clicks and selection are blocked. It is cleared on a document replacement with the other dialogs. `open_groups()`, `finish_group_rename()` and `delete_group()` each check `editable()`; the window stays open after a commit and the rename field closes. The toolbar has a "Groups" button after the marker tools, under the same editable gate.
+- **Window (`ui::groups_window`):** an `egui::Modal` with a scroll area of rows "name (count)" plus Rename/Delete (none for "All"). The row being renamed shows a focused text field, the count, OK (disabled while refused), Cancel, and the red note below. Enter commits when valid. Close, Escape or a click beside the window closes the whole window. While a rename is open, Escape closes the window too, not only the field.
+- **Tests:** ad-core `command` -- `rename_group_moves_every_marker_of_the_group_and_reverts`, `rename_group_onto_an_existing_group_merges_and_undo_splits_exactly`, `rename_group_to_all_ungroups_and_keeps_names_and_parked_vehicles`, `rename_group_keeps_parked_vehicles_through_undo_and_redo`, `rename_of_a_group_without_markers_changes_nothing` (all through `round_trip`/`snap`). `tools::marker` -- `group_counts_list_all_first_then_the_groups_ignoring_case` (List), `a_rename_to_an_empty_or_the_same_name_or_none_is_refused` (Refused), `a_rename_plans_one_rename_group_to_the_trimmed_name_and_all_means_delete`, `delete_moves_the_group_to_all_keeping_the_markers_and_reverts`, `the_all_row_has_no_rename_or_delete` (All). `main` -- `the_groups_window_renames_and_deletes_each_in_one_undo_step` (acceptance: parked vehicle kept, two undos, redo), `a_refused_group_rename_commits_nothing_and_keeps_the_field`, `read_only_document_does_not_open_the_groups_window_or_change_groups` (Read-only), `shortcuts_and_clicks_do_nothing_while_the_groups_window_is_shown` (modal blocking), `a_new_document_closes_the_groups_window`. `ui` -- `the_groups_window_lists_counts_commits_on_enter_and_closes_on_escape` (painted rows "All (0)", "b (1)|Rename|Delete", the red note, Enter, Escape). Golden -- `renamed_and_deleted_groups_save_reload_and_undo`: renames the fixture's first group and deletes a second, saves to temp, reloads with the model equal and the outside bytes untouched, checks the counts, that names and order are kept, and that two undos restore the list.
+- **Verification:** `cargo fmt --all --check` ok. `cargo clippy --workspace --all-targets -- -D warnings` ok. `cargo test --workspace` all pass: ad-app 346 (+2 ignored), ad-core 71, ad-io 44, golden_edited 9, golden_roundtrip 1, vehicles_roundtrip 6. `frame_time` (release): every case ok. The worst best-round max was 9.082 ms (drag, min zoom, west half selected); the worst single round was 12.354 ms (rotate tool idle), under 16 ms.
 
 ## Plan Change Log
 

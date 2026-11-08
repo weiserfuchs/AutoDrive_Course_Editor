@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ad_core::command::{
     AddNodes, Command, Connect, DeleteNodes, Disconnect, EditMarker, LinkEnd, MoveNodes,
-    PasteNodes, Position, SetFlag, Transaction,
+    PasteNodes, Position, RenameGroup, SetFlag, Transaction,
 };
 use ad_core::heightmap::{Heightmap, sample_height};
 use ad_core::history::History;
@@ -990,5 +990,78 @@ fn edited_and_deleted_markers_save_reload_and_undo() -> Result<(), Error> {
     assert_eq!(cfg.network.markers()[0].name, name);
     history.undo(&mut cfg.network);
     assert_eq!(cfg.network.markers(), parked);
+    Ok(())
+}
+
+#[test]
+fn renamed_and_deleted_groups_save_reload_and_undo() -> Result<(), Error> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    let mut cfg = load(&original)?;
+    let before = cfg.network.markers().to_vec();
+    // Two distinct groups of the fixture other than "All".
+    let renamed = before
+        .iter()
+        .map(|m| m.group.clone())
+        .find(|g| g != "All")
+        .ok_or("no group")?;
+    let deleted = before
+        .iter()
+        .map(|m| m.group.clone())
+        .find(|g| g != "All" && *g != renamed)
+        .ok_or("fewer than two groups")?;
+    let count = |g: &str| before.iter().filter(|m| m.group == g).count();
+    let new_name = format!("{renamed} neu");
+    // As the groups window commits them: one RenameGroup each, a delete to "All".
+    let mut history = History::default();
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::RenameGroup(RenameGroup::new(
+            renamed.clone(),
+            new_name.clone(),
+        ))]),
+    )?;
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::RenameGroup(RenameGroup::new(
+            deleted.clone(),
+            "All".to_owned(),
+        ))]),
+    )?;
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_groups_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    let reloaded = load(&written)?;
+    assert!(model(&cfg.network) == model(&reloaded.network));
+    assert!(untouched(&original)? == untouched(&written)?);
+    let net = &reloaded.network;
+    let groups = |g: &str| net.markers().iter().filter(|m| m.group == g).count();
+    assert_eq!(net.markers().len(), before.len());
+    assert_eq!(groups(&renamed), 0);
+    assert_eq!(groups(&new_name), count(&renamed));
+    assert_eq!(groups(&deleted), 0);
+    assert_eq!(groups("All"), count("All") + count(&deleted));
+    // Names and order stay.
+    let names = |ms: &[ad_core::network::Marker]| -> Vec<(NodeId, String)> {
+        ms.iter().map(|m| (m.node, m.name.clone())).collect()
+    };
+    assert_eq!(names(net.markers()), names(&before));
+    // Each undo takes back one step.
+    history.undo(&mut cfg.network);
+    assert_eq!(
+        cfg.network
+            .markers()
+            .iter()
+            .filter(|m| m.group == deleted)
+            .count(),
+        count(&deleted)
+    );
+    history.undo(&mut cfg.network);
+    assert_eq!(cfg.network.markers(), before);
     Ok(())
 }
