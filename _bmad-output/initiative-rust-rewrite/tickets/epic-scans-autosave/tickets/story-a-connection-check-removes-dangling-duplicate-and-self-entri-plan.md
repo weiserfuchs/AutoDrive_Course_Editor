@@ -3,7 +3,7 @@ title: 'A connection check removes dangling, duplicate and self entries'
 type: 'feature'
 ticket: '4'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: 'c1cefd1'
 route: 'full'
 route_source: 'auto'
