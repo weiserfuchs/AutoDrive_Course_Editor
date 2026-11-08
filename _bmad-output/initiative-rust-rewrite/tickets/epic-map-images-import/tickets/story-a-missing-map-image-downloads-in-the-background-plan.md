@@ -3,14 +3,14 @@ title: 'A missing map image downloads in the background'
 type: 'feature'
 ticket: '4'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '07a263d'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -94,3 +94,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch; 1 low deferred.
+  - low, defer: a download still running after another config was opened can, on finishing, overwrite an image the user imported for the same map in the meantime (Import is enabled again for the new document). Narrow; appended to deferred-work.md.
+  - checked: an oversize body is an error, never truncated; no network in the default tests; the real download passed by hand (2048², about 1.3 s).
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 371).
