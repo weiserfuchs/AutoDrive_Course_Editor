@@ -129,16 +129,24 @@ impl SetFlag {
     }
 }
 
-/// Pastes a group: adds `nodes` as `AddNodes` does, then sets `markers` and creates
-/// `links`, both referring to nodes by their index in `nodes`. A redo reinserts each node
-/// under the id of the first apply, with the same markers and links.
+/// One end of a `PasteNodes` link: a node of the paste by its index in `nodes`, or a node
+/// already in the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkEnd {
+    New(usize),
+    Existing(NodeId),
+}
+
+/// Pastes a group: adds `nodes` as `AddNodes` does, then sets `markers` (by index in
+/// `nodes`) and creates `links`, whose ends are new or existing nodes. A redo reinserts
+/// each node under the id of the first apply, with the same markers and links.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PasteNodes {
     pub nodes: Vec<(f64, f64, f64, NodeFlag)>,
     /// `(index, name, group)`.
     pub markers: Vec<(usize, String, String)>,
-    /// `(from index, to index, shape)`.
-    pub links: Vec<(usize, usize, ConnectionShape)>,
+    /// `(from, to, shape)`.
+    pub links: Vec<(LinkEnd, LinkEnd, ConnectionShape)>,
     /// `AddNodes` first, then one `EditMarker` per marker and one `Connect` per link;
     /// built on the first apply, once the ids are known.
     parts: Transaction,
@@ -148,7 +156,7 @@ impl PasteNodes {
     pub fn new(
         nodes: Vec<(f64, f64, f64, NodeFlag)>,
         markers: Vec<(usize, String, String)>,
-        links: Vec<(usize, usize, ConnectionShape)>,
+        links: Vec<(LinkEnd, LinkEnd, ConnectionShape)>,
     ) -> Self {
         Self {
             nodes,
@@ -184,19 +192,23 @@ impl PasteNodes {
                     len: ids.len(),
                 })
         };
-        let rest: Result<Vec<Command>, NetworkError> =
-            self.markers
-                .iter()
-                .map(|(i, name, group)| {
-                    Ok(Command::EditMarker(EditMarker::new(
-                        id(*i)?,
-                        Some((name.clone(), group.clone())),
-                    )))
-                })
-                .chain(self.links.iter().map(|&(a, b, shape)| {
-                    Ok(Command::Connect(Connect::new(id(a)?, id(b)?, shape)))
-                }))
-                .collect();
+        let rest: Result<Vec<Command>, NetworkError> = self
+            .markers
+            .iter()
+            .map(|(i, name, group)| {
+                Ok(Command::EditMarker(EditMarker::new(
+                    id(*i)?,
+                    Some((name.clone(), group.clone())),
+                )))
+            })
+            .chain(self.links.iter().map(|&(a, b, shape)| {
+                let end = |e: LinkEnd| match e {
+                    LinkEnd::New(index) => id(index),
+                    LinkEnd::Existing(node) => Ok(node),
+                };
+                Ok(Command::Connect(Connect::new(end(a)?, end(b)?, shape)))
+            }))
+            .collect();
         let mut rest = match rest {
             Ok(rest) => Transaction::new(rest),
             Err(e) => {
@@ -686,9 +698,9 @@ pub(crate) mod tests {
             ],
             vec![(1, "P".into(), "g".into())],
             vec![
-                (0, 1, ConnectionShape::OneWay),
-                (1, 2, ConnectionShape::Dual),
-                (2, 0, ConnectionShape::Reverse),
+                (LinkEnd::New(0), LinkEnd::New(1), ConnectionShape::OneWay),
+                (LinkEnd::New(1), LinkEnd::New(2), ConnectionShape::Dual),
+                (LinkEnd::New(2), LinkEnd::New(0), ConnectionShape::Reverse),
             ],
         )
     }
@@ -718,12 +730,98 @@ pub(crate) mod tests {
         let (mut n, _) = linked();
         let before = snap(&n);
         let mut bad = paste();
-        bad.links.push((0, 7, ConnectionShape::OneWay));
+        bad.links
+            .push((LinkEnd::New(0), LinkEnd::New(7), ConnectionShape::OneWay));
         let mut tx = one(Command::PasteNodes(bad));
         assert_eq!(
             tx.apply(&mut n),
             Err(NetworkError::IndexOutOfRange { index: 7, len: 3 })
         );
+        assert_eq!(snap(&n), before);
+    }
+
+    #[test]
+    fn paste_links_new_nodes_to_existing_ones_and_reverts_only_its_links() {
+        use crate::network::ConnectionKind;
+        let (n, [a, b, c, d]) = linked();
+        let before: Vec<_> = [a, b, c, d]
+            .iter()
+            .map(|&id| {
+                let x = n.node(id).expect("node");
+                (x.outgoing().to_vec(), x.incoming().to_vec())
+            })
+            .collect();
+        let chain = PasteNodes::new(
+            vec![
+                (1.0, 0.0, 1.0, NodeFlag::REGULAR),
+                (2.0, 0.0, 2.0, NodeFlag::REGULAR),
+            ],
+            Vec::new(),
+            vec![
+                (
+                    LinkEnd::Existing(a),
+                    LinkEnd::New(0),
+                    ConnectionShape::OneWay,
+                ),
+                (LinkEnd::New(0), LinkEnd::New(1), ConnectionShape::OneWay),
+                (
+                    LinkEnd::New(1),
+                    LinkEnd::Existing(d),
+                    ConnectionShape::OneWay,
+                ),
+                (LinkEnd::Existing(b), LinkEnd::New(1), ConnectionShape::Dual),
+                (
+                    LinkEnd::New(0),
+                    LinkEnd::Existing(c),
+                    ConnectionShape::Reverse,
+                ),
+            ],
+        );
+        // `round_trip` checks undo restores the exact network, A..D's old links included.
+        let (mut n, mut tx) = round_trip(n, one(Command::PasteNodes(chain)));
+        let Command::PasteNodes(p) = &tx.0[0] else {
+            panic!("paste");
+        };
+        let [n0, n1] = [p.ids()[0], p.ids()[1]];
+        assert_eq!(n.connection_kind(a, n0), ConnectionKind::Regular);
+        assert_eq!(n.connection_kind(n0, n1), ConnectionKind::Regular);
+        assert_eq!(n.connection_kind(n1, d), ConnectionKind::Regular);
+        assert_eq!(n.connection_kind(b, n1), ConnectionKind::Dual);
+        assert_eq!(n.connection_kind(n0, c), ConnectionKind::Reverse);
+        // Links between existing nodes are untouched.
+        assert_eq!(n.connection_kind(a, b), ConnectionKind::Regular);
+        assert_eq!(n.connection_kind(a, d), ConnectionKind::Reverse);
+        tx.revert(&mut n).expect("revert");
+        for (&id, old) in [a, b, c, d].iter().zip(&before) {
+            let x = n.node(id).expect("node");
+            assert_eq!(&(x.outgoing().to_vec(), x.incoming().to_vec()), old);
+        }
+    }
+
+    #[test]
+    fn paste_with_a_missing_existing_end_fails_and_changes_nothing() {
+        let (mut n, [a, ..]) = linked();
+        let gone = n.add_node(5.0, 0.0, 5.0, NodeFlag::REGULAR);
+        let mut del = one(Command::DeleteNodes(DeleteNodes::new(vec![gone])));
+        del.apply(&mut n).expect("delete");
+        let before = snap(&n);
+        let mut tx = one(Command::PasteNodes(PasteNodes::new(
+            vec![(1.0, 0.0, 1.0, NodeFlag::REGULAR)],
+            vec![(0, "M".into(), "g".into())],
+            vec![
+                (
+                    LinkEnd::Existing(a),
+                    LinkEnd::New(0),
+                    ConnectionShape::OneWay,
+                ),
+                (
+                    LinkEnd::New(0),
+                    LinkEnd::Existing(gone),
+                    ConnectionShape::OneWay,
+                ),
+            ],
+        )));
+        assert!(tx.apply(&mut n).is_err());
         assert_eq!(snap(&n), before);
     }
 

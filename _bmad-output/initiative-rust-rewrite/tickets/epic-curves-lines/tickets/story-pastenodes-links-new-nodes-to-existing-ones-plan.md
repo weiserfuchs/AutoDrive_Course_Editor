@@ -3,14 +3,14 @@ title: 'PasteNodes links new nodes to existing ones'
 type: 'feature'
 ticket: '1'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '1841e1a'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -51,9 +51,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `LinkEnd` and resolution -- tests for every matrix row except Paste
-- [ ] callers adapted -- clipboard and document tests unchanged in behaviour
-- [ ] `golden_edited.rs` -- chain linked to existing nodes round-trip
+- [x] `LinkEnd` and resolution -- tests for every matrix row except Paste
+- [x] callers adapted -- clipboard and document tests unchanged in behaviour
+- [x] `golden_edited.rs` -- chain linked to existing nodes round-trip
 
 **Acceptance Criteria:**
 - Given a network with nodes A and B, when a `PasteNodes` adds two nodes linked A → n0 → n1 → B and is undone and redone, then the links and ids match exactly each time and A and B keep their other links.
@@ -67,6 +67,13 @@ context: []
 
 ## Implementation Notes
 
+- `LinkEnd { New(usize), Existing(NodeId) }` in `ad-core::command`; `PasteNodes::apply` resolves both kinds after `AddNodes`. A missing existing node fails in `Connect` (`check_pair`), the parts applied so far roll back and the add is reverted, so the network is unchanged. Revert is the parts' revert: each `Connect` removes only the entries it added.
+- The clipboard keeps its index links and maps them to `LinkEnd::New` when it builds the paste.
+- Tests: `paste_links_new_nodes_to_existing_ones_and_reverts_only_its_links` (chain, dual and reverse to existing ends, existing links untouched, exact round trip), `paste_with_a_missing_existing_end_fails_and_changes_nothing`; golden `pasted_chain_linked_to_existing_nodes_saves_and_reloads`.
+- Verified: fmt, clippy `-D warnings`, `cargo test --workspace` (ad-core 64 + 4, ad-app 260 + 2 ignored, ad-io 39, golden_edited 3, golden_roundtrip 1).
+
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator, inline): no finding. Checked that the bad-index error still comes before any network change and that the clipboard's links stay index-only.

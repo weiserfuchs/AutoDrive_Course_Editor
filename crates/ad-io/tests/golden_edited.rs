@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ad_core::command::{
-    AddNodes, Command, Connect, DeleteNodes, Disconnect, EditMarker, MoveNodes, PasteNodes,
-    Position, SetFlag, Transaction,
+    AddNodes, Command, Connect, DeleteNodes, Disconnect, EditMarker, LinkEnd, MoveNodes,
+    PasteNodes, Position, SetFlag, Transaction,
 };
 use ad_core::heightmap::{Heightmap, sample_height};
 use ad_core::history::History;
@@ -568,9 +568,9 @@ fn pasted_group_saves_and_reloads() -> Result<(), Error> {
         ],
         vec![(1, "Pasted".to_owned(), "All".to_owned())],
         vec![
-            (0, 1, ConnectionShape::OneWay),
-            (1, 2, ConnectionShape::Dual),
-            (2, 0, ConnectionShape::Reverse),
+            (LinkEnd::New(0), LinkEnd::New(1), ConnectionShape::OneWay),
+            (LinkEnd::New(1), LinkEnd::New(2), ConnectionShape::Dual),
+            (LinkEnd::New(2), LinkEnd::New(0), ConnectionShape::Reverse),
         ],
     );
     let mut history = History::default();
@@ -605,5 +605,67 @@ fn pasted_group_saves_and_reloads() -> Result<(), Error> {
     assert_eq!(net.connection_kind(b, c), ConnectionKind::Dual);
     assert_eq!(net.connection_kind(c, a), ConnectionKind::Reverse);
     assert_eq!(net.connection_kind(a, c), ConnectionKind::None);
+    Ok(())
+}
+
+#[test]
+fn pasted_chain_linked_to_existing_nodes_saves_and_reloads() -> Result<(), Error> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    let mut cfg = load(&original)?;
+    let len = cfg.network.len();
+    // A line or curve commit: new nodes between two existing ones.
+    let (start, end) = (cfg.network.order()[0], cfg.network.order()[1]);
+    let old = |net: &Network, id: NodeId| {
+        net.node(id)
+            .map(|n| (n.outgoing().to_vec(), n.incoming().to_vec()))
+    };
+    let (start_links, end_links) = (old(&cfg.network, start), old(&cfg.network, end));
+    let chain = PasteNodes::new(
+        vec![
+            (11.5, 40.0, 12.25, NodeFlag::REGULAR),
+            (13.0, 41.0, 14.0, NodeFlag::REGULAR),
+        ],
+        Vec::new(),
+        vec![
+            (
+                LinkEnd::Existing(start),
+                LinkEnd::New(0),
+                ConnectionShape::OneWay,
+            ),
+            (LinkEnd::New(0), LinkEnd::New(1), ConnectionShape::OneWay),
+            (
+                LinkEnd::New(1),
+                LinkEnd::Existing(end),
+                ConnectionShape::Dual,
+            ),
+        ],
+    );
+    let mut history = History::default();
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::PasteNodes(chain)]),
+    )?;
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_chain_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    let reloaded = load(&written)?;
+    assert!(model(&cfg.network) == model(&reloaded.network));
+    assert!(untouched(&original)? == untouched(&written)?);
+    let net = &reloaded.network;
+    assert_eq!(net.len(), len + 2);
+    let new = &net.order()[len..];
+    assert_eq!(net.connection_kind(start, new[0]), ConnectionKind::Regular);
+    assert_eq!(net.connection_kind(new[0], new[1]), ConnectionKind::Regular);
+    assert_eq!(net.connection_kind(new[1], end), ConnectionKind::Dual);
+    // Undo restores the existing ends' links exactly.
+    history.undo(&mut cfg.network);
+    assert_eq!(old(&cfg.network, start), start_links);
+    assert_eq!(old(&cfg.network, end), end_links);
     Ok(())
 }

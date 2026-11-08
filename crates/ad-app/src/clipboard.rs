@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use ad_core::command::{Command, PasteNodes, Transaction};
+use ad_core::command::{Command, LinkEnd, PasteNodes, Transaction};
 use ad_core::heightmap::sample_height;
 use ad_core::map_context::MapContext;
 use ad_core::network::{ConnectionShape, Network, NodeFlag, NodeId};
@@ -146,7 +146,10 @@ pub fn paste(
     Transaction::new(vec![Command::PasteNodes(PasteNodes::new(
         nodes,
         markers,
-        clip.links.clone(),
+        clip.links
+            .iter()
+            .map(|&(a, b, shape)| (LinkEnd::New(a), LinkEnd::New(b), shape))
+            .collect(),
     ))])
 }
 
