@@ -306,6 +306,7 @@ impl Tool for RotateTool {
         _geometry: MapGeometry,
         _cursor: Option<egui::Pos2>,
         _snap_grid: Option<(f64, f64)>,
+        _hovered_node: Option<(f64, f64)>,
         _hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     ) {
     }

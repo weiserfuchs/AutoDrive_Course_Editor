@@ -669,3 +669,75 @@ fn pasted_chain_linked_to_existing_nodes_saves_and_reloads() -> Result<(), Error
     assert_eq!(old(&cfg.network, end), end_links);
     Ok(())
 }
+
+#[test]
+fn committed_line_saves_and_reloads() -> Result<(), Error> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    let mut cfg = load(&original)?;
+    let len = cfg.network.len();
+    // What the dual connect tool commits for a line with 4 segments: three regular nodes
+    // at 1/4, 2/4, 3/4 of the way, heights linear, every segment dual. Positions are kept
+    // to the 3 decimals the file holds, so the reloaded model compares equal.
+    let (start, end) = (cfg.network.order()[2], cfg.network.order()[len - 1]);
+    let (s, e) = match (cfg.network.node(start), cfg.network.node(end)) {
+        (Some(s), Some(e)) => ((s.x, s.y, s.z), (e.x, e.y, e.z)),
+        _ => return Err("fixture nodes".into()),
+    };
+    let at = |t: f64| {
+        let lerp = |a: f64, b: f64| ((a + t * (b - a)) * 1000.0).round() / 1000.0;
+        (
+            lerp(s.0, e.0),
+            lerp(s.1, e.1),
+            lerp(s.2, e.2),
+            NodeFlag::REGULAR,
+        )
+    };
+    let ends = [
+        LinkEnd::Existing(start),
+        LinkEnd::New(0),
+        LinkEnd::New(1),
+        LinkEnd::New(2),
+        LinkEnd::Existing(end),
+    ];
+    let line = PasteNodes::new(
+        vec![at(0.25), at(0.5), at(0.75)],
+        Vec::new(),
+        ends.windows(2)
+            .map(|w| (w[0], w[1], ConnectionShape::Dual))
+            .collect(),
+    );
+    let before = model(&cfg.network);
+    let mut history = History::default();
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::PasteNodes(line)]),
+    )?;
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_line_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    let reloaded = load(&written)?;
+    assert!(model(&cfg.network) == model(&reloaded.network));
+    assert!(untouched(&original)? == untouched(&written)?);
+    let net = &reloaded.network;
+    assert_eq!(net.len(), len + 3);
+    let chain = [
+        start,
+        net.order()[len],
+        net.order()[len + 1],
+        net.order()[len + 2],
+        end,
+    ];
+    for pair in chain.windows(2) {
+        assert_eq!(net.connection_kind(pair[0], pair[1]), ConnectionKind::Dual);
+    }
+    // One undo removes the whole line.
+    history.undo(&mut cfg.network);
+    assert!(model(&cfg.network) == before);
+    Ok(())
+}

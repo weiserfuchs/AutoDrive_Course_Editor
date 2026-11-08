@@ -72,6 +72,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
+    let line = app.line();
     let tools: [Box<dyn Tool>; 14] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
@@ -84,9 +85,9 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         Box::new(DeleteTool),
         Box::new(PriorityTool),
         Box::new(FlipTool),
-        Box::new(ConnectTool::new(ConnectionShape::OneWay, continuous)),
-        Box::new(ConnectTool::new(ConnectionShape::Dual, continuous)),
-        Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous)),
+        Box::new(ConnectTool::new(ConnectionShape::OneWay, continuous, line)),
+        Box::new(ConnectTool::new(ConnectionShape::Dual, continuous, line)),
+        Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous, line)),
     ];
     for tool in tools {
         let selected = active == Some(tool.name());
@@ -292,7 +293,18 @@ impl ViewHooks for ToolHooks<'_> {
                 self.revision,
             );
             let snap_grid = self.snap.then_some(self.map.grid);
-            tool.paint(painter, t, geometry, cursor, snap_grid, hovered_edge);
+            let hovered_node = hovered_node
+                .and_then(|id| self.net.node(id))
+                .map(|n| (n.x, n.z));
+            tool.paint(
+                painter,
+                t,
+                geometry,
+                cursor,
+                snap_grid,
+                hovered_node,
+                hovered_edge,
+            );
         }
     }
 }
@@ -453,6 +465,7 @@ mod tests {
 
     use super::*;
     use crate::document::Document;
+    use crate::tools::connect::LineOptions;
 
     fn sorted(selection: &BTreeSet<NodeId>) -> Vec<NodeId> {
         selection.iter().copied().collect()
@@ -1001,7 +1014,11 @@ mod tests {
             Some(Box::new(DeleteTool)),
             Some(Box::new(PriorityTool)),
             Some(Box::new(FlipTool)),
-            Some(Box::new(ConnectTool::new(ConnectionShape::OneWay, false))),
+            Some(Box::new(ConnectTool::new(
+                ConnectionShape::OneWay,
+                false,
+                LineOptions::from_settings(&Default::default()),
+            ))),
         ];
         for tool in tools {
             let mut app = app("<version>3</version>");

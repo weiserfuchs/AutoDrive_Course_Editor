@@ -67,10 +67,10 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `line_points` / `plan_line` -- tests for Long line, Short link, Dual/reverse, Heights, End node on, Node under a point
-- [ ] tool wiring and preview -- tests: End node off, Continuous, Cancel, read-only
-- [ ] settings -- defaults, minimum, missing keys
-- [ ] golden -- line round-trip; AD-13 line
+- [x] `line_points` / `plan_line` -- tests for Long line, Short link, Dual/reverse, Heights, End node on, Node under a point
+- [x] tool wiring and preview -- tests: End node off, Continuous, Cancel, read-only
+- [x] settings -- defaults, minimum, missing keys
+- [x] golden -- line round-trip; AD-13 line
 
 **Acceptance Criteria:**
 - Given the fixture, when the user connects two nodes far apart with the connect tool, then nodes appear every 12 units along the line, linked with the tool's shape, and one Ctrl+Z removes them.
@@ -84,6 +84,17 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- `line_points(start, end, node_distance, end_is_node)` returns `(x, z, fraction)`: the inner points at `i / segments` when `segments > 1`, then the end unless it is a node (exactly `end`, fraction 1). With `segments <= 1` it is empty for an end node (today's `plan`) or just the new end point. The fraction drives the no-heightmap height (`y0 + (y1 - y0) * t`), so 60 units at y 10 → 20 give 12, 14, 16, 18.
+- `chain(start, nodes, end, shape)` builds the one `PasteNodes` (regular nodes, `LinkEnd::Existing` start/end, `shape` on every segment); `plan_line` adds the heights. The Bézier story can reuse `chain`.
+- Line options live on the tool (`LineOptions { node_distance, end_node }`, from `GlobalSettings` via `App::line()`), like `continuous`, because `paint` needs them too and gets no `ToolContext`.
+- `Tool::paint` gains `hovered_node: Option<(f64, f64)>` (world position, looked up in `ToolHooks::paint`) so the preview ends exactly at the hovered node; the other tools ignore it.
+- Continuous after a new end node: the new node's id exists only after the apply, so `Tool::committed(&Transaction)` (default no-op) is called by `App::click` after a successful apply; the connect tool takes the last pasted id as the next start. `cancel` drops that pending hand-over.
+- The end point on empty map snaps like the node tool (`ctx.snap`, `map.grid`); the preview snaps the same way through `snap_grid`. As in Java the preview shows the line to the cursor even when the end node option is off.
+- `line_node_distance` is a `u32` (Java int) with a deserializer raising 0 to 1; `LineOptions::from_settings` also applies `max(1)`.
+- Existing test `semicolon_toggles_continuous_...` had a ~20-unit c → a link, which is now a line through one new node; the assertion follows.
+- Golden: `committed_line_saves_and_reloads` builds the chain the dual tool commits (three nodes, positions kept to 3 decimals) since ad-io cannot call ad-app; saves, reloads, undo restores.
+- Verification: `cargo fmt --all --check` ok; `cargo clippy --workspace --all-targets -- -D warnings` ok; `cargo test --workspace` all pass (ad-app 270, golden_edited 4); `frame_time` all cases ok, worst best-round max 9.1 ms (min zoom, all selected), rotate min zoom whole network 8.5 ms.
 
 ## Plan Change Log
 

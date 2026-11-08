@@ -85,6 +85,7 @@ impl Tool for NodeTool {
         geometry: MapGeometry,
         cursor: Option<egui::Pos2>,
         snap_grid: Option<(f64, f64)>,
+        _hovered_node: Option<(f64, f64)>,
         _hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     ) {
         if let Some(p) = cursor {
