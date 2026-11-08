@@ -3,7 +3,7 @@ title: 'The rotate tool turns the selection about its centre'
 type: 'feature'
 ticket: '6'
 created: '2026-11-08'
-status: 'in-review'
+status: 'built'
 baseline_revision: 'dd0bf9f70a14b5c7f45884b4ef979b06968cb86e'
 route: 'full'
 route_source: 'auto'
@@ -109,3 +109,4 @@ context:
   - The idle `paint_selection` cost was unmeasured: 0.68 ms per frame with the whole network selected. A frame-time case was added, and the centre and reach are now cached per document revision.
   - golden_edited pre-rounded the rotated values. It now applies full precision and checks the reload within ±0.0005.
   - golden_edited listed `group` twice in the delete section's `busy`; the duplicate was dropped.
+- Coordinator verification after the review fixes (2 runs, this machine): "rotate: min zoom, whole network selected" max 12.4 / 16.6 ms, the second over budget. Rotating the whole network takes the view's whole-map ("joint") preview query every frame, the branch deferred after story 4.3. Fixed by the tools handing the view their preview bounds (`Preview::place_all`, commit e0fea6d); re-measured on this machine, 4 runs: rotate min zoom max 7.7–8.0 ms, whole-network drag min zoom 7.4–8.2 ms, every case under budget. This also measures the joint branch the 4.3 deferred-work entry asked for, under budget on the developer's machine; the entry stays as written (append-only) and is settled here.
