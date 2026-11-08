@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread;
 
+use crate::jobs;
 use ad_core::heightmap::{Heightmap, calibrate};
 use ad_io::config_xml::GameVersion;
 use ad_io::map_image::{self, MapImage};
@@ -165,5 +166,13 @@ pub fn attach(doc: &mut Document, saved: ZipSaved) {
     if let Some(heightmap) = saved.heightmap {
         doc.map.height_map_scale = calibrate(&heightmap, &doc.config.network, doc.map.geometry);
         doc.map.heightmap = Some(Arc::new(heightmap));
+        // The load's "no heightmap" line no longer holds; keep any other notice line.
+        doc.notice = doc.notice.take().and_then(|notice| {
+            let rest: Vec<&str> = notice
+                .lines()
+                .filter(|line| !line.starts_with(jobs::NO_HEIGHTMAP))
+                .collect();
+            (!rest.is_empty()).then(|| rest.join("\n"))
+        });
     }
 }

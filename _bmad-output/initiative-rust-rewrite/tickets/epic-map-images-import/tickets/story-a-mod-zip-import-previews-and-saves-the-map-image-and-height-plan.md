@@ -99,3 +99,4 @@ context: []
   - low, patch: images saved for another map (no attach) gave no feedback at all. The open document now shows a notice naming the saved folder; with no document open, the message shows in the message window. Covered in `another_maps_name_or_no_document_saves_without_attaching`.
   - accepted: only the entries actually read are checked for hostile names; `dem.png` must be named exactly (Java's `endsWith` also matched e.g. `xdem.png`).
 - Verification after the patch: fmt, clippy and workspace tests pass (ad-app 361).
+- Hand check (user), pass 1: after Import the top bar still said "No heightmap found …", so the heightmap looked inactive, although it was saved and attached. Fixed: attaching a heightmap drops the load's no-heightmap notice line (other lines stay); test `an_attached_heightmap_drops_the_loads_no_heightmap_notice`. Verified: fmt, clippy, workspace tests (ad-app 362).
