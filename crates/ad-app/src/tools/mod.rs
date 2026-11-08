@@ -81,7 +81,7 @@ pub trait Tool {
 
     /// Draws what the tool shows for the selection (the rotate handle) on top of the map
     /// view, before [`Tool::paint`]; `map` gives the geometry and the node size. `hovered`
-    /// is the node under the pointer as of the last frame. `revision` changes whenever the
+    /// is this frame's node under the pointer. `revision` changes whenever the
     /// network or the selection may have changed.
     #[allow(clippy::too_many_arguments)]
     fn paint_selection(

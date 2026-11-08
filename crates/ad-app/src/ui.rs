@@ -139,8 +139,6 @@ pub(crate) struct ToolHooks<'a> {
     snap: bool,
     /// The right drag draws a lasso instead of a rectangle.
     pub lasso: bool,
-    /// The node hovered as of the last frame, handed to the tool's `paint_selection`.
-    pub hovered: Option<NodeId>,
     /// The document revision, handed to the tool's `paint_selection`.
     pub revision: u64,
     pub commit: Option<Transaction>,
@@ -162,7 +160,6 @@ impl<'a> ToolHooks<'a> {
             selection,
             snap,
             lasso: false,
-            hovered: None,
             revision: 0,
             commit: None,
             select_event: None,
@@ -279,6 +276,7 @@ impl ViewHooks for ToolHooks<'_> {
         t: &ViewTransform,
         geometry: MapGeometry,
         cursor: Option<egui::Pos2>,
+        hovered_node: Option<NodeId>,
         hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     ) {
         if let Some(tool) = self.tool.as_deref() {
@@ -288,7 +286,7 @@ impl ViewHooks for ToolHooks<'_> {
                 self.map,
                 self.net,
                 self.selection,
-                self.hovered,
+                hovered_node,
                 self.revision,
             );
             let snap_grid = self.snap.then_some(self.map.grid);
@@ -326,8 +324,6 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     let mut hooks = ToolHooks::new(tool, &doc.map, &doc.config.network, &doc.selection, snap);
     hooks.lasso = app.lasso;
     hooks.revision = doc.revision;
-    // The view finds this frame's hover while it paints; the tool sees last frame's.
-    hooks.hovered = app.view.hovered_node;
     let clicked = app.view.show(
         ui,
         &doc.config.network,
@@ -635,6 +631,66 @@ mod tests {
             let mut out = ctx.run_ui(input, |ui| map_panel(app, ui));
             out.textures_delta.clear();
         }
+    }
+
+    #[test]
+    fn the_align_guide_follows_the_hover_of_the_same_frame() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        let doc = app.doc.as_mut().expect("doc");
+        let id = doc.config.network.order()[0];
+        let reference = doc
+            .config
+            .network
+            .add_node(30.0, 0.0, -20.0, NodeFlag::REGULAR);
+        doc.selection.insert(id);
+        let geometry = doc.map.geometry;
+        app.tool = Some(Box::new(AlignTool::new(Axis::Horizontal)));
+        let frame = |app: &mut App, pos: egui::Pos2| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                time: Some(ctx.input(|i| i.time) + 0.016),
+                events: vec![egui::Event::PointerMoved(pos)],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| map_panel(app, ui));
+            out.textures_delta.clear();
+            (out.shapes, app.view.hovered_node)
+        };
+        let off = egui::pos2(5.0, 5.0);
+        frame(&mut app, off);
+        let t = app.view.transform_mut().expect("shown");
+        t.zoom = 10.0;
+        let (mx, my) = geometry.to_map(30.0, -20.0);
+        let (sx, sy) = t.map_to_screen(mx, my);
+        let at = egui::pos2(sx as f32, sy as f32);
+        // Dashes of the guide: 3 px segments on the reference's screen row.
+        let guide = |shapes: &[egui::epaint::ClippedShape]| {
+            shapes
+                .iter()
+                .filter(|s| match &s.shape {
+                    egui::Shape::LineSegment { points, stroke } => {
+                        stroke.width == 3.0 && points.iter().all(|p| (p.y - at.y).abs() < 1e-3)
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+        // The pointer is off the reference, then comes to rest on it in a single frame.
+        let (shapes, hovered) = frame(&mut app, off);
+        assert_eq!((guide(&shapes), hovered), (0, None));
+        let (shapes, hovered) = frame(&mut app, at);
+        assert_eq!(hovered, Some(reference));
+        assert!(guide(&shapes) > 0, "drawn the frame the pointer arrives");
+        let (shapes, hovered) = frame(&mut app, off);
+        assert_eq!(
+            (guide(&shapes), hovered),
+            (0, None),
+            "gone the frame it leaves"
+        );
     }
 
     /// A right drag over the node, then a right click on empty map.

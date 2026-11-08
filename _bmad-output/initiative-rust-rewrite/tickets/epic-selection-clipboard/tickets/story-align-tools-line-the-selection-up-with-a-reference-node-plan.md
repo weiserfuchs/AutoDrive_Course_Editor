@@ -3,14 +3,14 @@ title: 'Align tools line the selection up with a reference node'
 type: 'feature'
 ticket: '7'
 created: '2026-11-08'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: '0a664c607a904d0cabcea5125a4a3b41c7ff2e2c'
 route: 'full'
 route_source: 'auto'
 risk: 'low'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -72,7 +72,7 @@ context: []
 
 ## Implementation Notes
 
-- The guide line needs the hovered node at paint time, which no hook carried. Without touching the view, `Tool::paint_selection` gained a `hovered: Option<NodeId>` parameter (rotate ignores it; `#[allow(clippy::too_many_arguments)]` as in `view.rs`), and `ToolHooks` hands it `app.view.hovered_node` from before `view.show`, so the guide follows the hover one frame late. Clicks still use the current frame's hover.
+- The guide line needs the hovered node at paint time, which no hook carried. `ViewHooks::paint` gained a `hovered_node` parameter (this frame's hover, which the view knows when it calls the hook), and `ToolHooks` forwards it to `Tool::paint_selection`, which gained a `hovered: Option<NodeId>` parameter (rotate ignores it; `#[allow(clippy::too_many_arguments)]` as in `view.rs`). A first version passed the previous frame's hover from before `view.show`; review found the guide could go stale once the pointer rests, since egui repaints only on input, so it now uses the same frame's hover (test `the_align_guide_follows_the_hover_of_the_same_frame`).
 - Depth draws no guide, as in Java. The guide is a white dashed 3 px line at half alpha across the painter's clip rect.
 - Verified: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (incl. `golden_edited` with the aligned group) and `frame_time` (all cases under 16 ms) pass. The GUI hand check (acceptance criterion on the fixture) is still for a human; `shift_x_aligns_the_selection_to_a_clicked_node_and_undo_restores_it` covers it headless.
 
