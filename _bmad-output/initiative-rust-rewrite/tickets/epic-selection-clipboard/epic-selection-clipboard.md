@@ -8,6 +8,7 @@ companions: []
 after: []
 refined: true
 risk: medium
+status: done
 ---
 
 # Users select, align, copy and paste

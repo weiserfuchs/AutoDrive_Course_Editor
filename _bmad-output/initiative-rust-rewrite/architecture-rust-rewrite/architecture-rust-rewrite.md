@@ -216,6 +216,9 @@ graph TD
   - Selection only while a tool allows multi-selection. Selection works whichever tool is active (epic-selection-clipboard, 2026-11-07).
   - Tools acting at once on a drawn rectangle (Java's delete tool deletes it). Tools act on the selection only on a click, so a rectangle never deletes by accident (epic-selection-clipboard, 2026-11-07).
   - A node landing at the end of a left-drag pan (Java adds a node on every left release). Only a click adds one (epic-node-connection-tools, 2026-11-07).
+  - Copy and align clearing the selection. Both keep it, as the other selection tools do (epic-selection-clipboard, 2026-11-08).
+  - Paste duplicating marker names. A name already used gets the first free `_2`, `_3`, … suffix (epic-selection-clipboard, 2026-11-08).
+  - Edit Location rounding untouched fields to three decimals. A field left as prefilled keeps the node's exact value, so OK without an edit changes nothing (epic-selection-clipboard, 2026-11-08).
 
 ### AD-14 — MapContext is the single owner of map-level data
 
