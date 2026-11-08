@@ -3,7 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use ad_core::heightmap::Heightmap;
+use image::RgbaImage;
 use image::imageops::FilterType;
+
+use crate::config_xml::GameVersion;
 
 const SIDE: u32 = 2048;
 const BLANK_PNG: &[u8] = include_bytes!("../assets/Blank.png");
@@ -107,6 +110,58 @@ pub fn load_map_image(path: &Path) -> (MapImage, Option<String>) {
         ),
         Err(e) => (blank(), Some(failed(path, &e))),
     }
+}
+
+/// `<exe dir>/mapImages/<name>/<name>.png`, where an imported image is saved.
+pub fn map_image_target(exe_dir: &Path, name: &str) -> PathBuf {
+    exe_dir
+        .join("mapImages")
+        .join(name)
+        .join(format!("{name}.png"))
+}
+
+/// The part of a decoded DDS that is the map (AD-11): FS19 the whole image, FS22 and FS25
+/// the centre half (`w/4, h/4` to `3w/4, 3h/4`, as Java).
+pub fn crop_for(version: GameVersion, image: RgbaImage) -> RgbaImage {
+    if version == GameVersion::FS19 {
+        return image;
+    }
+    let (w, h) = image.dimensions();
+    image::imageops::crop_imm(&image, w / 4, h / 4, (w / 2).max(1), (h / 2).max(1)).to_image()
+}
+
+/// Scales to 2048x2048 with Lanczos3; an image already that size is kept as is.
+pub fn to_2048(image: RgbaImage) -> MapImage {
+    let image = if image.dimensions() == (SIDE, SIDE) {
+        image
+    } else {
+        image::imageops::resize(&image, SIDE, SIDE, FilterType::Lanczos3)
+    };
+    MapImage {
+        rgba: image.into_raw(),
+    }
+}
+
+/// The image as PNG bytes.
+pub fn encode_png(image: &MapImage) -> Result<Vec<u8>, image::ImageError> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::write_buffer_with_format(
+        &mut out,
+        &image.rgba,
+        SIDE,
+        SIDE,
+        image::ExtendedColorType::Rgba8,
+        image::ImageFormat::Png,
+    )?;
+    Ok(out.into_inner())
+}
+
+/// Writes `png` to `target` atomically, creating its folders.
+pub fn save_map_image(target: &Path, png: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::atomic::write(target, png)
 }
 
 fn failed(path: &Path, error: &dyn std::fmt::Display) -> String {
@@ -300,6 +355,92 @@ mod tests {
         assert!(message.contains("palette.png"), "{message}");
         assert!(load_heightmap(&dir.join("missing.png")).is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Each pixel holds its own position: R, G the low bytes of x, y; B, A their high bytes.
+    fn positions(w: u32, h: u32) -> RgbaImage {
+        RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([x as u8, y as u8, (x >> 8) as u8, (y >> 8) as u8])
+        })
+    }
+
+    fn position(image: &RgbaImage, x: u32, y: u32) -> (u32, u32) {
+        let [r, g, b, a] = image.get_pixel(x, y).0;
+        (
+            u32::from(r) | u32::from(b) << 8,
+            u32::from(g) | u32::from(a) << 8,
+        )
+    }
+
+    #[test]
+    fn fs22_and_fs25_crop_the_centre_half() {
+        for version in [GameVersion::FS22, GameVersion::FS25] {
+            let crop = crop_for(version, positions(4096, 4096));
+            assert_eq!(crop.dimensions(), (2048, 2048));
+            assert_eq!(position(&crop, 0, 0), (1024, 1024));
+            assert_eq!(position(&crop, 2047, 2047), (3071, 3071));
+            // Already 2048x2048: kept as is.
+            assert_eq!(to_2048(crop.clone()).rgba, crop.into_raw());
+        }
+    }
+
+    #[test]
+    fn fs19_keeps_the_whole_image_and_scales_it() {
+        let image = RgbaImage::from_pixel(1024, 1024, image::Rgba([10, 20, 30, 255]));
+        let crop = crop_for(GameVersion::FS19, image.clone());
+        assert_eq!(crop, image);
+        let scaled = to_2048(crop);
+        assert_eq!(scaled.rgba.len(), (SIDE * SIDE * 4) as usize);
+        assert!(scaled.rgba.chunks(4).all(|p| p == [10, 20, 30, 255]));
+    }
+
+    #[test]
+    fn an_odd_size_crops_the_centre_half_and_scales_to_2048() {
+        let crop = crop_for(GameVersion::FS25, positions(3000, 2000));
+        assert_eq!(crop.dimensions(), (1500, 1000));
+        assert_eq!(position(&crop, 0, 0), (750, 500));
+        assert_eq!(position(&crop, 1499, 999), (2249, 1499));
+        assert_eq!(to_2048(crop).rgba.len(), (SIDE * SIDE * 4) as usize);
+        // A tiny image still crops to at least one pixel.
+        assert_eq!(
+            crop_for(GameVersion::FS22, positions(1, 1)).dimensions(),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn a_saved_image_is_found_and_loaded_at_the_next_load() {
+        let exe = temp("saved");
+        let target = map_image_target(&exe, "M");
+        assert_eq!(target, exe.join("mapImages").join("M").join("M.png"));
+        let image = to_2048(RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255])));
+        save_map_image(&target, &encode_png(&image).expect("png")).expect("saved");
+        assert_eq!(find_map_image("M", Some(&exe), None), Some(target.clone()));
+        assert_eq!(load_map_image(&target), (image, None));
+        // Saving again replaces it and leaves no temp file behind.
+        let other = to_2048(RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255])));
+        save_map_image(&target, &encode_png(&other).expect("png")).expect("saved");
+        assert_eq!(load_map_image(&target).0, other);
+        let files = std::fs::read_dir(target.parent().expect("dir")).expect("list");
+        assert_eq!(files.count(), 1);
+        let _ = std::fs::remove_dir_all(exe);
+    }
+
+    /// Needs the gitignored `pda_map_H.dds` in the repo root; skipped when it is absent.
+    #[test]
+    fn fs25_sample_decodes_crops_and_scales() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pda_map_H.dds");
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("skipped: {path} is absent");
+            return;
+        };
+        let decoded = crate::dds::decode(&bytes).expect("decodes");
+        let centre = *decoded.get_pixel(1024, 1024);
+        let crop = crop_for(GameVersion::FS25, decoded);
+        assert_eq!(crop.dimensions(), (SIDE, SIDE));
+        let image = to_2048(crop);
+        assert_eq!(image.rgba.len(), (SIDE * SIDE * 4) as usize);
+        assert_eq!(&image.rgba[..4], &centre.0);
     }
 
     #[test]

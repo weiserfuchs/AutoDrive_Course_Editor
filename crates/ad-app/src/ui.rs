@@ -9,6 +9,7 @@ use ad_core::geometry::MapGeometry;
 use ad_core::history::History;
 use ad_core::map_context::MapContext;
 use ad_core::network::{ConnectionShape, Network, NodeFlag, NodeId};
+use ad_io::config_xml::GameVersion;
 
 use crate::input::{self, Action};
 use crate::tools::align::{AlignTool, Axis};
@@ -27,7 +28,7 @@ use crate::tools::{Tool, ToolContext};
 use crate::view::{DragEvent, MapPx, Preview, SelectEvent, ViewHooks, ViewTransform};
 use crate::{App, Choice, Pending};
 
-/// The top bar: Open, Save, the Grid toggle and the status labels.
+/// The top bar: Open, Save, the Import menu, the Grid toggle and the status labels.
 pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     egui::Panel::top("top_bar").show(ui, |ui| {
         // Wraps onto further rows when the window is narrower than all the buttons, so no
@@ -52,6 +53,17 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             {
                 app.save(ctx);
             }
+            let can_import = !app.loading && !app.importing && app.doc.is_some();
+            ui.add_enabled_ui(can_import, |ui| {
+                ui.menu_button("Import", |ui| {
+                    if ui.button("DDS for FS19…").clicked() {
+                        app.import(GameVersion::FS19, ctx);
+                    }
+                    if ui.button("DDS for FS22/FS25…").clicked() {
+                        app.import(GameVersion::FS25, ctx);
+                    }
+                });
+            });
             ui.checkbox(&mut app.view.show_grid, "Grid");
             ui.separator();
             toolbar(app, ui);
@@ -61,6 +73,9 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             }
             if app.saving {
                 ui.label("Saving…");
+            }
+            if app.importing {
+                ui.label("Importing…");
             }
             if let Some(reason) = app.doc.as_ref().and_then(|d| d.config.read_only()) {
                 ui.colored_label(ui.visuals().warn_fg_color, reason.to_string());
@@ -641,6 +656,35 @@ pub(crate) fn groups_window(app: &mut App, ctx: &egui::Context) {
     }
     if close || closed {
         app.groups = None;
+    }
+}
+
+/// "Replace the existing map image?" after an import whose target exists. Yes saves the
+/// shown image over it; No or Escape keeps it shown without saving.
+pub(crate) fn replace_image_prompt(app: &mut App, ctx: &egui::Context) {
+    let Some((target, _)) = app.doc.as_ref().and_then(|d| d.image_to_replace.as_ref()) else {
+        return;
+    };
+    let target = target.display().to_string();
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::unique("replace_image")).show(ctx, |ui| {
+        ui.label("Replace the existing map image?");
+        ui.label(target);
+        ui.horizontal(|ui| {
+            if ui.button("Yes").clicked() {
+                answer = Some(true);
+            }
+            if ui.button("No").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    if let Some(replace) = answer {
+        let ctx = ctx.clone();
+        app.answer_replace(replace, move || ctx.request_repaint());
     }
 }
 
