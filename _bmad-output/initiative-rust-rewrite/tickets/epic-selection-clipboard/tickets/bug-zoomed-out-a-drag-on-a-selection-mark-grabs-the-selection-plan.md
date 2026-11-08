@@ -3,7 +3,7 @@ title: 'Zoomed out, a drag on a selection mark grabs the selection'
 type: 'bugfix'
 ticket: '11'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: 'f7633b3aa740b652ef4d2474f30a57f6daf66a29'
 route: 'oneshot'
 route_source: 'auto'
