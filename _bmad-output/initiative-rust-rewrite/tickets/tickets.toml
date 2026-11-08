@@ -67,7 +67,7 @@ after = [{ epic = 3, needs = "edit commands and the job runner" }]
 id = 11
 slug = "epic-route-manager"
 title = "Route-manager files load and save"
-description = "Route-manager XML (routeExport with markers and groups) loads into the same model and saves back in its own format."
+description = "Route-manager exports (routeExport) open into the same model with their group list and map, save back in the mod's format, and a routes.xml list opens them."
 covers = ["R13"]
 after = [{ epic = 1, needs = "Document, Network and config I/O patterns" }, { epic = 6, needs = "marker and group model" }]
 

@@ -1,0 +1,45 @@
+# Stories of epic-route-manager in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "A route-manager file opens with its markers, groups and map"
+description = "ad-io routes_xml reads a routeExport file per the mod's readGraphFromXml (waypoints with c, x/y/z, out/in, optional flags; markers m#i/n/g; groups g#n/i) into the same Network and markers; the group list is kept with the document (AD-17). Flags 2 and 4 reset to 0. Open… detects the root element (AutoDrive config or routeExport). The map name comes from routesManager/routes.xml (two folders up), matched by fileName (an _autosave_/_mergeBackup suffix stripped, as Java); without it the map name is unknown and a notice says so. Map image and heightmap are then found as for a config. All tools work on the route. The person's step: open a generated route file in a routesManager folder layout and see its map."
+verify = "Tests with route files built to the mod's format cover every element, missing flags, -1 links, markers and groups, the flag reset, malformed input as errors, the map name from routes.xml and the suffix rule; the user opens a generated route."
+covers = ["R1"]
+after = ["epic-markers-parking"]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "A route document saves back in the routeExport format"
+description = "Save (and Save As) of a route document writes routeExport as the mod's writeGraphToXml does: waypoints#c, x/y/z with 2 decimals, out/in comma lists or -1, flags, markers (i = 1-based file id of the marker's node, n, g), groups (each of the document's group list plus groups new markers introduced, n and i). The file is written atomically; vehicles.xml is never touched for a route. Autosave and the merge backup write route files for a route document. The person's step: edit a generated route, save, reopen."
+verify = "Tests show save → load equals the edited model (at 2 decimals), groups without markers kept, new groups added with fresh ids, autosave and merge backup in route format, no vehicles.xml write; the user edits, saves and reopens a route."
+covers = ["R2"]
+after = [1]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "A routes list opens an exported route"
+description = "File item \"Open routes.xml…\": pick a routes.xml; a window lists its routes (name, map, revision, date) sorted by name; opening one loads routesManager/routes/<fileName> with that route's map name. A missing route file shows an error and keeps the current document; unsaved changes ask first as for Open. The person's step: open a generated routes.xml and pick a route."
+verify = "Tests cover parsing routes.xml (including serverId), the list order, opening with the map name, a missing file, the unsaved prompt; the user opens a route from the list."
+covers = ["R3"]
+after = [2]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred; scope is set at its start and limited to cleanup."
+verify = "CI is green and the golden, round-trip and frame-time tests still pass."
+covers = []
+after = [1, 2, 3]
+hitl = false
+risk = "low"
