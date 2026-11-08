@@ -3,7 +3,7 @@ title: 'Vehicles parked at markers load, survive edits and save into vehicles.xm
 type: 'feature'
 ticket: '1'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '73c4e39'
 route: 'full'
 route_source: 'auto'
