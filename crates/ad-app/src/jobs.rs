@@ -15,6 +15,7 @@ use ad_io::config_xml::{self, GameVersion, LoadedConfig};
 use ad_io::dds;
 use ad_io::download::{self, DownloadError};
 use ad_io::map_image::{self, MapImage};
+use ad_io::routes_xml;
 use ad_io::settings::Settings;
 use ad_io::vehicles::{self, VehiclesFile};
 
@@ -261,6 +262,16 @@ pub enum Export {
 /// The notice line after a map image was loaded by hand; a save of that image drops it.
 pub const NOT_SAVED: &str = "Map image loaded, not saved — use Save map image to keep it";
 
+/// How the load's notice for a route without a map name starts; the reason follows.
+pub const NO_ROUTE_MAP_NAME: &str = "No map name for this route";
+
+/// The notice of Save on a route document (story 11.2 adds the route writer).
+pub const ROUTE_SAVE_LATER: &str = "Saving routes comes with story 11.2";
+
+/// The notice of a merge on a route document: its backup needs the route writer (11.2).
+pub const ROUTE_MERGE_NO_BACKUP: &str =
+    "Not merged: a merge needs a backup, and route backups come with story 11.2";
+
 /// How the load's notice for a missing heightmap starts; an attached heightmap drops it.
 pub const NO_HEIGHTMAP: &str = "No heightmap found";
 
@@ -446,7 +457,8 @@ pub fn spawn_image_save(
     });
 }
 
-/// Reads and parses the file, then finds and loads the map image and the heightmap. The error
+/// Reads and parses the file (a config, or a route when its root is `routeExport`, its map
+/// name from `routes.xml`), then finds and loads the map image and the heightmap. The error
 /// message names the file and the config problem; image and heightmap problems never fail the
 /// load (they become a notice).
 pub fn load_file(
@@ -455,9 +467,20 @@ pub fn load_file(
     settings: &Settings,
 ) -> Result<Loaded, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-    let mut config =
-        config_xml::load(&bytes).map_err(|e| format!("Cannot load {}: {e}", path.display()))?;
-    let (vehicles, vehicles_notice) = load_vehicles(path, &mut config);
+    let cannot_load = |e: &dyn std::fmt::Display| format!("Cannot load {}: {e}", path.display());
+    // A route has no vehicles.xml; its notice says why it has no map name.
+    let (config, vehicles, file_notice) = if routes_xml::is_route(&bytes) {
+        let route = routes_xml::load(&bytes).map_err(|e| cannot_load(&e))?;
+        let (map_name, notice) = match routes_xml::map_name_for(path) {
+            Ok(name) => (Some(name), None),
+            Err(why) => (None, Some(format!("{NO_ROUTE_MAP_NAME} ({why})"))),
+        };
+        (LoadedConfig::for_route(route, map_name), None, notice)
+    } else {
+        let mut config = config_xml::load(&bytes).map_err(|e| cannot_load(&e))?;
+        let (vehicles, notice) = load_vehicles(path, &mut config);
+        (config, vehicles, notice)
+    };
     let found = config
         .map_name()
         .and_then(|name| map_image::find_map_image(name, exe_dir, path.parent()));
@@ -467,7 +490,7 @@ pub fn load_file(
         None => (map_image::blank(), None),
     };
     let (heightmap, height_notice) = load_heightmap(&config, exe_dir, path.parent(), settings);
-    let notices: Vec<String> = [notice, height_notice, vehicles_notice]
+    let notices: Vec<String> = [notice, height_notice, file_notice]
         .into_iter()
         .flatten()
         .collect();
@@ -885,6 +908,121 @@ pub fn apply_result(
             Err(message) => Some(message),
         },
     }
+}
+
+/// `network` as a `routeExport` file the way the mod's `writeGraphToXml` writes it (2
+/// decimals, ids 1-based by order), with the groups of its markers (first use order, "All"
+/// first with id 1 when a marker uses it). Test only: story 11.2 adds the real writer.
+#[cfg(test)]
+pub(crate) fn test_route_text(network: &ad_core::network::Network) -> String {
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let index: std::collections::HashMap<NodeId, usize> = network
+        .order()
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (*id, i + 1))
+        .collect();
+    let nodes: Vec<_> = network
+        .order()
+        .iter()
+        .filter_map(|id| network.node(*id))
+        .collect();
+    let join = |f: &dyn Fn(&ad_core::network::Node) -> String| {
+        nodes.iter().map(|n| f(n)).collect::<Vec<_>>().join(";")
+    };
+    let links = |list: &[NodeId]| {
+        let ids: Vec<String> = list
+            .iter()
+            .filter_map(|t| index.get(t).map(usize::to_string))
+            .collect();
+        if ids.is_empty() {
+            "-1".to_owned()
+        } else {
+            ids.join(",")
+        }
+    };
+    let mut groups: Vec<&str> = Vec::new();
+    for m in network.markers() {
+        if !groups.contains(&m.group.as_str()) {
+            groups.push(&m.group);
+        }
+    }
+    if let Some(at) = groups.iter().position(|g| *g == "All") {
+        groups.remove(at);
+        groups.insert(0, "All");
+    }
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<routeExport>\n",
+    );
+    out.push_str(&format!("    <waypoints c=\"{}\">\n", nodes.len()));
+    out.push_str(&format!(
+        "        <x>{}</x>\n",
+        join(&|n| format!("{:.2}", n.x))
+    ));
+    out.push_str(&format!(
+        "        <y>{}</y>\n",
+        join(&|n| format!("{:.2}", n.y))
+    ));
+    out.push_str(&format!(
+        "        <z>{}</z>\n",
+        join(&|n| format!("{:.2}", n.z))
+    ));
+    out.push_str(&format!(
+        "        <out>{}</out>\n",
+        join(&|n| links(n.outgoing()))
+    ));
+    out.push_str(&format!(
+        "        <in>{}</in>\n",
+        join(&|n| links(n.incoming()))
+    ));
+    out.push_str(&format!(
+        "        <flags>{}</flags>\n",
+        join(&|n| n.flag.0.to_string())
+    ));
+    out.push_str("    </waypoints>\n    <markers>\n");
+    for m in network.markers() {
+        if let Some(i) = index.get(&m.node) {
+            out.push_str(&format!(
+                "        <m i=\"{i}\" n=\"{}\" g=\"{}\"/>\n",
+                esc(&m.name),
+                esc(&m.group)
+            ));
+        }
+    }
+    out.push_str("    </markers>\n    <groups>\n");
+    for (i, g) in groups.iter().enumerate() {
+        out.push_str(&format!("        <g n=\"{}\" i=\"{}\"/>\n", esc(g), i + 1));
+    }
+    out.push_str("    </groups>\n</routeExport>\n");
+    out
+}
+
+/// Writes `<dir>/routesManager/routes.xml`, listing `TestRoute0000001.xml` with `map`, and
+/// `<dir>/routesManager/routes/TestRoute0000001.xml` holding `network`; returns the route
+/// file. Test only.
+#[cfg(test)]
+pub(crate) fn test_route_manager(
+    dir: &Path,
+    network: &ad_core::network::Network,
+    map: &str,
+) -> std::io::Result<PathBuf> {
+    let manager = dir.join("routesManager");
+    std::fs::create_dir_all(manager.join("routes"))?;
+    let list = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n\
+         <autoDriveRoutesManager>\n    <routes>\n        <route name=\"Test route\" \
+         fileName=\"TestRoute0000001.xml\" map=\"{map}\" revision=\"1\" date=\"2026/11/08 12:00:00\">\n            \
+         <serverId></serverId>\n        </route>\n    </routes>\n</autoDriveRoutesManager>\n"
+    );
+    std::fs::write(manager.join("routes.xml"), list)?;
+    let file = manager.join("routes").join("TestRoute0000001.xml");
+    std::fs::write(&file, test_route_text(network))?;
+    Ok(file)
 }
 
 /// An 8x8 A8R8G8B8 DDS filled with `rgba`.
@@ -1844,5 +1982,168 @@ mod tests {
         assert_eq!(next_slot(&config, 3), 1);
         assert_eq!(next_slot(&config, 1), 1);
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    #![allow(clippy::expect_used)]
+
+    use std::collections::HashMap;
+
+    use ad_core::network::Network;
+
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ad_app_routes_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    fn fixture() -> LoadedConfig {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+        config_xml::load(&std::fs::read(path).expect("fixture")).expect("fixture loads")
+    }
+
+    fn two_nodes() -> Network {
+        let config = "<AutoDrive><version>3</version><waypoints><id>1,2</id><x>1,2</x>\
+            <y>0,0</y><z>3,4</z><out>2;-1</out><incoming>-1;1</incoming><flags>0,0</flags>\
+            </waypoints></AutoDrive>";
+        config_xml::load(config.as_bytes()).expect("loads").network
+    }
+
+    fn open(path: &Path) -> Document {
+        let (mut doc, mut counter) = (None, 0);
+        let result = JobResult::Loaded {
+            path: path.to_path_buf(),
+            result: load_file(path, None, &Settings::default()).map(Box::new),
+        };
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &Settings::default(), result),
+            None
+        );
+        doc.expect("doc")
+    }
+
+    #[test]
+    fn open_detects_a_config_or_a_route() {
+        let dir = temp_dir("detect");
+        let config = dir.join("AutoDrive_config.xml");
+        std::fs::write(
+            &config,
+            "<AutoDrive><version>3</version><waypoints><id>1</id><x>1</x><y>0</y><z>2</z>\
+             <out>-1</out><incoming>-1</incoming><flags>0</flags></waypoints></AutoDrive>",
+        )
+        .expect("write");
+        let doc = open(&config);
+        assert!(!doc.is_route());
+        assert_eq!(doc.config.network.len(), 1);
+        let route = test_route_manager(&dir, &two_nodes(), "M").expect("route");
+        let doc = open(&route);
+        assert!(doc.is_route() && doc.editable());
+        assert_eq!(doc.config.network.len(), 2);
+        assert_eq!(doc.config.route_groups(), Some(&[][..]));
+        // A broken route fails like a broken config, naming the file and the element.
+        std::fs::write(
+            &route,
+            "<routeExport><waypoints c=\"2\"><x>1</x></waypoints></routeExport>",
+        )
+        .expect("write");
+        let message = load_file(&route, None, &Settings::default()).expect_err("fails");
+        assert!(
+            message.contains("TestRoute0000001.xml") && message.contains("<x>"),
+            "{message}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_route_without_routes_xml_has_a_notice_a_blank_map_and_no_vehicles() {
+        let dir = temp_dir("no_list");
+        let route = dir.join("Lonely.xml");
+        std::fs::write(&route, test_route_text(&two_nodes())).expect("write");
+        // A vehicles.xml beside a route is not read.
+        std::fs::write(
+            dir.join("vehicles.xml"),
+            "<vehicles>\n    <vehicle id=\"1\" parkDestination=\"1\"/>\n</vehicles>\n",
+        )
+        .expect("write");
+        let (config, image, _, notice, vehicles, found) =
+            load_file(&route, None, &Settings::default()).expect("loads");
+        assert!(config.is_route());
+        assert_eq!(config.map_name(), None);
+        assert_eq!((image, found), (map_image::blank(), false));
+        assert!(vehicles.is_none());
+        let notice = notice.expect("notice");
+        assert!(
+            notice.contains("No map name for this route (routes.xml not found)"),
+            "{notice}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_fixture_as_a_route_opens_with_its_network_markers_and_map() {
+        let source = fixture();
+        let dir = temp_dir("fixture");
+        let route = test_route_manager(&dir, &source.network, "NF_Marsch_4fach").expect("route");
+        let doc = open(&route);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(doc.is_route() && doc.editable());
+        assert_eq!(doc.config.map_name(), Some("NF_Marsch_4fach"));
+        assert_eq!(doc.map.name.as_deref(), Some("NF_Marsch_4fach"));
+        let (a, b) = (&source.network, &doc.config.network);
+        assert_eq!(a.len(), b.len());
+        let index = |net: &Network| -> HashMap<NodeId, usize> {
+            net.order()
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (*id, i))
+                .collect()
+        };
+        let (ia, ib) = (index(a), index(b));
+        let links = |list: &[NodeId], index: &HashMap<NodeId, usize>| -> Vec<usize> {
+            list.iter().filter_map(|t| index.get(t).copied()).collect()
+        };
+        for (na, nb) in a.order().iter().zip(b.order()) {
+            let (na, nb) = (a.node(*na).expect("node"), b.node(*nb).expect("node"));
+            for (va, vb) in [(na.x, nb.x), (na.y, nb.y), (na.z, nb.z)] {
+                assert!((va - vb).abs() <= 0.005 + 1e-9, "{va} vs {vb}");
+            }
+            assert_eq!(na.flag, nb.flag);
+            assert_eq!(links(na.outgoing(), &ia), links(nb.outgoing(), &ib));
+            assert_eq!(links(na.incoming(), &ia), links(nb.incoming(), &ib));
+        }
+        let markers =
+            |net: &Network, index: &HashMap<NodeId, usize>| -> Vec<(usize, String, String)> {
+                net.markers()
+                    .iter()
+                    .map(|m| (index[&m.node], m.name.clone(), m.group.clone()))
+                    .collect()
+            };
+        assert_eq!(markers(a, &ia), markers(b, &ib));
+        assert!(!a.markers().is_empty());
+        let groups = doc.config.route_groups().expect("groups");
+        assert!(
+            groups
+                .iter()
+                .all(|(g, _)| a.markers().iter().any(|m| &m.group == g))
+        );
+        let ids: Vec<u32> = groups.iter().map(|(_, i)| *i).collect();
+        assert_eq!(ids, (1..=groups.len() as u32).collect::<Vec<_>>());
+    }
+
+    /// Writes the hand-test files `target/handtest/routesManager/routes.xml` and
+    /// `.../routes/TestRoute0000001.xml` from the fixture (never committed).
+    #[test]
+    #[ignore = "writes the hand-test files"]
+    fn write_handtest_route_manager() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/handtest");
+        let route = test_route_manager(&dir, &fixture().network, "NF_Marsch_4fach").expect("route");
+        let (config, ..) = load_file(&route, None, &Settings::default()).expect("loads");
+        assert_eq!(config.map_name(), Some("NF_Marsch_4fach"));
+        println!("wrote {}", route.display());
     }
 }

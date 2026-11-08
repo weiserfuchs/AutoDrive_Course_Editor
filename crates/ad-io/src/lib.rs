@@ -7,5 +7,6 @@ pub mod dds;
 pub mod download;
 pub mod map_image;
 pub mod mod_zip;
+pub mod routes_xml;
 pub mod settings;
 pub mod vehicles;
