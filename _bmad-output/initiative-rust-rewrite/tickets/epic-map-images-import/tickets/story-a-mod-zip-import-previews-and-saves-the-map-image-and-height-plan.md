@@ -3,7 +3,7 @@ title: 'A mod-zip import previews and saves the map image and heightmap'
 type: 'feature'
 ticket: '3'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '3641a05'
 route: 'full'
 route_source: 'auto'
