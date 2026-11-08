@@ -96,3 +96,4 @@ context: []
   - checked: a lost pointer ends only the handle drag (`on_drag_cancel`); the radius handle's clamp to the start follows Java's `clampNodeToLine` and still lets a continuous drag grow the radius.
   - accepted: no grid snap on placement and no shortcut, as Java; the read-only gate is the toolbar's, as for the other toolbar-only tools.
 - Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 299, golden_edited 6).
+- Hand check (user), pass 1: the arc's direction could not be seen in the preview; swap itself worked. Fixed: the Bézier and arc previews draw the network's arrowheads per segment in link order (dual: both ends), via the shared `bezier::paint_chain`; test `the_preview_chain_shows_its_direction_with_arrowheads`. Verified: fmt, clippy, workspace tests (ad-app 300) and frame time (curve min zoom 4.9 ms max).

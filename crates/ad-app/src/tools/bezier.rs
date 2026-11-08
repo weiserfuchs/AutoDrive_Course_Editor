@@ -239,6 +239,38 @@ pub(crate) fn kind(shape: ConnectionShape) -> ConnectionKind {
     }
 }
 
+/// Draws a previewed chain of screen points in link order: each segment with the network's
+/// arrowhead at its far end, and a dual one at both ends, so the direction shows.
+pub(crate) fn paint_chain(
+    painter: &egui::Painter,
+    chain: &[egui::Pos2],
+    stroke: egui::Stroke,
+    shape: ConnectionShape,
+    map: &MapContext,
+    zoom: f64,
+) {
+    let ns = look::node_px(map.node_size, zoom);
+    let dual = shape == ConnectionShape::Dual;
+    let head = |from: egui::Pos2, to: egui::Pos2| {
+        let pt = |p: egui::Pos2| (f64::from(p.x), f64::from(p.y));
+        if let Some(tri) = look::arrow(pt(from), pt(to), ns, map.node_size, zoom, dual) {
+            let tri = tri.map(|(x, y)| egui::pos2(x as f32, y as f32));
+            painter.add(egui::Shape::convex_polygon(
+                tri.to_vec(),
+                stroke.color,
+                egui::Stroke::NONE,
+            ));
+        }
+    };
+    for pair in chain.windows(2) {
+        painter.line_segment([pair[0], pair[1]], stroke);
+        head(pair[0], pair[1]);
+        if dual {
+            head(pair[1], pair[0]);
+        }
+    }
+}
+
 impl Tool for BezierTool {
     fn name(&self) -> &'static str {
         NAME
@@ -346,14 +378,15 @@ impl Tool for BezierTool {
         let stroke = egui::Stroke::new(STROKE_PX, colour);
         let dot = look::node_colour(flag);
         let points = curve.points_between((s.x, s.z), (e.x, e.z));
-        let mut prev = screen((s.x, s.z));
-        for &(x, z, _) in &points {
-            let p = screen((x, z));
-            painter.line_segment([prev, p], stroke);
+        let chain: Vec<egui::Pos2> = std::iter::once((s.x, s.z))
+            .chain(points.iter().map(|&(x, z, _)| (x, z)))
+            .chain(std::iter::once((e.x, e.z)))
+            .map(screen)
+            .collect();
+        paint_chain(painter, &chain, stroke, curve.settings.shape, map, t.zoom);
+        for &p in &chain[1..chain.len() - 1] {
             painter.circle_filled(p, POINT_RADIUS_PX, dot);
-            prev = p;
         }
-        painter.line_segment([prev, screen((e.x, e.z))], stroke);
         let half_node = look::node_px(map.node_size, t.zoom) as f32 / 2.0;
         for &h in curve.handles() {
             painter.circle_filled(
@@ -733,6 +766,41 @@ mod tests {
         map.height_map_scale = 2.0;
         let (nodes, _) = committed(&plan(&net, &map, curve).expect("tx"));
         assert!(nodes.iter().all(|n| n.1 == 5.0));
+    }
+
+    #[test]
+    fn the_preview_chain_shows_its_direction_with_arrowheads() {
+        // Arrowheads drawn for a three-segment chain of `shape` at zoom 4, each pointing at
+        // the segment's far end (dual: both ends).
+        let tips = |shape: ConnectionShape| {
+            let ctx = egui::Context::default();
+            let map = MapContext::new(None, 1, 2.0, (2.0, 2.0));
+            let chain = [
+                egui::pos2(0.0, 0.0),
+                egui::pos2(100.0, 0.0),
+                egui::pos2(200.0, 0.0),
+                egui::pos2(300.0, 0.0),
+            ];
+            let mut tips = Vec::new();
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
+                paint_chain(ui.painter(), &chain, stroke, shape, &map, 4.0);
+            });
+            out.textures_delta.clear();
+            for clipped in &out.shapes {
+                if let egui::Shape::Path(path) = &clipped.shape {
+                    tips.push(path.points[0].x.round());
+                }
+            }
+            tips
+        };
+        // The tip sits half a node (5 px wide at zoom 4) before the end it points at.
+        assert_eq!(tips(ConnectionShape::OneWay), [98.0, 198.0, 298.0]);
+        assert_eq!(tips(ConnectionShape::Reverse), [98.0, 198.0, 298.0]);
+        assert_eq!(
+            tips(ConnectionShape::Dual),
+            [98.0, 3.0, 198.0, 103.0, 298.0, 203.0]
+        );
     }
 
     #[test]

@@ -314,10 +314,12 @@ impl Tool for ArcTool {
         let colour = look::connection_colour(bezier::kind(arc.settings.shape), flag, flag);
         let stroke = egui::Stroke::new(STROKE_PX, colour);
         let dot = look::node_colour(flag);
-        let points: Vec<egui::Pos2> = arc.points().into_iter().map(screen).collect();
-        for pair in points.windows(2) {
-            painter.line_segment([pair[0], pair[1]], stroke);
+        let mut points: Vec<egui::Pos2> = arc.points().into_iter().map(screen).collect();
+        // In link order, so the arrowheads show the direction "Swap direction" sets.
+        if arc.reversed {
+            points.reverse();
         }
+        bezier::paint_chain(painter, &points, stroke, arc.settings.shape, map, t.zoom);
         for &p in &points {
             painter.circle_filled(p, POINT_RADIUS_PX, dot);
         }
