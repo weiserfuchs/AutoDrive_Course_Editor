@@ -63,3 +63,4 @@ A course author lays out long roads and smooth bends on the FS25 fixture without
 - Decision (2026-11-08): one curve at a time; switching tools or files discards it (AD-10), unlike Java.
 - Decision (2026-11-08): commits extend `PasteNodes` (story 4.9) so a link end may be an existing node, instead of adding a near-duplicate command.
 - Decision (2026-11-08): build order 1 → 2 → 3 → 4 → 5 → 6 → 7, one lane: the stories share the tools, the command and golden_edited.rs.
+- Decision (2026-11-08): story 4 (control-point drag) is folded into story 3, because the curve preview stays straight until a control point is dragged; story 4 is dropped.

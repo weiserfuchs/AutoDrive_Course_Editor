@@ -3,7 +3,7 @@ title: 'A Bézier curve previews between two nodes and commits from a curve pane
 type: 'feature'
 ticket: '3'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '06a89ad'
 route: 'full'
 route_source: 'auto'
