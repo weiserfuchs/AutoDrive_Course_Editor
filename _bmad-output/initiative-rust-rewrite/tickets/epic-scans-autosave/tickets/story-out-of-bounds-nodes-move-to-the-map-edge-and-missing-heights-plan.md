@@ -3,7 +3,7 @@ title: 'Out-of-bounds nodes move to the map edge and missing heights are filled'
 type: 'feature'
 ticket: '3'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '313eace'
 route: 'full'
 route_source: 'auto'
@@ -88,3 +88,4 @@ context: []
 - Quick review (orchestrator), pass 1: no patch.
   - finding about the plan, not the code: the matrix row "None outside / the fixture" is wrong. At the fixture's scale 2 two nodes lie far west of the map (file ids 35400 and 35401, x ≈ -9620); the test fixes them first and then checks the none-outside notice. The frozen row stays as written (human-owned).
 - Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 405).
+- Hand check (user): the three fixed nodes (one on the east edge, two on the west) could not be dragged together in x. Expected: story 4.2 clamps the shared offset so no selected node leaves the map, and this selection spans the whole map width. User decision: keep the rule.
