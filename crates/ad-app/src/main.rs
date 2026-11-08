@@ -460,17 +460,18 @@ impl App {
         }
     }
 
-    /// Ends the previewed curve: Commit applies it in one transaction (not on a read-only
-    /// document), Cancel drops it. Either way the tool then waits for a new start.
+    /// Ends the previewed curve or arc: Commit applies it in one transaction (not on a
+    /// read-only document), Cancel drops it. Either way the tool then waits for a new one.
     fn finish_curve(&mut self, choice: ui::CurveChoice) {
         let editable = self.editable();
         let Some(tool) = &mut self.tool else {
             return;
         };
-        let tx = match (choice, &self.doc, tool.curve_mut()) {
-            (ui::CurveChoice::Commit, Some(doc), Some(curve)) if editable => {
-                tools::bezier::plan(&doc.config.network, &doc.map, curve)
-            }
+        let tx = match (choice, &self.doc) {
+            (ui::CurveChoice::Commit, Some(doc)) if editable => match tool.curve_mut() {
+                Some(curve) => tools::bezier::plan(&doc.config.network, &doc.map, curve),
+                None => tool.arc_mut().map(|arc| tools::arc::plan(&doc.map, arc)),
+            },
             _ => None,
         };
         tool.cancel();
@@ -933,8 +934,8 @@ mod tests {
             .and_then(|t| t.curve_mut())
             .expect("curve");
         assert_eq!(curve.control_points(), [(21.0, 32.0)]);
-        curve.points = 3;
-        curve.shape = ConnectionShape::Dual;
+        curve.settings.points = 3;
+        curve.settings.shape = ConnectionShape::Dual;
         app.finish_curve(ui::CurveChoice::Commit);
         assert!(app.error.is_none());
         assert!(app.tool.as_mut().and_then(|t| t.curve_mut()).is_none());
@@ -1013,6 +1014,135 @@ mod tests {
         app.view.hovered_node = Some(b);
         app.click(0.0, 0.0, false);
         assert!(app.tool.as_mut().and_then(|t| t.curve_mut()).is_none());
+    }
+
+    /// The arc tool active and seen at zoom 4 (0.25 world units per px), and an arc placed
+    /// by a click at world (100, 50).
+    fn arc_placed(app: &mut App) {
+        let geometry = app.doc.as_ref().expect("doc").map.geometry;
+        let tool = tools::arc::ArcTool::default();
+        let mut t = crate::view::ViewTransform::new((512.0, 512.0), (1024.0, 1024.0));
+        t.zoom = 4.0;
+        tool.see(&t, geometry);
+        app.set_tool(Some(Box::new(tool)));
+        let (px, py) = geometry.to_map(100.0, 50.0);
+        app.click(px, py, false);
+        assert!(app.tool.as_mut().and_then(|t| t.arc_mut()).is_some());
+    }
+
+    #[test]
+    fn an_arc_is_placed_shaped_by_its_handles_committed_and_undone_in_one_step() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        let len = nodes(&app);
+        arc_placed(&mut app);
+        let before = snapshot(&app);
+        let geometry = app.doc.as_ref().expect("doc").map.geometry;
+        // Centre (100, 50) to (110, 55); the start handle, now at (102, 55), to angle 0
+        // (straight up at -z); the radius handle, now at (110, 51), to 6 from the centre.
+        for (from, to) in [
+            ((100.0, 50.0), (110.0, 55.0)),
+            ((102.0, 55.0), (110.0, 40.0)),
+            ((110.0, 51.0), (110.0, 49.0)),
+        ] {
+            let start = DragEvent::Start {
+                at: geometry.to_map(from.0, from.1),
+                node: None,
+            };
+            let end = DragEvent::End {
+                at: geometry.to_map(to.0, to.1),
+            };
+            drag(&mut app, start, false);
+            drag(&mut app, end, false);
+        }
+        assert_eq!(snapshot(&app), before, "a handle drag changes no data");
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        let arc = app.tool.as_mut().and_then(|t| t.arc_mut()).expect("arc");
+        assert_eq!((arc.centre, arc.start_deg), ((110.0, 55.0), 0.0));
+        assert!((arc.radius - 12.0).abs() < 1e-9);
+        arc.settings.points = 3;
+        arc.swap();
+        app.finish_curve(ui::CurveChoice::Commit);
+        assert!(app.error.is_none());
+        assert!(app.tool.as_mut().and_then(|t| t.arc_mut()).is_none());
+        assert_eq!(active(&app), Some(tools::arc::NAME), "waits for a new arc");
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        assert_eq!(net.len(), len + 5);
+        let new = &net.order()[len..];
+        // A quarter circle from (110, 43) round to (122, 55), no heightmap: y -1.
+        let at = |i: usize| net.node(new[i]).map(|n| (n.x, n.y, n.z)).expect("node");
+        let (x0, y0, z0) = at(0);
+        let (x4, _, z4) = at(4);
+        assert!((x0 - 110.0).abs() < 1e-9 && (z0 - 43.0).abs() < 1e-9);
+        assert!((x4 - 122.0).abs() < 1e-9 && (z4 - 55.0).abs() < 1e-9);
+        assert_eq!(y0, -1.0);
+        // Swapped: one-way links from the last node back to the first, nothing else.
+        for pair in new.windows(2) {
+            assert_eq!(
+                net.connection_kind(pair[1], pair[0]),
+                ConnectionKind::Regular
+            );
+        }
+        let links: usize = new
+            .iter()
+            .map(|id| net.node(*id).expect("node").outgoing().len())
+            .sum();
+        assert_eq!(links, 4);
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert!(
+            !app.doc.as_ref().expect("doc").history.can_undo(),
+            "one step"
+        );
+    }
+
+    #[test]
+    fn the_arc_is_dropped_by_cancel_a_tool_switch_and_a_new_file() {
+        let arc = |app: &mut App| app.tool.as_mut().and_then(|t| t.arc_mut()).is_some();
+        let switches: [fn(&mut App); 4] = [
+            |app| app.finish_curve(ui::CurveChoice::Cancel),
+            |app| app.run(Action::MoveTool),
+            |app| app.run(Action::BezierTool),
+            |app| load(app, "<version>3</version>"),
+        ];
+        for switch in switches {
+            let mut app = App::new(Settings::default());
+            load(&mut app, "<version>3</version>");
+            arc_placed(&mut app);
+            let before = snapshot(&app);
+            switch(&mut app);
+            assert!(!arc(&mut app));
+            assert_eq!(snapshot(&app), before);
+            assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        }
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_arc_tool() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        assert!(!app.editable(), "the toolbar button is disabled");
+        // Even a tool left active places nothing, and an arc it holds does not commit.
+        app.tool = Some(Box::new(tools::arc::ArcTool::default()));
+        app.click(1024.0, 1024.0, false);
+        assert!(app.tool.as_mut().and_then(|t| t.arc_mut()).is_none());
+        let mut tool = tools::arc::ArcTool::default();
+        let doc = app.doc.as_ref().expect("doc");
+        let ctx = tools::ToolContext {
+            x: 0.0,
+            z: 0.0,
+            map: &doc.map,
+            net: &doc.config.network,
+            selection: &doc.selection,
+            snap: false,
+            hovered_node: None,
+            hovered_edge: None,
+        };
+        assert!(tool.on_click(&ctx).is_none());
+        app.tool = Some(Box::new(tool));
+        app.finish_curve(ui::CurveChoice::Commit);
+        assert_eq!(nodes(&app), 1);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
     }
 
     #[test]

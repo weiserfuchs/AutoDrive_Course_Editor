@@ -3295,7 +3295,7 @@ mod tests {
                         .is_none()
                 );
                 let curve = tool_ref.curve_mut().expect("a curve");
-                curve.points = crate::tools::bezier::MAX_POINTS;
+                curve.settings.points = crate::tools::bezier::MAX_POINTS;
                 curve.controls = crate::tools::bezier::MAX_CONTROLS;
                 for i in 0..crate::tools::bezier::MAX_CONTROLS {
                     curve.move_handle(i, ((i as f64 - 1.5) * 20.0, 10.0));

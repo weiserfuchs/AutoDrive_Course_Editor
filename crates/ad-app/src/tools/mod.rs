@@ -2,6 +2,7 @@
 //! draw their preview on top of the map view. Exactly one tool is active at a time.
 
 pub mod align;
+pub mod arc;
 pub mod bezier;
 pub mod connect;
 pub mod delete;
@@ -73,6 +74,11 @@ pub trait Tool {
 
     /// The previewed curve the curve panel edits; only the Bézier tool has one.
     fn curve_mut(&mut self) -> Option<&mut bezier::Curve> {
+        None
+    }
+
+    /// The previewed arc the curve panel edits; only the arc tool has one.
+    fn arc_mut(&mut self) -> Option<&mut arc::Arc> {
         None
     }
 

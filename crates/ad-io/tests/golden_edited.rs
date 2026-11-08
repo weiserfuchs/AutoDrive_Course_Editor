@@ -817,3 +817,83 @@ fn committed_curve_saves_and_reloads() -> Result<(), Error> {
     assert!(model(&cfg.network) == before);
     Ok(())
 }
+
+#[test]
+fn committed_arc_saves_and_reloads() -> Result<(), Error> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    let mut cfg = load(&original)?;
+    let len = cfg.network.len();
+    // What the arc tool commits for its default half circle (radius 8, -90° to 90°, 6
+    // interpolation points) round (100, 50), swapped, without a heightmap: 8 standalone
+    // nodes at y -1, linked one-way from the last back to the first. Positions are kept
+    // to the 3 decimals the file holds, so the reloaded model compares equal.
+    let round = |v: f64| (v * 1000.0).round() / 1000.0;
+    let nodes: Vec<_> = (0..8)
+        .map(|i| {
+            let a = (270.0 + 180.0 * f64::from(i) / 7.0 - 90.0_f64).to_radians();
+            let (x, z) = (100.0 + 8.0 * a.cos(), 50.0 + 8.0 * a.sin());
+            (round(x), -1.0, round(z), NodeFlag::REGULAR)
+        })
+        .collect();
+    let links = (1..8)
+        .rev()
+        .map(|i| {
+            (
+                LinkEnd::New(i),
+                LinkEnd::New(i - 1),
+                ConnectionShape::OneWay,
+            )
+        })
+        .collect();
+    let arc = PasteNodes::new(nodes, Vec::new(), links);
+    let before = model(&cfg.network);
+    let mut history = History::default();
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::PasteNodes(arc)]),
+    )?;
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_arc_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    let reloaded = load(&written)?;
+    assert!(model(&cfg.network) == model(&reloaded.network));
+    assert!(untouched(&original)? == untouched(&written)?);
+    let net = &reloaded.network;
+    assert_eq!(net.len(), len + 8);
+    let arc = &net.order()[len..];
+    for pair in arc.windows(2) {
+        assert_eq!(
+            net.connection_kind(pair[1], pair[0]),
+            ConnectionKind::Regular
+        );
+    }
+    // Standalone: the arc's nodes link only to each other.
+    for id in arc {
+        let n = net.node(*id).ok_or("arc node")?;
+        assert_eq!(n.y, -1.0);
+        assert!(
+            n.outgoing()
+                .iter()
+                .chain(n.incoming())
+                .all(|t| arc.contains(t))
+        );
+    }
+    let (first, last) = (
+        net.node(arc[0]).ok_or("first")?,
+        net.node(arc[7]).ok_or("last")?,
+    );
+    assert_eq!(
+        (first.x, first.z, last.x, last.z),
+        (92.0, 50.0, 108.0, 50.0)
+    );
+    // One undo removes the whole arc.
+    history.undo(&mut cfg.network);
+    assert!(model(&cfg.network) == before);
+    Ok(())
+}
