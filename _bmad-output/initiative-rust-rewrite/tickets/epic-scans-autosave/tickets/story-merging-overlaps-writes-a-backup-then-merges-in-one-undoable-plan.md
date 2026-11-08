@@ -3,14 +3,14 @@ title: 'Merging overlaps writes a backup, then merges in one undoable step'
 type: 'feature'
 ticket: '2'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '3a64ade'
 route: 'full'
 route_source: 'auto'
 risk: 'high'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -89,3 +89,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - checked: the plan reads reverse links from every node's outgoing list (a reverse link into a removed node is listed only at its source); a pasted copy merges into the original (kept first in network order) with no new links; the golden test returns the original model and undo the pasted one.
+  - accepted: any revision bump while the backup is written (an edit or a selection gesture) cancels the merge with a notice; the backup takes well under a second.
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 401).
