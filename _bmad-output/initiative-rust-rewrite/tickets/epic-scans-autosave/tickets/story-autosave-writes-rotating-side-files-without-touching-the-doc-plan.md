@@ -3,7 +3,7 @@ title: 'Autosave writes rotating side files without touching the document'
 type: 'feature'
 ticket: '5'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: 'e8806c5'
 route: 'full'
 route_source: 'auto'
