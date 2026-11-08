@@ -60,9 +60,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] ad-io heightmap encoding -- round-trip test (the FS25 `dem.png` when present, and a generated one)
-- [ ] app -- tests for every matrix row
-- [ ] PNG bytes kept for every way an image is shown
+- [x] ad-io heightmap encoding -- round-trip test (the FS25 `dem.png` when present, and a generated one)
+- [x] app -- tests for every matrix row
+- [x] PNG bytes kept for every way an image is shown
 
 **Acceptance Criteria:**
 - Given the fixture open, when the user loads a PNG as map image, saves it, imports `dem.png` as heightmap and exports it, then each step shows its result, and the saved files load back to the same image and heights.
@@ -76,6 +76,16 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **PNG bytes live in `MapImage`.** `MapImage` gained `png: Arc<[u8]>`, so no path can show an image without bytes to save it. `decode` keeps the source bytes when the PNG is already 2048² (they decode to the shown image) and encodes once only when it scaled; `to_2048` (DDS, zip) encodes once and returns `Result`; Blank keeps the embedded `Blank.png`. `encode_png` became the private `encode_rgba`; DDS import and zip save use `image.png` instead of encoding again. `ImageSave` holds `Arc<[u8]>`, so the replace prompt clones no bytes.
+- **Document keeps only the PNG after upload.** `Document::map_png` is set by `Document::new` and `Document::show(image)`, which every result that shows an image now calls (DDS, download, zip attach, manual load). The upload still takes `map_image`, so the RGBA copy is dropped as before (AD-8); `map_png` holds 0.1–a few MB.
+- **Four Import-menu items** (after a separator): Load map image…, Save map image…, Import heightmap…, Export heightmap…. All need a document, read-only too; Export is enabled by `ui::can_export_heightmap` (a heightmap is present). They sit inside the existing `can_import` gate (not while loading, importing or downloading for the document).
+- **Jobs:** `spawn_image_load` → `JobResult::ImageLoaded { epoch }`, `spawn_heightmap_load` → `HeightmapLoaded { epoch }` (both set `importing`), `spawn_export(Export::MapImage | Export::Heightmap)` → `Exported` (sets a new `exporting` flag, label "Saving image…"). Results for another epoch are dropped (AD-18). Writes go through `save_map_image` (atomic, folders created). The heightmap is encoded in the job by the new `map_image::encode_heightmap` (16-bit grey, `Heightmap::raw()` added in ad-core).
+- **Heightmap attach reused:** `zip_import::attach` was split; `attach_heightmap` (calibrate as a load does, drop the `NO_HEIGHTMAP` line) serves both the zip and the manual import. The notice line filter moved to `Document::drop_notice_lines`, with `Document::add_notice` for the download's append. Calibration runs on the UI thread, as the zip attach already did (O(nodes)).
+- **Notices:** a manual load drops earlier lines starting with "Map image " (the previous image's scaling, failed load, or not-saved line), then adds the scaling notice if any and `NOT_SAVED`. A successful save of the PNG that is still shown (`Arc::ptr_eq` with `map_png`) drops `NOT_SAVED`; the scaling line stays because it still describes the shown image.
+- **Dialogs:** save dialogs are prefilled with `jobs::export_target` (Java names, `mapImages/unknown.png` / `unknown_HeightMap.png` without a map name) and start in the nearest existing folder of that target under the exe dir, so no folder is created before the user saves. Without an exe dir only the file name is prefilled. `.png` is appended when the chosen name lacks it. The OS dialog asks before it overwrites. The open dialogs filter `*.png` (any name, not only `terrain.heightmap.png`).
+- **Tests:** ad-io `every_image_carries_png_bytes_that_decode_to_it`, `an_encoded_heightmap_reads_back_to_the_same_heights`, `the_fs25_dem_round_trips` (skips without `dem.png`). ad-app `manual_image_tests`: `a_2048_png_is_shown_not_saved`, `another_size_is_scaled_with_the_notice`, `a_bad_file_shows_an_error_and_keeps_the_image`, `save_writes_the_shown_image_and_drops_the_not_saved_line`, `save_without_an_image_writes_the_blank_one`, `a_failed_save_shows_the_reason`, `an_imported_heightmap_is_set_with_its_scale_and_drops_the_notice`, `a_refused_heightmap_shows_an_error_and_keeps_the_old_one`, `export_writes_a_16_bit_png_that_reloads_to_the_same_heights` (also the disabled item), `results_for_a_replaced_document_are_ignored`, `export_targets_and_the_png_extension`, `every_way_an_image_is_shown_keeps_png_bytes_of_it` (Blank load, scaled local load, DDS, zip attach, download), and the acceptance run `the_fixture_takes_a_loaded_image_and_the_fs25_dem_and_saves_both` (skips without `dem.png`).
+- **Verification (2026-11-08):** `cargo fmt --all --check` exit 0; `cargo clippy --workspace --all-targets -- -D warnings` exit 0; `cargo test --workspace` all pass (ad-app 384 passed, 3 ignored; ad-core 71; ad-io 76 + integration tests). `frame_time` (release): every case ok, best-round maxima ≤ 9.9 ms (worst single-round max 13.4 ms, drag at min zoom with the whole network selected). The dialogs themselves need a hand check in the GUI.
 
 ## Plan Change Log
 

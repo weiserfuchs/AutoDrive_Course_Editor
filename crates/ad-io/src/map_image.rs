@@ -1,6 +1,7 @@
 //! Map image lookup, decoding and scaling (AD-14). Runs on the load job, never on the UI thread.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ad_core::heightmap::Heightmap;
 use image::RgbaImage;
@@ -11,10 +12,20 @@ use crate::config_xml::GameVersion;
 const SIDE: u32 = 2048;
 const BLANK_PNG: &[u8] = include_bytes!("../assets/Blank.png");
 
-/// A map image as RGBA8, always 2048x2048.
+/// A map image as RGBA8, always 2048x2048, with PNG bytes that decode to it. The RGBA is
+/// dropped after the texture upload; the PNG is kept to save the shown image (AD-8).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapImage {
     pub rgba: Vec<u8>,
+    pub png: Arc<[u8]>,
+}
+
+impl MapImage {
+    /// Encodes `rgba` (2048x2048) once for its PNG bytes.
+    fn encoded(rgba: Vec<u8>) -> Result<Self, image::ImageError> {
+        let png = encode_rgba(&rgba)?.into();
+        Ok(Self { rgba, png })
+    }
 }
 
 /// `<exe dir>/mapImages/<name>/<name>.png`, else the same beside the config. First existing wins.
@@ -91,9 +102,11 @@ pub fn blank() -> MapImage {
     match decode(BLANK_PNG) {
         Ok((image, _)) => image,
         // Unreachable for the shipped asset; a grey square keeps the view usable.
-        Err(_) => MapImage {
-            rgba: vec![128; (SIDE * SIDE * 4) as usize],
-        },
+        Err(_) => {
+            let rgba = vec![128; (SIDE * SIDE * 4) as usize];
+            let png = encode_rgba(&rgba).unwrap_or_default().into();
+            MapImage { rgba, png }
+        }
     }
 }
 
@@ -195,27 +208,46 @@ pub fn heightmap_preview(heightmap: &Heightmap) -> RgbaImage {
     })
 }
 
-/// Scales to 2048x2048 with Lanczos3; an image already that size is kept as is.
-pub fn to_2048(image: RgbaImage) -> MapImage {
+/// Scales to 2048x2048 with Lanczos3 (an image already that size is kept as is) and encodes
+/// the result as PNG.
+pub fn to_2048(image: RgbaImage) -> Result<MapImage, image::ImageError> {
     let image = if image.dimensions() == (SIDE, SIDE) {
         image
     } else {
         image::imageops::resize(&image, SIDE, SIDE, FilterType::Lanczos3)
     };
-    MapImage {
-        rgba: image.into_raw(),
-    }
+    MapImage::encoded(image.into_raw())
 }
 
-/// The image as PNG bytes.
-pub fn encode_png(image: &MapImage) -> Result<Vec<u8>, image::ImageError> {
+/// 2048x2048 RGBA8 as PNG bytes.
+fn encode_rgba(rgba: &[u8]) -> Result<Vec<u8>, image::ImageError> {
     let mut out = std::io::Cursor::new(Vec::new());
     image::write_buffer_with_format(
         &mut out,
-        &image.rgba,
+        rgba,
         SIDE,
         SIDE,
         image::ExtendedColorType::Rgba8,
+        image::ImageFormat::Png,
+    )?;
+    Ok(out.into_inner())
+}
+
+/// The heightmap as a 16-bit grey PNG, which `decode_heightmap` reads back to the same samples.
+pub fn encode_heightmap(heightmap: &Heightmap) -> Result<Vec<u8>, image::ImageError> {
+    // The encoder takes 16-bit samples in native byte order.
+    let bytes: Vec<u8> = heightmap
+        .raw()
+        .iter()
+        .flat_map(|v| v.to_ne_bytes())
+        .collect();
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::write_buffer_with_format(
+        &mut out,
+        &bytes,
+        heightmap.width(),
+        heightmap.height(),
+        image::ExtendedColorType::L16,
         image::ImageFormat::Png,
     )?;
     Ok(out.into_inner())
@@ -241,20 +273,17 @@ fn decode(bytes: &[u8]) -> Result<(MapImage, Option<(u32, u32)>), image::ImageEr
     let rgba = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)?.into_rgba8();
     let (w, h) = rgba.dimensions();
     if (w, h) == (SIDE, SIDE) {
+        // The bytes decode to this image, so they are kept instead of encoding again.
         return Ok((
             MapImage {
                 rgba: rgba.into_raw(),
+                png: bytes.into(),
             },
             None,
         ));
     }
     let scaled = image::imageops::resize(&rgba, SIDE, SIDE, FilterType::Triangle);
-    Ok((
-        MapImage {
-            rgba: scaled.into_raw(),
-        },
-        Some((w, h)),
-    ))
+    Ok((MapImage::encoded(scaled.into_raw())?, Some((w, h))))
 }
 
 #[cfg(test)]
@@ -445,7 +474,7 @@ mod tests {
             assert_eq!(position(&crop, 0, 0), (1024, 1024));
             assert_eq!(position(&crop, 2047, 2047), (3071, 3071));
             // Already 2048x2048: kept as is.
-            assert_eq!(to_2048(crop.clone()).rgba, crop.into_raw());
+            assert_eq!(to_2048(crop.clone()).expect("png").rgba, crop.into_raw());
         }
     }
 
@@ -454,7 +483,7 @@ mod tests {
         let image = RgbaImage::from_pixel(1024, 1024, image::Rgba([10, 20, 30, 255]));
         let crop = crop_for(GameVersion::FS19, image.clone());
         assert_eq!(crop, image);
-        let scaled = to_2048(crop);
+        let scaled = to_2048(crop).expect("png");
         assert_eq!(scaled.rgba.len(), (SIDE * SIDE * 4) as usize);
         assert!(scaled.rgba.chunks(4).all(|p| p == [10, 20, 30, 255]));
     }
@@ -465,7 +494,10 @@ mod tests {
         assert_eq!(crop.dimensions(), (1500, 1000));
         assert_eq!(position(&crop, 0, 0), (750, 500));
         assert_eq!(position(&crop, 1499, 999), (2249, 1499));
-        assert_eq!(to_2048(crop).rgba.len(), (SIDE * SIDE * 4) as usize);
+        assert_eq!(
+            to_2048(crop).expect("png").rgba.len(),
+            (SIDE * SIDE * 4) as usize
+        );
         // A tiny image still crops to at least one pixel.
         assert_eq!(
             crop_for(GameVersion::FS22, positions(1, 1)).dimensions(),
@@ -478,13 +510,13 @@ mod tests {
         let exe = temp("saved");
         let target = map_image_target(&exe, "M");
         assert_eq!(target, exe.join("mapImages").join("M").join("M.png"));
-        let image = to_2048(RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255])));
-        save_map_image(&target, &encode_png(&image).expect("png")).expect("saved");
+        let image = to_2048(RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))).expect("png");
+        save_map_image(&target, &image.png).expect("saved");
         assert_eq!(find_map_image("M", Some(&exe), None), Some(target.clone()));
         assert_eq!(load_map_image(&target), (image, None));
         // Saving again replaces it and leaves no temp file behind.
-        let other = to_2048(RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255])));
-        save_map_image(&target, &encode_png(&other).expect("png")).expect("saved");
+        let other = to_2048(RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255]))).expect("png");
+        save_map_image(&target, &other.png).expect("saved");
         assert_eq!(load_map_image(&target).0, other);
         let files = std::fs::read_dir(target.parent().expect("dir")).expect("list");
         assert_eq!(files.count(), 1);
@@ -503,7 +535,7 @@ mod tests {
         let centre = *decoded.get_pixel(1024, 1024);
         let crop = crop_for(GameVersion::FS25, decoded);
         assert_eq!(crop.dimensions(), (SIDE, SIDE));
-        let image = to_2048(crop);
+        let image = to_2048(crop).expect("png");
         assert_eq!(image.rgba.len(), (SIDE * SIDE * 4) as usize);
         assert_eq!(&image.rgba[..4], &centre.0);
     }
@@ -536,5 +568,45 @@ mod tests {
     fn blank_is_the_full_size() {
         assert_eq!(blank().rgba.len(), (SIDE * SIDE * 4) as usize);
         assert_ne!(blank().rgba[0..4], [128, 128, 128, 128]);
+    }
+
+    #[test]
+    fn every_image_carries_png_bytes_that_decode_to_it() {
+        let right = png(SIDE, SIDE);
+        let (kept, _) = decode_map_image(&right, "right").expect("decodes");
+        assert_eq!(&*kept.png, &right[..], "a 2048 PNG is kept byte for byte");
+        let (scaled, _) = decode_map_image(&png(100, 50), "small").expect("decodes");
+        let blank = blank();
+        assert_eq!(&*blank.png, BLANK_PNG);
+        let converted = to_2048(RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255])));
+        for image in [kept, scaled, blank, converted.expect("png")] {
+            let (again, notice) = decode_map_image(&image.png, "again").expect("decodes");
+            assert_eq!((again.rgba, notice), (image.rgba, None));
+        }
+    }
+
+    fn heightmap_round_trip(heightmap: &Heightmap) {
+        let png = encode_heightmap(heightmap).expect("encodes");
+        // IHDR: bit depth 16 (byte 24), colour type 0 grey (byte 25).
+        assert_eq!((png[24], png[25]), (16, 0));
+        assert_eq!(&decode_heightmap(&png).expect("decodes"), heightmap);
+    }
+
+    #[test]
+    fn an_encoded_heightmap_reads_back_to_the_same_heights() {
+        let raw = (0..12 * 7).map(|i: u32| (i * 797 % 65536) as u16).collect();
+        heightmap_round_trip(&Heightmap::new(12, 7, raw).expect("heightmap"));
+        heightmap_round_trip(&Heightmap::new(1, 1, vec![u16::MAX]).expect("heightmap"));
+    }
+
+    /// Needs the gitignored `dem.png` in the repo root; skipped when it is absent.
+    #[test]
+    fn the_fs25_dem_round_trips() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../dem.png");
+        if !Path::new(path).is_file() {
+            eprintln!("skipped: {path} is absent");
+            return;
+        }
+        heightmap_round_trip(&load_heightmap(Path::new(path)).expect("dem.png loads"));
     }
 }

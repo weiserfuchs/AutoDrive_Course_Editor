@@ -56,6 +56,7 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             // Not while downloading either: the download would replace the imported image.
             let can_import = !app.loading && !app.importing && !app.downloading_for_doc();
             let has_doc = app.doc.is_some();
+            let has_heightmap = can_export_heightmap(app);
             ui.add_enabled_ui(can_import, |ui| {
                 ui.menu_button("Import", |ui| {
                     if ui
@@ -73,6 +74,31 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                     if ui.button("Map mod zip…").clicked() {
                         app.import_zip(ctx);
                     }
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_doc, egui::Button::new("Load map image…"))
+                        .clicked()
+                    {
+                        app.load_image(ctx);
+                    }
+                    if ui
+                        .add_enabled(has_doc, egui::Button::new("Save map image…"))
+                        .clicked()
+                    {
+                        app.save_image(ctx);
+                    }
+                    if ui
+                        .add_enabled(has_doc, egui::Button::new("Import heightmap…"))
+                        .clicked()
+                    {
+                        app.import_heightmap(ctx);
+                    }
+                    if ui
+                        .add_enabled(has_heightmap, egui::Button::new("Export heightmap…"))
+                        .clicked()
+                    {
+                        app.export_heightmap(ctx);
+                    }
                 });
             });
             ui.checkbox(&mut app.view.show_grid, "Grid");
@@ -88,6 +114,9 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             if app.importing {
                 ui.label("Importing…");
             }
+            if app.exporting {
+                ui.label("Saving image…");
+            }
             if let Some(label) = download_label(app) {
                 ui.label(label);
             }
@@ -102,6 +131,11 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             }
         });
     });
+}
+
+/// Whether Export heightmap is enabled: the open document has a heightmap.
+pub(crate) fn can_export_heightmap(app: &App) -> bool {
+    app.doc.as_ref().is_some_and(|d| d.map.heightmap.is_some())
 }
 
 /// The top bar label while a map image downloads for the open document.

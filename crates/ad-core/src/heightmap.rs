@@ -31,6 +31,11 @@ impl Heightmap {
         self.height
     }
 
+    /// The raw samples, row-major.
+    pub fn raw(&self) -> &[u16] {
+        &self.raw
+    }
+
     /// The raw sample at pixel (px, py), clamped to the image.
     pub fn sample_raw(&self, px: i64, py: i64) -> u16 {
         let x = px.clamp(0, i64::from(self.width) - 1) as usize;

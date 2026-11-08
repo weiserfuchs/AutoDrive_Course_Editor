@@ -24,6 +24,8 @@ pub struct Document {
     pub map: MapContext,
     /// Decoded image waiting for the UI thread to upload it; taken right after (AD-14).
     pub map_image: Option<MapImage>,
+    /// PNG bytes of the shown image, kept after the upload so it can be saved (AD-8).
+    pub map_png: Arc<[u8]>,
     pub map_texture: Option<eframe::egui::TextureHandle>,
     /// An imported map image, shown, whose save waits for "Replace the existing map image?".
     pub image_to_replace: Option<crate::jobs::ImageSave>,
@@ -67,6 +69,7 @@ impl Document {
             path,
             epoch,
             map,
+            map_png: map_image.png.clone(),
             map_image: Some(map_image),
             map_texture: None,
             image_to_replace: None,
@@ -133,6 +136,31 @@ impl Document {
         self.revision += 1;
         let net = &self.config.network;
         self.selection.retain(|&id| net.node(id).is_some());
+    }
+
+    /// Shows `image` instead of the current one: it waits for the upload, its PNG stays.
+    pub fn show(&mut self, image: MapImage) {
+        self.map_png = image.png.clone();
+        self.map_image = Some(image);
+    }
+
+    /// Adds `line` below the notice.
+    pub fn add_notice(&mut self, line: String) {
+        self.notice = Some(match self.notice.take() {
+            Some(old) => format!("{old}\n{line}"),
+            None => line,
+        });
+    }
+
+    /// Drops the notice lines that start with `prefix`; keeps any other line.
+    pub fn drop_notice_lines(&mut self, prefix: &str) {
+        self.notice = self.notice.take().and_then(|notice| {
+            let rest: Vec<&str> = notice
+                .lines()
+                .filter(|line| !line.starts_with(prefix))
+                .collect();
+            (!rest.is_empty()).then(|| rest.join("\n"))
+        });
     }
 
     /// Whether tools, Undo and Redo may change this document (AD-11).

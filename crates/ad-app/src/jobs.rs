@@ -64,7 +64,7 @@ impl Default for DownloadSource {
 pub type VehiclesSave = (Arc<VehiclesFile>, PathBuf);
 
 /// An encoded map image and the path it would replace.
-pub type ImageSave = (PathBuf, Vec<u8>);
+pub type ImageSave = (PathBuf, Arc<[u8]>);
 
 /// A DDS decoded, cropped and scaled to 2048x2048; `replace` is set when the target already
 /// existed, so it was not written.
@@ -108,7 +108,34 @@ pub enum JobResult {
         folder: String,
         result: Result<Box<zip_import::ZipSaved>, String>,
     },
+    /// A PNG picked as map image, decoded with its scaling notice, for the document of
+    /// `epoch`.
+    ImageLoaded {
+        epoch: u64,
+        result: Result<Box<(MapImage, Option<String>)>, String>,
+    },
+    /// A PNG picked as heightmap, decoded, for the document of `epoch`.
+    HeightmapLoaded {
+        epoch: u64,
+        result: Result<Box<Heightmap>, String>,
+    },
+    /// The shown map image (`image`, its PNG) or the heightmap (`image` none) written.
+    Exported {
+        image: Option<Arc<[u8]>>,
+        result: Result<(), String>,
+    },
 }
+
+/// What an export writes.
+pub enum Export {
+    /// The shown map image's PNG bytes, written as they are.
+    MapImage(Arc<[u8]>),
+    /// The heightmap, encoded as 16-bit grey PNG.
+    Heightmap(Arc<Heightmap>),
+}
+
+/// The notice line after a map image was loaded by hand; a save of that image drops it.
+pub const NOT_SAVED: &str = "Map image loaded, not saved — use Save map image to keep it";
 
 /// How the load's notice for a missing heightmap starts; an attached heightmap drops it.
 pub const NO_HEIGHTMAP: &str = "No heightmap found";
@@ -130,14 +157,118 @@ pub fn import_target(doc: &Document, exe_dir: Option<&Path>) -> Result<PathBuf, 
     Ok(map_image::map_image_target(dir, name))
 }
 
+/// Where Save map image (`heightmap` false) or Export heightmap starts the dialog:
+/// `mapImages/<name>/<name>.png` or `<name>_HeightMap.png` in `exe_dir`; without a map name
+/// `mapImages/unknown.png` or `unknown_HeightMap.png` (Java).
+pub fn export_target(exe_dir: &Path, name: Option<&str>, heightmap: bool) -> PathBuf {
+    match (name, heightmap) {
+        (Some(name), false) => map_image::map_image_target(exe_dir, name),
+        (Some(name), true) => map_image::heightmap_target(exe_dir, name),
+        (None, false) => exe_dir.join("mapImages").join("unknown.png"),
+        (None, true) => exe_dir.join("mapImages").join("unknown_HeightMap.png"),
+    }
+}
+
+/// `path`, with `.png` added when it has another or no extension.
+pub fn with_png_extension(path: PathBuf) -> PathBuf {
+    let is_png = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    if is_png {
+        return path;
+    }
+    let mut name = path.into_os_string();
+    name.push(".png");
+    PathBuf::from(name)
+}
+
+/// Reads and decodes a PNG as the map image, scaled as a local image is (AD-14). Not saved.
+pub fn load_image_file(path: &Path) -> Result<(MapImage, Option<String>), String> {
+    let fail =
+        |why: &dyn std::fmt::Display| format!("Cannot load {} as map image: {why}", path.display());
+    let bytes = std::fs::read(path).map_err(|e| fail(&e))?;
+    map_image::decode_map_image(&bytes, &path.display().to_string()).map_err(|e| fail(&e))
+}
+
+/// Runs `load_image_file` on a background thread, then calls `notify`.
+pub fn spawn_image_load(
+    path: PathBuf,
+    epoch: u64,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        tracing::info!("loading map image {}", path.display());
+        let result = load_image_file(&path).map(Box::new);
+        if let Err(e) = &result {
+            tracing::warn!("{e}");
+        }
+        let _ = tx.send(JobResult::ImageLoaded { epoch, result });
+        notify();
+    });
+}
+
+/// Decodes a PNG as heightmap on a background thread, then calls `notify`. Not saved.
+pub fn spawn_heightmap_load(
+    path: PathBuf,
+    epoch: u64,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        tracing::info!("loading heightmap {}", path.display());
+        let result = map_image::load_heightmap(&path).map(Box::new);
+        if let Err(e) = &result {
+            tracing::warn!("{e}");
+        }
+        let _ = tx.send(JobResult::HeightmapLoaded { epoch, result });
+        notify();
+    });
+}
+
+/// Writes `what` to `target` atomically, creating its folders. The error names the file.
+pub fn export(what: &Export, target: &Path) -> Result<(), String> {
+    let fail = |why: &dyn std::fmt::Display| format!("Cannot save {}: {why}", target.display());
+    match what {
+        Export::MapImage(png) => map_image::save_map_image(target, png),
+        Export::Heightmap(heightmap) => {
+            let png = map_image::encode_heightmap(heightmap).map_err(|e| fail(&e))?;
+            map_image::save_map_image(target, &png)
+        }
+    }
+    .map_err(|e| fail(&e))
+}
+
+/// Runs `export` on a background thread, then calls `notify`.
+pub fn spawn_export(
+    what: Export,
+    target: PathBuf,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        let result = export(&what, &target);
+        match &result {
+            Ok(()) => tracing::info!("saved {}", target.display()),
+            Err(e) => tracing::warn!("{e}"),
+        }
+        let image = match what {
+            Export::MapImage(png) => Some(png),
+            Export::Heightmap(_) => None,
+        };
+        let _ = tx.send(JobResult::Exported { image, result });
+        notify();
+    });
+}
+
 /// Reads, decodes, crops (by `version`, AD-11) and scales the DDS, then saves it as PNG to
 /// `target` unless a file is there already. Any failure names the file.
 pub fn import_dds(path: &Path, version: GameVersion, target: &Path) -> Result<Imported, String> {
     let fail = |why: &dyn std::fmt::Display| format!("Cannot import {}: {why}", path.display());
     let bytes = std::fs::read(path).map_err(|e| fail(&e))?;
     let decoded = dds::decode(&bytes).map_err(|e| fail(&e))?;
-    let image = map_image::to_2048(map_image::crop_for(version, decoded));
-    let png = map_image::encode_png(&image).map_err(|e| fail(&e))?;
+    let image = map_image::to_2048(map_image::crop_for(version, decoded)).map_err(|e| fail(&e))?;
+    let png = image.png.clone();
     if target.exists() {
         return Ok(Imported {
             image,
@@ -499,7 +630,7 @@ pub fn apply_result(
             let d = doc.as_mut().filter(|d| d.epoch == epoch)?;
             match result {
                 Ok(imported) => {
-                    d.map_image = Some(imported.image);
+                    d.show(imported.image);
                     d.image_to_replace = imported.replace;
                     None
                 }
@@ -513,19 +644,56 @@ pub fn apply_result(
             let d = doc.as_mut().filter(|d| d.epoch == epoch)?;
             let notice = match result {
                 Ok(downloaded) => {
-                    d.map_image = Some(downloaded.image);
+                    d.show(downloaded.image);
                     downloaded.notice
                 }
                 Err(message) => Some(message),
             };
             if let Some(notice) = notice {
-                d.notice = Some(match d.notice.take() {
-                    Some(old) => format!("{old}\n{notice}"),
-                    None => notice,
-                });
+                d.add_notice(notice);
             }
             None
         }
+        // Shown, not saved: only the image and the notice change, for its document only.
+        JobResult::ImageLoaded { epoch, result } => {
+            let d = doc.as_mut().filter(|d| d.epoch == epoch)?;
+            match result {
+                Ok(loaded) => {
+                    let (image, scaled) = *loaded;
+                    d.show(image);
+                    // Lines about the image shown before (scaled, failed, not saved) go.
+                    d.drop_notice_lines("Map image ");
+                    if let Some(scaled) = scaled {
+                        d.add_notice(scaled);
+                    }
+                    d.add_notice(NOT_SAVED.to_owned());
+                    None
+                }
+                Err(message) => Some(message),
+            }
+        }
+        JobResult::HeightmapLoaded { epoch, result } => {
+            let d = doc.as_mut().filter(|d| d.epoch == epoch)?;
+            match result {
+                Ok(heightmap) => {
+                    zip_import::attach_heightmap(d, *heightmap);
+                    None
+                }
+                Err(message) => Some(message),
+            }
+        }
+        // A saved map image that is still the shown one is no longer "not saved".
+        JobResult::Exported { image, result } => match result {
+            Ok(()) => {
+                if let (Some(d), Some(png)) = (doc.as_mut(), image)
+                    && Arc::ptr_eq(&d.map_png, &png)
+                {
+                    d.drop_notice_lines(NOT_SAVED);
+                }
+                None
+            }
+            Err(message) => Some(message),
+        },
         // Taken by `App::poll_jobs` before this is called.
         JobResult::ZipRead { .. } => None,
         // The files are saved either way; they attach only to the document they were
