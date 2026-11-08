@@ -56,9 +56,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] dependency and `dds::decode`
-- [ ] tests for every matrix row; result table in the Implementation Notes
-- [ ] small decoder only if a needed format fails; architecture updated
+- [x] dependency and `dds::decode`
+- [x] tests for every matrix row; result table in the Implementation Notes
+- [x] small decoder only if a needed format fails; architecture updated
 
 **Acceptance Criteria:**
 - Given the FS25 sample and the generated samples, when the tests run, then every format the games use decodes, every other format is refused cleanly, and the architecture names the settled coverage.
@@ -71,6 +71,25 @@ context: []
 - `cargo test --workspace` -- expected: all pass (the FS25 sample test runs here, the file is present)
 
 ## Implementation Notes
+
+`ad_io::dds::decode(bytes) -> Result<RgbaImage, DdsError>` reads the file with `ddsfile`, refuses a width or height of 0 or above 16384 and any cube map, array or volume texture, and then decodes mip 0 with `image_dds::image_from_dds`. The error is a `DdsError` (thiserror) rather than `image::ImageError`: header, size, unsupported format (named), data.
+
+Result (tests in `crates/ad-io/src/dds.rs`, 8×8 samples built in the test):
+
+| Format | Result |
+| --- | --- |
+| DXT1 (incl. 1-bit alpha) | decodes with `image_dds` |
+| DXT2, DXT3 | decodes with `image_dds` (DXT2 not un-premultiplied, as in Java) |
+| DXT4, DXT5 | decodes with `image_dds` (DXT4 not un-premultiplied, as in Java) |
+| A8R8G8B8, A8B8G8R8, R8G8B8, A4R4G4B4, A1R5G5B5 | decodes with `image_dds` |
+| X8R8G8B8, X8B8G8R8 | own decoder (byte reorder, alpha 255); `image_dds` refuses them |
+| X1R5G5B5, X4R4G4B4, R5G6B5 | refused ("unsupported DDS format R5G6B5" etc.); 16-bit, not used for map images |
+| unknown FourCC / masks | refused, naming the FourCC, D3D/DXGI format or the masks |
+
+- FS25 `pda_map_H.dds` (DXT1, 4096²) decodes; 68 probed pixels match an independent BC1 reference decode in the test within ±1.
+- Truncated input (short header, header only, half the data, every prefix of each sample) and a 100000² header give an error; none panics. The size check runs before any pixel buffer is allocated.
+- New crates: `image_dds`, `ddsfile`, `bcdec_rs`, `enum-primitive-derive`, `syn` 1.x (proc-macro of `enum-primitive-derive`). Stack features unchanged.
+- FS19 and FS22 samples were not available; DXT1/DXT5 and 32-bit RGBA cover what they are known to use.
 
 ## Plan Change Log
 
