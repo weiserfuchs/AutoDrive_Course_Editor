@@ -291,6 +291,11 @@ pub trait ViewHooks {
         None
     }
 
+    /// The nodes the overlap scan marks, drawn with the warning icon.
+    fn overlap(&self) -> Option<&BTreeSet<NodeId>> {
+        None
+    }
+
     /// A primary drag event. For `Start`, true claims the drag: it does not pan, and its
     /// `Move` and `End` events follow. The return value of other events is ignored.
     fn drag(&mut self, _event: DragEvent) -> bool {
@@ -618,6 +623,7 @@ impl MapView {
             &t,
             preview,
             selection,
+            hooks.overlap(),
         );
         if let Some(id) = self.hovered_node {
             self.paint_info_box(&painter, net, geometry, &t, ns, id, rect, preview);
@@ -767,6 +773,7 @@ impl MapView {
         t: &ViewTransform,
         preview: Option<&Preview>,
         selection: Option<&BTreeSet<NodeId>>,
+        overlap: Option<&BTreeSet<NodeId>>,
     ) {
         if let Some(id) = map_texture {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -1042,10 +1049,35 @@ impl MapView {
             );
             mesh.add_rect_with_uv(rect, uv, egui::Color32::WHITE);
         };
+        let marked = |id: NodeId| overlap.is_some_and(|o| o.contains(&id));
+        // An overlap mark replaces the height warning on its node (Java `NodeDrawThread`
+        // 110-117).
+        if let (Some(tex), Some(overlap)) = (
+            self.icons.as_ref().and_then(|i| i.warning.as_ref()),
+            overlap,
+        ) {
+            let mut mesh = egui::Mesh::with_texture(tex.id());
+            for &id in overlap {
+                if let Some(n) = net.node(id)
+                    && let (x, z) = place(id, n, preview)
+                    && x >= x0 - pad
+                    && x <= x1 + pad
+                    && z >= z0 - pad
+                    && z <= z1 + pad
+                {
+                    let (sx, sy) = to_screen(x, z);
+                    add_icon(&mut mesh, (sx as f32, sy as f32), icons::SMALL_PX);
+                }
+            }
+            if !mesh.is_empty() {
+                painter.add(egui::Shape::mesh(mesh));
+            }
+        }
         if let Some(tex) = self.icons.as_ref().and_then(|i| i.warning_y.as_ref()) {
             let mut mesh = egui::Mesh::with_texture(tex.id());
             for id in net.nodes_without_height() {
                 if let Some(n) = net.node(id)
+                    && !marked(id)
                     && overlay::has_height_warning(n.y)
                     && let (x, z) = place(id, n, preview)
                     && x >= x0 - pad
@@ -1515,6 +1547,87 @@ mod tests {
             .filter(|s| matches!(s.shape, egui::Shape::Circle(_)))
             .count();
         assert_eq!(circles, 0);
+    }
+
+    /// Hooks that hand the view fixed overlap marks.
+    struct Marked(BTreeSet<NodeId>);
+
+    impl ViewHooks for Marked {
+        fn overlap(&self) -> Option<&BTreeSet<NodeId>> {
+            Some(&self.0)
+        }
+    }
+
+    /// Centres of the painted icons with texture `tex`.
+    fn icon_centres(out: &egui::FullOutput, tex: egui::TextureId) -> Vec<egui::Pos2> {
+        let mut centres = Vec::new();
+        for s in &out.shapes {
+            if let egui::Shape::Mesh(m) = &s.shape
+                && m.texture_id == tex
+            {
+                for quad in m.vertices.chunks(4) {
+                    let mut rect = egui::Rect::NOTHING;
+                    for v in quad {
+                        rect.extend_with(v.pos);
+                    }
+                    assert_eq!(rect.size(), egui::vec2(20.0, 20.0));
+                    centres.push(rect.center());
+                }
+            }
+        }
+        centres
+    }
+
+    #[test]
+    fn overlap_marks_draw_the_warning_icon_in_place_of_the_height_warning() {
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        let size = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 1024.0));
+        let mut net = Network::new();
+        let a = net.add_node(10.0, -1.0, 20.0, NodeFlag::REGULAR);
+        let b = net.add_node(10.05, -1.0, 20.0, NodeFlag::REGULAR);
+        net.add_node(30.0, -1.0, 40.0, NodeFlag::REGULAR);
+        // Zoom 1 draws the nodes; at 0.5 they are too small, the icons still show.
+        for zoom in [1.0, 0.5] {
+            let mut view = view_at(&ctx, &net, g, zoom);
+            let icons = view.icons.as_ref().expect("loaded");
+            let warning = icons.warning.as_ref().expect("warning").id();
+            let warning_y = icons.warning_y.as_ref().expect("warning_y").id();
+            let t = view.transform.expect("set");
+            let at = |x: f64, z: f64| {
+                let (mx, my) = g.to_map(x, z);
+                let (sx, sy) = t.map_to_screen(mx, my);
+                egui::pos2(sx as f32, sy as f32)
+            };
+            let run = |view: &mut MapView, marks: Option<BTreeSet<NodeId>>| {
+                let input = egui::RawInput {
+                    screen_rect: Some(size),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| match &marks {
+                    Some(m) => {
+                        view.show(ui, &net, g, 2.0, None, &mut Marked(m.clone()));
+                    }
+                    None => {
+                        view.show(ui, &net, g, 2.0, None, &mut ());
+                    }
+                });
+                out.textures_delta.clear();
+                out
+            };
+            let out = run(&mut view, Some(BTreeSet::from([a, b])));
+            let near = |p: egui::Pos2, q: egui::Pos2| (p - q).length() < 1e-3;
+            let marked = icon_centres(&out, warning);
+            assert_eq!(marked.len(), 2, "zoom {zoom}");
+            assert!(near(marked[0], at(10.0, 20.0)) && near(marked[1], at(10.05, 20.0)));
+            let heights = icon_centres(&out, warning_y);
+            assert_eq!(heights.len(), 1, "zoom {zoom}");
+            assert!(near(heights[0], at(30.0, 40.0)));
+            // Without marks (cleared), only the height warnings show.
+            let out = run(&mut view, None);
+            assert!(icon_centres(&out, warning).is_empty());
+            assert_eq!(icon_centres(&out, warning_y).len(), 3);
+        }
     }
 
     #[test]
@@ -2895,6 +3008,43 @@ mod tests {
             .filter(|id| net.node(*id).is_some_and(|n| n.x < 0.0))
             .collect();
         let group_selected: std::cell::Cell<Option<&BTreeSet<NodeId>>> = std::cell::Cell::new(None);
+        // Story 8.1: the overlap scan of the fixture, and what keeping its marks costs per
+        // edit (the nodes around a moved node before and after, then their remark; timed
+        // without moving it). The marks the view gets while `marks_shown` is set: d = 0.1
+        // finds none in the fixture, so the drawn case uses d = 1.0.
+        let best_ms = |run: &mut dyn FnMut() -> usize| {
+            let mut best = (f64::INFINITY, 0);
+            for _ in 0..20 {
+                let start = std::time::Instant::now();
+                let n = run();
+                best = (best.0.min(start.elapsed().as_secs_f64() * 1000.0), n);
+            }
+            best
+        };
+        let marks_at = |d: f64| {
+            let (ms, n) = best_ms(&mut || ad_core::scan::overlaps(net, d).len());
+            println!("overlap scan, d = {d}: {n} nodes marked, full scan {ms:.3} ms (best of 20)");
+        };
+        marks_at(0.1);
+        marks_at(1.0);
+        let wide_marks = ad_core::scan::overlaps(net, 1.0);
+        let follow = |nodes: &[NodeId], d: f64| {
+            let mut marks = wide_marks.clone();
+            best_ms(&mut || {
+                let near = ad_core::scan::around(net, nodes, d);
+                let after = ad_core::scan::around(net, nodes, d);
+                let n = near.len() + after.len();
+                ad_core::scan::remark(net, d, &mut marks, near.into_iter().chain(after));
+                n
+            })
+        };
+        let all: Vec<NodeId> = net.order().to_vec();
+        let one = [*wide_marks.first().expect("a marked node")];
+        let (ms, n) = follow(&one, 1.0);
+        println!("overlap follow, one node moved, d = 1.0: {n} nodes remarked, {ms:.3} ms");
+        let (ms, n) = follow(&all, 1.0);
+        println!("overlap follow, every node moved, d = 1.0: {n} nodes remarked, {ms:.3} ms");
+        let marks_shown = std::cell::Cell::new(false);
         // One timed frame: tessellation included.
         let timed = |view: &mut MapView, pointer: Option<egui::Pos2>| {
             let start = std::time::Instant::now();
@@ -2915,6 +3065,7 @@ mod tests {
                 };
                 let mut hooks =
                     crate::ui::ToolHooks::new(app.tool.as_deref_mut(), &map, net, selection, false);
+                hooks.overlap = marks_shown.get().then_some(&wide_marks);
                 view.show(ui, net, geometry, 2.0, Some(texture), &mut hooks);
             });
             out.textures_delta.clear();
@@ -3057,6 +3208,23 @@ mod tests {
             &none,
             true,
         );
+        // Story 8.1: the d = 1.0 overlap marks drawn.
+        marks_shown.set(true);
+        report(
+            "static: min zoom, overlap marks (d = 1.0)",
+            true,
+            &at(centre, 0.0),
+            &none,
+            false,
+        );
+        report(
+            "static: mid zoom, dense, overlap marks (d = 1.0)",
+            true,
+            &at(dense, 6.0),
+            &none,
+            false,
+        );
+        marks_shown.set(false);
         // 40 px per frame, back and forth. At minimum zoom the map fills the panel's width,
         // so only the vertical pan moves the view there.
         let sweep = |i: usize| {
