@@ -77,6 +77,9 @@ pub enum JobResult {
     },
 }
 
+/// How the load's notice for a missing heightmap starts; an attached heightmap drops it.
+pub const NO_HEIGHTMAP: &str = "No heightmap found";
+
 /// The folder of the running executable, where `mapImages` is looked up first (AD-14).
 pub fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe()
@@ -253,7 +256,7 @@ fn load_heightmap(
         None => (
             None,
             Some(format!(
-                "No heightmap found for {}; new nodes will have no height",
+                "{NO_HEIGHTMAP} for {}; new nodes will have no height",
                 name.unwrap_or("this map")
             )),
         ),

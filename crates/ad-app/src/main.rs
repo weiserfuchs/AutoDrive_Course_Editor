@@ -3756,6 +3756,23 @@ mod zip_tests {
     }
 
     #[test]
+    fn an_attached_heightmap_drops_the_loads_no_heightmap_notice() {
+        let dir = temp_dir("notice");
+        let mut app = app("M");
+        app.doc.as_mut().expect("doc").notice = Some(format!(
+            "Map image too small\n{} for M; new nodes will have no height",
+            jobs::NO_HEIGHTMAP
+        ));
+        let bytes = zip_bytes(&jobs::test_dds([1, 2, 3, 255]), Some(&dem()));
+        read(&mut app, &dir, &bytes);
+        import(&mut app, &dir, false);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(doc.map.heightmap.is_some());
+        assert_eq!(doc.notice.as_deref(), Some("Map image too small"));
+    }
+
+    #[test]
     fn results_for_a_replaced_document_are_ignored() {
         let dir = temp_dir("replaced");
         let bytes = zip_bytes(&jobs::test_dds([1, 2, 3, 255]), Some(&dem()));
