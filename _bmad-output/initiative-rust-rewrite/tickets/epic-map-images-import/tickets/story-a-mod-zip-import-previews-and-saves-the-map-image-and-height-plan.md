@@ -63,9 +63,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `mod_zip.rs` -- tests for Versions, Name, No dem, Hostile, Missing
-- [ ] job and preview -- tests for FS25 zip (with the FS25 sample, skipped when absent), Override, Exists, Other map, Replaced document
-- [ ] dependency added per the Stack
+- [x] `mod_zip.rs` -- tests for Versions, Name, No dem, Hostile, Missing
+- [x] job and preview -- tests for FS25 zip (with the FS25 sample, skipped when absent), Override, Exists, Other map, Replaced document
+- [x] dependency added per the Stack
 
 **Acceptance Criteria:**
 - Given the fixture open and a zip built from the FS25 sample files, when the user imports it and confirms, then the preview shows both images, and after Import the map image and heightmap are attached and found again at the next load.
@@ -79,6 +79,17 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **Dependency:** `zip = { version = "9.4.0", default-features = false, features = ["deflate"] }` in the workspace, used by `ad-io`; `ad-app` has it as a dev-dependency only (tests build zips with `ZipWriter`). `image` moved from dev-dependency to dependency of `ad-app` (preview `RgbaImage`s).
+- **`ad-io::mod_zip`:** `read(reader)` opens the archive and reads `modDesc.xml`, the `<map configFilename>` file and the DDS by name into memory, each capped (`MAX_DDS` 128 MiB, `MAX_OTHER` 64 MiB, checked against the header and again while reading with `take`). Requested names have `\` turned into `/`; absolute names, drive letters and any `..` component are refused (`Unsafe`). `dem.png` is the first entry whose last path component is `dem.png` (Java matched `endsWith`, which also hits `xdem.png`); its name gets the same check. The DDS is kept uncropped in `ModZip.image`, so the game picked in the preview decides the crop at Import.
+- **Heightmap format:** `dem.png` is saved byte for byte as `<name>_HeightMap.png` (Java re-encodes the same image). It is decoded once with the loader's own code (`map_image::decode_heightmap`, split out of `load_heightmap`), so only a heightmap the next load accepts (16-bit grey or 8-bit RGB(A)) is imported; the FS25 sample is 16-bit grey 4097². An unreadable `dem.png` is treated like a missing one: image only, with a notice naming it.
+- **Name:** `default_name` (map name of the open config, else `en` title, else first title); `folder_name` trims, replaces spaces and dots with `_` and refuses empty names and `/ \ : * ? " < > |` and control characters (Import is disabled with a red note). Attach compares the folder name with the config's map name.
+- **App flow:** `zip_import.rs` holds the read job (previews: 256² of the whole image, of the centre half and of the heightmap stretched min..max as grey), the `ZipPreview` state, the save job and `attach`. The preview modal is `ui::zip_preview_window`. Import checks on the UI thread whether the target files exist (a stat only); if so the modal asks "Replace the existing files?" — Yes saves, No returns to the preview. Reading, decoding, encoding and writing run on background threads.
+- **Epochs (AD-18):** both jobs capture the open document's epoch (`None` without one). A read result for another document is dropped; a new document also closes the preview. A save result always leaves the files written, but attaches only to the same epoch and only when the names match. Attach sets `map_image` (uploaded next frame) and, with a heightmap, `heightmap` and `height_map_scale = calibrate(...)` with the document's geometry, as a load does; the config and history are untouched.
+- **Menu:** "Map mod zip…" is enabled without a document; the DDS items still need one.
+- **Hand check:** `target/handtest/FS25_TestMap.zip` (modDesc descVersion 92 with titles `NF Marsch 4fach`, `maps/map.xml` with `imageFilename="maps/overview.png"`, `maps/overview.dds` = `pda_map_H.dds`, `maps/data/dem.png` = `dem.png`), built with .NET `ZipFile`; read back through `mod_zip::read` as FS25, 4096² image, dem present.
+- **Tests:** `mod_zip::tests::{a_complete_zip_gives_version_titles_image_and_dem, versions_map_to_games_and_old_ones_are_refused, the_name_defaults_to_the_map_name_then_english_then_first_title, no_dem_gives_the_image_alone_with_a_notice, hostile_names_and_oversized_entries_are_refused, missing_parts_are_errors_naming_them}`; `map_image::tests::previews_follow_the_crop_and_stretch_the_heightmap`; `zip_tests::{the_fs25_sample_zip_previews_saves_and_attaches, the_chosen_game_sets_the_crop, existing_files_are_replaced_only_after_yes, another_maps_name_or_no_document_saves_without_attaching, results_for_a_replaced_document_are_ignored, a_bad_zip_shows_an_error_and_changes_nothing}`.
+- **Verification (2026-11-08):** `cargo fmt --all --check` ok; `cargo clippy --workspace --all-targets -- -D warnings` ok; `cargo test --workspace` ok (ad-app 361 passed, 2 ignored; ad-io 64 + integration tests); the FS25 sample test ran (not skipped). `frame_time` (release) passed twice; worst best-round max 7.8 ms (rotate, min zoom, whole network), all cases under 16 ms.
 
 ## Plan Change Log
 

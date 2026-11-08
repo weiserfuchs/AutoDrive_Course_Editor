@@ -62,12 +62,17 @@ pub fn load_heightmap(path: &Path) -> Result<Heightmap, String> {
         format!("Heightmap {} could not be loaded ({why})", path.display())
     };
     let bytes = std::fs::read(path).map_err(|e| fail(&e))?;
+    decode_heightmap(&bytes).map_err(|why| fail(&why))
+}
+
+/// Decodes PNG heightmap bytes as `load_heightmap` does; the error is the reason alone.
+pub fn decode_heightmap(bytes: &[u8]) -> Result<Heightmap, String> {
     // PNG colour type 3 is a palette; the decoder would expand it to RGB.
     if bytes.get(25) == Some(&3) {
-        return Err(fail(&"unsupported format: palette"));
+        return Err("unsupported format: palette".to_owned());
     }
-    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
-        .map_err(|e| fail(&e))?;
+    let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
     let (w, h) = (img.width(), img.height());
     let raw: Vec<u16> = match img.color() {
         image::ColorType::L16 => img.into_luma16().into_raw(),
@@ -76,9 +81,9 @@ pub fn load_heightmap(path: &Path) -> Result<Heightmap, String> {
             .pixels()
             .map(|p| (u16::from(p[0]) << 8) + u16::from(p[1]))
             .collect(),
-        other => return Err(fail(&format!("unsupported format {other:?}"))),
+        other => return Err(format!("unsupported format {other:?}")),
     };
-    Heightmap::new(w, h, raw).ok_or_else(|| fail(&"empty image"))
+    Heightmap::new(w, h, raw).ok_or_else(|| "empty image".to_owned())
 }
 
 /// The embedded Blank image.
@@ -120,14 +125,64 @@ pub fn map_image_target(exe_dir: &Path, name: &str) -> PathBuf {
         .join(format!("{name}.png"))
 }
 
+/// `<exe dir>/mapImages/<name>/<name>_HeightMap.png`, where an imported heightmap is saved.
+pub fn heightmap_target(exe_dir: &Path, name: &str) -> PathBuf {
+    exe_dir
+        .join("mapImages")
+        .join(name)
+        .join(format!("{name}_HeightMap.png"))
+}
+
 /// The part of a decoded DDS that is the map (AD-11): FS19 the whole image, FS22 and FS25
 /// the centre half (`w/4, h/4` to `3w/4, 3h/4`, as Java).
 pub fn crop_for(version: GameVersion, image: RgbaImage) -> RgbaImage {
     if version == GameVersion::FS19 {
         return image;
     }
-    let (w, h) = image.dimensions();
-    image::imageops::crop_imm(&image, w / 4, h / 4, (w / 2).max(1), (h / 2).max(1)).to_image()
+    let (x, y, w, h) = crop_rect(version, image.dimensions());
+    image::imageops::crop_imm(&image, x, y, w, h).to_image()
+}
+
+/// `crop_for`'s rectangle as x, y, width, height.
+fn crop_rect(version: GameVersion, (w, h): (u32, u32)) -> (u32, u32, u32, u32) {
+    if version == GameVersion::FS19 {
+        return (0, 0, w, h);
+    }
+    (w / 4, h / 4, (w / 2).max(1), (h / 2).max(1))
+}
+
+/// Side of the import previews.
+pub const PREVIEW_SIDE: u32 = 256;
+
+/// What `crop_for(version)` keeps of `image`, scaled to 256x256 without copying the image.
+pub fn preview(version: GameVersion, image: &RgbaImage) -> RgbaImage {
+    let (x, y, w, h) = crop_rect(version, image.dimensions());
+    let view = image::imageops::crop_imm(image, x, y, w, h);
+    image::imageops::resize(&*view, PREVIEW_SIDE, PREVIEW_SIDE, FilterType::Triangle)
+}
+
+/// The heightmap as a 256x256 grey image, nearest samples stretched from lowest to highest.
+pub fn heightmap_preview(heightmap: &Heightmap) -> RgbaImage {
+    let (w, h) = (u64::from(heightmap.width()), u64::from(heightmap.height()));
+    let side = u64::from(PREVIEW_SIDE);
+    let sample = |x: u32, y: u32| {
+        let px = u64::from(x) * w / side;
+        let py = u64::from(y) * h / side;
+        heightmap.sample_raw(px as i64, py as i64)
+    };
+    let grid = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_fn(
+        PREVIEW_SIDE,
+        PREVIEW_SIDE,
+        |x, y| image::Luma([sample(x, y)]),
+    );
+    let (lo, hi) = grid
+        .pixels()
+        .fold((u16::MAX, 0), |(lo, hi), p| (lo.min(p[0]), hi.max(p[0])));
+    let range = u32::from(hi.saturating_sub(lo)).max(1);
+    RgbaImage::from_fn(PREVIEW_SIDE, PREVIEW_SIDE, |x, y| {
+        let v = (u32::from(grid.get_pixel(x, y)[0] - lo) * 255 / range) as u8;
+        image::Rgba([v, v, v, 255])
+    })
 }
 
 /// Scales to 2048x2048 with Lanczos3; an image already that size is kept as is.
@@ -441,6 +496,30 @@ mod tests {
         let image = to_2048(crop);
         assert_eq!(image.rgba.len(), (SIDE * SIDE * 4) as usize);
         assert_eq!(&image.rgba[..4], &centre.0);
+    }
+
+    #[test]
+    fn previews_follow_the_crop_and_stretch_the_heightmap() {
+        let image = positions(1024, 1024);
+        let whole = preview(GameVersion::FS19, &image);
+        let centre = preview(GameVersion::FS25, &image);
+        assert_eq!(whole.dimensions(), (PREVIEW_SIDE, PREVIEW_SIDE));
+        assert_eq!(centre.dimensions(), (PREVIEW_SIDE, PREVIEW_SIDE));
+        assert!(position(&whole, 0, 0).0 < 4);
+        assert!((254..262).contains(&position(&centre, 0, 0).0));
+        let raw = (0..16).map(|i| 1000 + i * 10).collect();
+        let heightmap = Heightmap::new(4, 4, raw).expect("heightmap");
+        let grey = heightmap_preview(&heightmap);
+        assert_eq!(grey.dimensions(), (PREVIEW_SIDE, PREVIEW_SIDE));
+        assert_eq!(grey.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_eq!(grey.get_pixel(255, 255).0, [255, 255, 255, 255]);
+        let flat = Heightmap::new(2, 2, vec![7; 4]).expect("flat");
+        assert_eq!(heightmap_preview(&flat).get_pixel(9, 9).0, [0, 0, 0, 255]);
+        let dir = Path::new("exe");
+        assert_eq!(
+            heightmap_target(dir, "M"),
+            dir.join("mapImages").join("M").join("M_HeightMap.png")
+        );
     }
 
     #[test]
