@@ -3,7 +3,7 @@ title: 'A groups window renames and deletes marker groups'
 type: 'feature'
 ticket: '4'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '1acae57'
 route: 'full'
 route_source: 'auto'
