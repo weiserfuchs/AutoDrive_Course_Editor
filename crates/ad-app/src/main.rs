@@ -13,6 +13,7 @@ mod startup;
 mod tools;
 mod ui;
 mod view;
+mod zip_import;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -62,8 +63,10 @@ struct App {
     rx: Receiver<JobResult>,
     loading: bool,
     saving: bool,
-    /// A DDS import job is running.
+    /// A DDS or map mod zip import job is running.
     importing: bool,
+    /// The map mod zip preview window, while it is shown.
+    zip_preview: Option<zip_import::ZipPreview>,
     error: Option<String>,
     settings: Settings,
     view: MapView,
@@ -112,6 +115,7 @@ impl App {
             loading: false,
             saving: false,
             importing: false,
+            zip_preview: None,
             error: None,
             settings,
             view,
@@ -213,8 +217,15 @@ impl App {
                         self.pending = None;
                     }
                 }
-                JobResult::Imported { .. } => self.importing = false,
+                JobResult::Imported { .. } | JobResult::ZipSaved { .. } => self.importing = false,
                 JobResult::ImageSaved { .. } => {}
+                JobResult::ZipRead { .. } => {
+                    self.importing = false;
+                    if let JobResult::ZipRead { epoch, result } = result {
+                        self.zip_read(epoch, result);
+                    }
+                    continue;
+                }
             }
             let before = self.doc.as_ref().map(|d| d.epoch);
             if let Some(message) = jobs::apply_result(
@@ -232,7 +243,22 @@ impl App {
                 self.marker = None;
                 self.groups = None;
                 self.tool_notice = None;
+                self.zip_preview = None;
             }
+        }
+    }
+
+    /// Shows the preview of a read zip, unless the document changed meanwhile (AD-18).
+    fn zip_read(&mut self, epoch: Option<u64>, result: Result<Box<zip_import::ZipRead>, String>) {
+        if self.doc.as_ref().map(|d| d.epoch) != epoch {
+            return;
+        }
+        match result {
+            Ok(read) => {
+                let map_name = self.doc.as_ref().and_then(|d| d.config.map_name());
+                self.zip_preview = Some(zip_import::ZipPreview::new(*read, map_name));
+            }
+            Err(message) => self.error = Some(message),
         }
     }
 
@@ -254,12 +280,13 @@ impl App {
         self.doc.as_ref().is_some_and(document::Document::editable)
     }
 
-    /// Whether a modal dialog (Edit location, marker, groups or the map image replace
-    /// question) is shown.
+    /// Whether a modal dialog (Edit location, marker, groups, the map image replace
+    /// question or the zip preview) is shown.
     fn dialog_shown(&self) -> bool {
         self.location.is_some()
             || self.marker.is_some()
             || self.groups.is_some()
+            || self.zip_preview.is_some()
             || self
                 .doc
                 .as_ref()
@@ -738,6 +765,65 @@ impl App {
         }
     }
 
+    /// Asks for a map mod zip and reads it for the preview; no document is needed.
+    fn import_zip(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Zip", &["zip"])
+            .pick_file()
+        else {
+            return;
+        };
+        let ctx = ctx.clone();
+        self.start_zip_read(path, move || ctx.request_repaint());
+    }
+
+    fn start_zip_read(&mut self, path: std::path::PathBuf, notify: impl FnOnce() + Send + 'static) {
+        self.importing = true;
+        let epoch = self.doc.as_ref().map(|d| d.epoch);
+        zip_import::spawn_read(path, epoch, self.tx.clone(), notify);
+    }
+
+    /// The preview's Import: saves into `dir/mapImages/<name>/`. When files are there and
+    /// `confirmed` is false, it asks first and saves nothing.
+    fn zip_import(
+        &mut self,
+        dir: &std::path::Path,
+        confirmed: bool,
+        notify: impl FnOnce() + Send + 'static,
+    ) {
+        let Some(preview) = &mut self.zip_preview else {
+            return;
+        };
+        let Ok(folder) = ad_io::mod_zip::folder_name(&preview.name) else {
+            return;
+        };
+        if !confirmed {
+            let existing: Vec<_> = preview
+                .targets(dir, &folder)
+                .into_iter()
+                .filter(|p| p.exists())
+                .collect();
+            if !existing.is_empty() {
+                preview.replace = Some(existing);
+                return;
+            }
+        }
+        let Some(preview) = self.zip_preview.take() else {
+            return;
+        };
+        self.importing = true;
+        let epoch = self.doc.as_ref().map(|d| d.epoch);
+        zip_import::spawn_save(
+            preview.read.zip,
+            preview.version,
+            dir.to_path_buf(),
+            folder,
+            epoch,
+            self.tx.clone(),
+            notify,
+        );
+    }
+
     /// Asks for a target and starts the save. Returns false when no save started.
     fn save(&mut self, ctx: &egui::Context) -> bool {
         let Some(doc) = &self.doc else {
@@ -791,6 +877,7 @@ impl eframe::App for App {
         ui::location_dialog(self, &ctx);
         ui::marker_dialog(self, &ctx);
         ui::groups_window(self, &ctx);
+        ui::zip_preview_window(self, &ctx);
         ui::replace_image_prompt(self, &ctx);
         ui::unsaved_prompt(self, &ctx);
     }
@@ -3385,6 +3472,329 @@ mod import_tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
         assert!(app.error.is_none() && written);
         assert_eq!(shown(&app), Some([1, 2, 3, 255]));
+        unchanged_data(&app);
+    }
+}
+
+#[cfg(test)]
+mod zip_tests {
+    #![allow(clippy::expect_used)]
+
+    use std::io::{Cursor, Write};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use ad_io::config_xml::{self, GameVersion};
+    use ad_io::map_image;
+
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ad_app_zip_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    fn config_text(map_name: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<AutoDrive>\n    \
+             <version>3</version>\n    <MapName>{map_name}</MapName>\n    <waypoints>\n        \
+             <id>1</id>\n        <x>1.000</x>\n        <y>0.000</y>\n        <z>2.000</z>\n        \
+             <out>-1</out>\n        <incoming>-1</incoming>\n        <flags>0</flags>\n    \
+             </waypoints>\n</AutoDrive>\n"
+        )
+    }
+
+    fn open(app: &mut App, loaded: jobs::Loaded) {
+        app.tx
+            .send(JobResult::Loaded {
+                path: PathBuf::from("a.xml"),
+                result: Ok(Box::new(loaded)),
+            })
+            .expect("send");
+        app.poll_jobs();
+        app.doc.as_mut().expect("doc").map_image = None;
+    }
+
+    /// An app with a one-node config whose map is `map_name`, its image already taken.
+    fn app(map_name: &str) -> App {
+        let mut app = App::new(Settings::default());
+        let config = config_xml::load(config_text(map_name).as_bytes()).expect("loads");
+        open(&mut app, (config, map_image::blank(), None, None, None));
+        app
+    }
+
+    fn dem() -> Vec<u8> {
+        let img = image::ImageBuffer::<image::Luma<u16>, _>::from_pixel(4, 4, image::Luma([25600]));
+        let mut out = Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode");
+        out.into_inner()
+    }
+
+    /// An FS25 mod zip (descVersion 92) with titles en "Foo Bar", de "Foo".
+    fn zip_bytes(dds: &[u8], dem: Option<&[u8]>) -> Vec<u8> {
+        let desc = "<modDesc descVersion=\"92\"><maps><map id=\"M\" configFilename=\"maps/map.xml\">\
+                    <title><en>Foo Bar</en><de>Foo</de></title></map></maps></modDesc>";
+        let map = "<map imageFilename=\"maps/overview.png\"/>";
+        let mut entries: Vec<(&str, &[u8])> = vec![
+            ("modDesc.xml", desc.as_bytes()),
+            ("maps/map.xml", map.as_bytes()),
+            ("maps/overview.dds", dds),
+        ];
+        if let Some(dem) = dem {
+            entries.push(("maps/data/dem.png", dem));
+        }
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in entries {
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .expect("start");
+            writer.write_all(bytes).expect("write");
+        }
+        writer.finish().expect("finish").into_inner()
+    }
+
+    /// Waits for the next job result and applies it as a frame would.
+    fn finish(app: &mut App) {
+        let result = app.rx.recv_timeout(Duration::from_secs(120)).expect("job");
+        app.tx.send(result).expect("send");
+        app.poll_jobs();
+    }
+
+    /// Writes the zip to `dir` and reads it into `app`'s preview.
+    fn read(app: &mut App, dir: &Path, bytes: &[u8]) {
+        let path = dir.join("mod.zip");
+        std::fs::write(&path, bytes).expect("write");
+        app.start_zip_read(path, || {});
+        assert!(app.importing);
+        finish(app);
+        assert!(!app.importing);
+    }
+
+    fn import(app: &mut App, dir: &Path, confirmed: bool) {
+        app.zip_import(dir, confirmed, || {});
+        if app.importing {
+            finish(app);
+        }
+    }
+
+    fn unchanged_data(app: &App) {
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(!doc.is_dirty() && !doc.history.can_undo());
+        assert_eq!(doc.config.network.len(), 1);
+    }
+
+    fn fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml")
+    }
+
+    /// Needs the gitignored `pda_map_H.dds` and `dem.png` in the repo root; skipped when absent.
+    #[test]
+    fn the_fs25_sample_zip_previews_saves_and_attaches() {
+        let root = fixture().with_file_name("");
+        let (Ok(dds), Ok(dem)) = (
+            std::fs::read(root.join("pda_map_H.dds")),
+            std::fs::read(root.join("dem.png")),
+        ) else {
+            eprintln!("skipped: pda_map_H.dds or dem.png is absent");
+            return;
+        };
+        let dir = temp_dir("fs25");
+        let mut app = App::new(Settings::default());
+        let loaded = jobs::load_file(&fixture(), None, &Settings::default()).expect("fixture");
+        open(&mut app, loaded);
+        let nodes = app.doc.as_ref().expect("doc").config.network.len();
+        read(&mut app, &dir, &zip_bytes(&dds, Some(&dem)));
+        assert!(app.error.is_none(), "{:?}", app.error);
+        let preview = app.zip_preview.as_ref().expect("preview");
+        assert_eq!(preview.version, GameVersion::FS25);
+        assert_eq!(preview.name, "NF_Marsch_4fach");
+        assert_eq!(preview.read.centre.dimensions(), (256, 256));
+        assert!(preview.read.heightmap.is_some() && preview.read.zip.notice.is_none());
+        assert!(app.dialog_shown());
+        import(&mut app, &dir, false);
+        assert!(
+            app.error.is_none() && app.zip_preview.is_none(),
+            "{:?}",
+            app.error
+        );
+        let doc = app.doc.as_mut().expect("doc");
+        let attached = doc.map_image.take().expect("image attached");
+        let heightmap = doc.map.heightmap.clone().expect("heightmap attached");
+        assert!(doc.map.height_map_scale >= 1.0);
+        assert_eq!(doc.config.network.len(), nodes);
+        assert!(!doc.is_dirty() && !doc.history.can_undo());
+        // The heightmap is saved byte for byte; both are found again at the next load.
+        let name = "NF_Marsch_4fach";
+        let saved_dem = std::fs::read(map_image::heightmap_target(&dir, name)).expect("dem");
+        let image_path = map_image::find_map_image(name, Some(&dir), None).expect("image");
+        let height_path = map_image::find_heightmap(Some(name), Some(&dir), None).expect("hm");
+        let (image, notice) = map_image::load_map_image(&image_path);
+        let reloaded = map_image::load_heightmap(&height_path).expect("loads");
+        let next = jobs::load_file(&fixture(), Some(&dir), &Settings::default()).expect("load");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert_eq!(saved_dem, dem);
+        assert_eq!((image, notice), (attached.clone(), None));
+        assert_eq!(&reloaded, &*heightmap);
+        assert_eq!(next.1, attached);
+    }
+
+    /// A DDS whose two-pixel border is red and whose centre is green.
+    fn ringed() -> Vec<u8> {
+        jobs::test_dds_of(8, |x, y| {
+            if (2..6).contains(&x) && (2..6).contains(&y) {
+                [0, 255, 0, 255]
+            } else {
+                [255, 0, 0, 255]
+            }
+        })
+    }
+
+    #[test]
+    fn the_chosen_game_sets_the_crop() {
+        for (version, corner_red) in [(GameVersion::FS19, true), (GameVersion::FS25, false)] {
+            let dir = temp_dir(&format!("override_{version:?}"));
+            let mut app = app("M");
+            read(&mut app, &dir, &zip_bytes(&ringed(), None));
+            let preview = app.zip_preview.as_mut().expect("preview");
+            assert_eq!(preview.version, GameVersion::FS25);
+            preview.version = version;
+            import(&mut app, &dir, false);
+            let saved = map_image::load_map_image(&map_image::map_image_target(&dir, "M"));
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+            let (r, g) = (saved.0.rgba[0], saved.0.rgba[1]);
+            assert_eq!(r > g, corner_red, "{version:?}: {r} {g}");
+            assert!(app.error.is_none());
+            unchanged_data(&app);
+        }
+    }
+
+    #[test]
+    fn existing_files_are_replaced_only_after_yes() {
+        let dir = temp_dir("exists");
+        let targets = [
+            map_image::map_image_target(&dir, "M"),
+            map_image::heightmap_target(&dir, "M"),
+        ];
+        std::fs::create_dir_all(targets[0].parent().expect("dir")).expect("dir");
+        for target in &targets {
+            std::fs::write(target, b"old").expect("write");
+        }
+        let mut app = app("M");
+        let bytes = zip_bytes(&jobs::test_dds([1, 2, 3, 255]), Some(&dem()));
+        read(&mut app, &dir, &bytes);
+        import(&mut app, &dir, false);
+        let preview = app.zip_preview.as_mut().expect("still shown");
+        assert_eq!(preview.replace.as_deref(), Some(&targets[..]));
+        assert!(!app.importing);
+        // No: back to the preview, nothing written.
+        preview.replace = None;
+        assert!(
+            targets
+                .iter()
+                .all(|t| std::fs::read(t).expect("read") == b"old")
+        );
+        import(&mut app, &dir, false);
+        let preview = app.zip_preview.as_ref().expect("asks again");
+        assert!(preview.replace.is_some());
+        import(&mut app, &dir, true);
+        let after: Vec<_> = targets
+            .iter()
+            .map(|t| std::fs::read(t).expect("read"))
+            .collect();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(app.zip_preview.is_none() && app.error.is_none());
+        assert_eq!(after[1], dem());
+        assert_ne!(after[0], b"old");
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(doc.map_image.is_some() && doc.map.heightmap.is_some());
+        unchanged_data(&app);
+    }
+
+    #[test]
+    fn another_maps_name_or_no_document_saves_without_attaching() {
+        let dir = temp_dir("other");
+        let mut app = app("Other");
+        read(
+            &mut app,
+            &dir,
+            &zip_bytes(&jobs::test_dds([1, 2, 3, 255]), None),
+        );
+        let preview = app.zip_preview.as_mut().expect("preview");
+        assert_eq!(preview.name, "Other");
+        assert!(preview.read.zip.notice.is_some() && preview.read.heightmap.is_none());
+        preview.name = "Foo Bar".to_owned();
+        import(&mut app, &dir, false);
+        let folder = map_image::map_image_target(&dir, "Foo_Bar").with_file_name("");
+        let image = map_image::map_image_target(&dir, "Foo_Bar").is_file();
+        let height = map_image::heightmap_target(&dir, "Foo_Bar").exists();
+        assert!(image && !height && app.error.is_none());
+        let notice = app
+            .doc
+            .as_ref()
+            .and_then(|d| d.notice.clone())
+            .unwrap_or_default();
+        assert!(notice.contains("\"Foo_Bar\" saved"), "{notice}");
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(doc.map_image.is_none() && doc.map.heightmap.is_none());
+        unchanged_data(&app);
+        // Without a document the name is the English title.
+        std::fs::remove_dir_all(&folder).expect("clear");
+        let mut app = App::new(Settings::default());
+        let bytes = zip_bytes(&jobs::test_dds([1, 2, 3, 255]), Some(&dem()));
+        read(&mut app, &dir, &bytes);
+        assert_eq!(app.zip_preview.as_ref().expect("preview").name, "Foo Bar");
+        import(&mut app, &dir, false);
+        let both = map_image::map_image_target(&dir, "Foo_Bar").is_file()
+            && map_image::heightmap_target(&dir, "Foo_Bar").is_file();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(both && app.doc.is_none());
+        let message = app.error.clone().unwrap_or_default();
+        assert!(message.contains("\"Foo_Bar\" saved"), "{message}");
+    }
+
+    #[test]
+    fn results_for_a_replaced_document_are_ignored() {
+        let dir = temp_dir("replaced");
+        let bytes = zip_bytes(&jobs::test_dds([1, 2, 3, 255]), Some(&dem()));
+        let path = dir.join("mod.zip");
+        std::fs::write(&path, &bytes).expect("write");
+        // The read: another config opens before it ends.
+        let mut app = app("M");
+        app.start_zip_read(path, || {});
+        let result = app.rx.recv_timeout(Duration::from_secs(60)).expect("job");
+        let config = config_xml::load(config_text("M").as_bytes()).expect("loads");
+        open(&mut app, (config, map_image::blank(), None, None, None));
+        app.tx.send(result).expect("send");
+        app.poll_jobs();
+        assert!(app.zip_preview.is_none() && app.error.is_none() && !app.importing);
+        // The save: the files are written, but not attached to the new document.
+        read(&mut app, &dir, &bytes);
+        app.zip_import(&dir, false, || {});
+        let result = app.rx.recv_timeout(Duration::from_secs(60)).expect("job");
+        let config = config_xml::load(config_text("M").as_bytes()).expect("loads");
+        open(&mut app, (config, map_image::blank(), None, None, None));
+        app.tx.send(result).expect("send");
+        app.poll_jobs();
+        let saved = map_image::map_image_target(&dir, "M").is_file();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(saved && app.error.is_none() && !app.importing);
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(doc.map_image.is_none() && doc.map.heightmap.is_none());
+    }
+
+    #[test]
+    fn a_bad_zip_shows_an_error_and_changes_nothing() {
+        let dir = temp_dir("bad");
+        let mut app = app("M");
+        read(&mut app, &dir, b"not a zip");
+        let written = dir.join("mapImages").exists();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(app.zip_preview.is_none() && !written);
+        assert!(app.error.as_deref().is_some_and(|e| e.contains("mod.zip")));
+        assert!(app.doc.as_ref().expect("doc").map_image.is_none());
         unchanged_data(&app);
     }
 }

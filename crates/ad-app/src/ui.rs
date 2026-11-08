@@ -53,14 +53,24 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             {
                 app.save(ctx);
             }
-            let can_import = !app.loading && !app.importing && app.doc.is_some();
+            let can_import = !app.loading && !app.importing;
+            let has_doc = app.doc.is_some();
             ui.add_enabled_ui(can_import, |ui| {
                 ui.menu_button("Import", |ui| {
-                    if ui.button("DDS for FS19…").clicked() {
+                    if ui
+                        .add_enabled(has_doc, egui::Button::new("DDS for FS19…"))
+                        .clicked()
+                    {
                         app.import(GameVersion::FS19, ctx);
                     }
-                    if ui.button("DDS for FS22/FS25…").clicked() {
+                    if ui
+                        .add_enabled(has_doc, egui::Button::new("DDS for FS22/FS25…"))
+                        .clicked()
+                    {
                         app.import(GameVersion::FS25, ctx);
+                    }
+                    if ui.button("Map mod zip…").clicked() {
+                        app.import_zip(ctx);
                     }
                 });
             });
@@ -685,6 +695,131 @@ pub(crate) fn replace_image_prompt(app: &mut App, ctx: &egui::Context) {
     if let Some(replace) = answer {
         let ctx = ctx.clone();
         app.answer_replace(replace, move || ctx.request_repaint());
+    }
+}
+
+/// What the zip preview's buttons ask for.
+enum ZipChoice {
+    Import { confirmed: bool },
+    KeepExisting,
+    Cancel,
+}
+
+/// The map mod zip preview: map and heightmap previews, the game (whose crop Import
+/// uses), the map name, Import and Cancel. When Import would replace files, it asks first;
+/// No returns to the preview. Escape or a click beside it cancels.
+pub(crate) fn zip_preview_window(app: &mut App, ctx: &egui::Context) {
+    let Some(preview) = &mut app.zip_preview else {
+        return;
+    };
+    let read = &preview.read;
+    let textures = preview.textures.get_or_insert_with(|| {
+        let load = |name: &str, image: &image::RgbaImage| {
+            let size = [image.width() as usize, image.height() as usize];
+            let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+            ctx.load_texture(name, color, egui::TextureOptions::LINEAR)
+        };
+        crate::zip_import::PreviewTextures {
+            whole: load("zip_preview_whole", &read.whole),
+            centre: load("zip_preview_centre", &read.centre),
+            heightmap: read
+                .heightmap
+                .as_ref()
+                .map(|h| load("zip_preview_heightmap", h)),
+        }
+    });
+    let mut choice = None;
+    let side = egui::vec2(256.0, 256.0);
+    let modal = egui::Modal::new(egui::Id::unique("zip_preview")).show(ctx, |ui| {
+        ui.heading("Import map mod zip");
+        if let Some(existing) = &preview.replace {
+            ui.label("Replace the existing files?");
+            for path in existing {
+                ui.label(path.display().to_string());
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Yes").clicked() {
+                    choice = Some(ZipChoice::Import { confirmed: true });
+                }
+                if ui.button("No").clicked() {
+                    choice = Some(ZipChoice::KeepExisting);
+                }
+            });
+            return;
+        }
+        ui.horizontal(|ui| {
+            let map = if preview.version == GameVersion::FS19 {
+                &textures.whole
+            } else {
+                &textures.centre
+            };
+            ui.add(egui::Image::new((map.id(), side)));
+            match &textures.heightmap {
+                Some(h) => {
+                    ui.add(egui::Image::new((h.id(), side)));
+                }
+                None => {
+                    ui.allocate_ui(side, |ui| ui.label("No heightmap"));
+                }
+            }
+        });
+        if let Some(notice) = &read.zip.notice {
+            ui.colored_label(ui.visuals().warn_fg_color, notice);
+        }
+        ui.horizontal(|ui| {
+            ui.label("Game");
+            for (version, label) in [
+                (GameVersion::FS19, "FS19"),
+                (GameVersion::FS22, "FS22"),
+                (GameVersion::FS25, "FS25"),
+            ] {
+                ui.selectable_value(&mut preview.version, version, label);
+            }
+            if preview.version != read.zip.version {
+                ui.label(format!("(detected {:?})", read.zip.version));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Map name");
+            ui.text_edit_singleline(&mut preview.name);
+        });
+        let folder = ad_io::mod_zip::folder_name(&preview.name);
+        match &folder {
+            Ok(folder) => ui.label(format!("Saved as mapImages/{folder}/{folder}.png")),
+            Err(note) => ui.colored_label(ui.visuals().error_fg_color, *note),
+        };
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(folder.is_ok(), egui::Button::new("Import"))
+                .clicked()
+            {
+                choice = Some(ZipChoice::Import { confirmed: false });
+            }
+            if ui.button("Cancel").clicked() {
+                choice = Some(ZipChoice::Cancel);
+            }
+        });
+    });
+    if modal.should_close() && choice.is_none() {
+        choice = Some(if preview.replace.is_some() {
+            ZipChoice::KeepExisting
+        } else {
+            ZipChoice::Cancel
+        });
+    }
+    match choice {
+        Some(ZipChoice::Import { confirmed }) => match crate::jobs::exe_dir() {
+            Some(dir) => {
+                let ctx = ctx.clone();
+                app.zip_import(&dir, confirmed, move || ctx.request_repaint());
+            }
+            None => {
+                app.error = Some("Cannot import: the program folder is unknown".to_owned());
+            }
+        },
+        Some(ZipChoice::KeepExisting) => preview.replace = None,
+        Some(ZipChoice::Cancel) => app.zip_preview = None,
+        None => {}
     }
 }
 

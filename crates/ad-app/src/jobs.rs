@@ -16,6 +16,7 @@ use ad_io::settings::Settings;
 use ad_io::vehicles::{self, VehiclesFile};
 
 use crate::document::Document;
+use crate::zip_import;
 
 /// A heightmap with its calibrated height scale.
 pub type CalibratedHeightmap = (Arc<Heightmap>, f64);
@@ -63,6 +64,17 @@ pub enum JobResult {
     },
     /// The write of an imported map image over an existing one.
     ImageSaved { result: Result<(), String> },
+    /// A map mod zip read for the preview; `epoch` is the open document's, if any.
+    ZipRead {
+        epoch: Option<u64>,
+        result: Result<Box<zip_import::ZipRead>, String>,
+    },
+    /// The map mod images saved into `mapImages/<folder>/`.
+    ZipSaved {
+        epoch: Option<u64>,
+        folder: String,
+        result: Result<Box<zip_import::ZipSaved>, String>,
+    },
 }
 
 /// The folder of the running executable, where `mapImages` is looked up first (AD-14).
@@ -401,19 +413,56 @@ pub fn apply_result(
             }
         }
         JobResult::ImageSaved { result } => result.err(),
+        // Taken by `App::poll_jobs` before this is called.
+        JobResult::ZipRead { .. } => None,
+        // The files are saved either way; they attach only to the document they were
+        // imported for, and only when its map name is the folder name.
+        JobResult::ZipSaved {
+            epoch,
+            folder,
+            result,
+        } => match result {
+            Ok(saved) => {
+                let same = |d: &Document| {
+                    Some(d.epoch) == epoch && d.config.map_name() == Some(folder.as_str())
+                };
+                match doc.as_mut() {
+                    Some(d) if same(d) => zip_import::attach(d, *saved),
+                    // Saved for another map: say where, so the import is not silent.
+                    Some(d) => {
+                        d.notice = Some(format!(
+                            "Map images for \"{folder}\" saved; they load with a config of that map"
+                        ));
+                    }
+                    None => {
+                        return Some(format!(
+                            "Map images for \"{folder}\" saved; they load with a config of that map"
+                        ));
+                    }
+                }
+                None
+            }
+            Err(message) => Some(message),
+        },
     }
 }
 
 /// An 8x8 A8R8G8B8 DDS filled with `rgba`.
 #[cfg(test)]
-pub(crate) fn test_dds([r, g, b, a]: [u8; 4]) -> Vec<u8> {
+pub(crate) fn test_dds(rgba: [u8; 4]) -> Vec<u8> {
+    test_dds_of(8, |_, _| rgba)
+}
+
+/// A `side` x `side` A8R8G8B8 DDS whose pixel (x, y) is `pixel(x, y)` as RGBA.
+#[cfg(test)]
+pub(crate) fn test_dds_of(side: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
     let mut file = Vec::new();
     let mut put = |v: u32| file.extend_from_slice(&v.to_le_bytes());
     put(u32::from_le_bytes(*b"DDS "));
     put(124);
     put(0x1007); // CAPS | HEIGHT | WIDTH | PIXELFORMAT
-    put(8);
-    put(8);
+    put(side);
+    put(side);
     (0..14).for_each(|_| put(0)); // pitch, depth, mipmaps, reserved
     put(32);
     put(0x41); // RGB | ALPHAPIXELS
@@ -424,7 +473,12 @@ pub(crate) fn test_dds([r, g, b, a]: [u8; 4]) -> Vec<u8> {
         .for_each(&mut put);
     put(0x1000); // caps: TEXTURE
     (0..4).for_each(|_| put(0));
-    (0..64).for_each(|_| file.extend_from_slice(&[b, g, r, a]));
+    for y in 0..side {
+        for x in 0..side {
+            let [r, g, b, a] = pixel(x, y);
+            file.extend_from_slice(&[b, g, r, a]);
+        }
+    }
     file
 }
 
