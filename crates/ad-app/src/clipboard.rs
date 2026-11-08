@@ -201,6 +201,7 @@ mod tests {
             node: b,
             name: "Feld".into(),
             group: "Felder".into(),
+            parked_vehicles: Vec::new(),
         });
         (n, ids, e)
     }
@@ -321,6 +322,7 @@ mod tests {
                 node,
                 name: name.into(),
                 group: "All".into(),
+                parked_vehicles: Vec::new(),
             });
         }
         let clip = copy(&n, &[a, b].into_iter().collect()).expect("clip");

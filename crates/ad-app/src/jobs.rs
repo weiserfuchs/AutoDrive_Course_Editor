@@ -12,20 +12,26 @@ use ad_core::map_context::MapContext;
 use ad_io::config_xml::{self, LoadedConfig};
 use ad_io::map_image::{self, MapImage};
 use ad_io::settings::Settings;
+use ad_io::vehicles::{self, VehiclesFile};
 
 use crate::document::Document;
 
 /// A heightmap with its calibrated height scale.
 pub type CalibratedHeightmap = (Arc<Heightmap>, f64);
 
-/// A parsed config with its map image, the calibrated heightmap if one was found, and the
-/// notice about image and heightmap, if any.
+/// A parsed config with its map image, the calibrated heightmap if one was found, the
+/// notice about image, heightmap and `vehicles.xml`, if any, and the `vehicles.xml` beside
+/// the config, if it was read.
 pub type Loaded = (
     LoadedConfig,
     MapImage,
     Option<CalibratedHeightmap>,
     Option<String>,
+    Option<Arc<VehiclesFile>>,
 );
+
+/// A `vehicles.xml` to patch after the config save, and where it is.
+pub type VehiclesSave = (Arc<VehiclesFile>, PathBuf);
 
 pub enum JobResult {
     Loaded {
@@ -37,6 +43,8 @@ pub enum JobResult {
         point: SavePoint,
         target: PathBuf,
         result: Result<(), String>,
+        /// Why `vehicles.xml` was not saved after the config was.
+        warning: Option<String>,
     },
 }
 
@@ -49,8 +57,9 @@ pub fn load_file(
     settings: &Settings,
 ) -> Result<Loaded, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-    let config =
+    let mut config =
         config_xml::load(&bytes).map_err(|e| format!("Cannot load {}: {e}", path.display()))?;
+    let (vehicles, vehicles_notice) = load_vehicles(path, &mut config);
     let found = config
         .map_name()
         .and_then(|name| map_image::find_map_image(name, exe_dir, path.parent()));
@@ -59,14 +68,59 @@ pub fn load_file(
         None => (map_image::blank(), None),
     };
     let (heightmap, height_notice) = load_heightmap(&config, exe_dir, path.parent(), settings);
-    let notice = match (notice, height_notice) {
-        (Some(a), Some(b)) => Some(format!(
-            "{a}
-{b}"
-        )),
-        (a, b) => a.or(b),
-    };
-    Ok((config, image, heightmap, notice))
+    let notices: Vec<String> = [notice, height_notice, vehicles_notice]
+        .into_iter()
+        .flatten()
+        .collect();
+    let notice = (!notices.is_empty()).then(|| notices.join("\n"));
+    Ok((config, image, heightmap, notice, vehicles))
+}
+
+/// Reads the `vehicles.xml` beside the config into its markers (AD-17). A missing file
+/// gives none; one that cannot be read gives none and a notice, so it is never written.
+fn load_vehicles(
+    config_path: &Path,
+    config: &mut LoadedConfig,
+) -> (Option<Arc<VehiclesFile>>, Option<String>) {
+    let path = config_path.with_file_name("vehicles.xml");
+    if !path.is_file() {
+        return (None, None);
+    }
+    let result = std::fs::read(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| {
+            vehicles::load(&bytes, config.game_version(), &mut config.network)
+                .map_err(|e| e.to_string())
+        });
+    match result {
+        Ok(file) => (Some(Arc::new(file)), None),
+        Err(e) => {
+            tracing::warn!("cannot read {}: {e}", path.display());
+            (
+                None,
+                Some(format!(
+                    "{} could not be read ({e}); parking is not shown and the file will not be saved",
+                    path.display()
+                )),
+            )
+        }
+    }
+}
+
+/// Whether `a` and `b` name the same file: compared canonicalised when both exist.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// The `vehicles.xml` a save to `target` patches: only that of the opened config, and only
+/// when the save goes to the opened path.
+pub fn vehicles_to_patch(doc: &Document, target: &Path) -> Option<VehiclesSave> {
+    let file = doc.vehicles.clone()?;
+    same_file(target, &doc.opened_path)
+        .then(|| (file, doc.opened_path.with_file_name("vehicles.xml")))
 }
 
 /// Finds and decodes the heightmap; a missing or broken one gives no heightmap and a notice.
@@ -120,9 +174,11 @@ pub fn spawn_load(
     });
 }
 
-/// Saves a snapshot on a background thread, then calls `notify`.
+/// Saves a snapshot on a background thread, then patches `vehicles` if the config save
+/// succeeded and the file is still there, then calls `notify`.
 pub fn spawn_save(
     snapshot: LoadedConfig,
+    vehicles: Option<VehiclesSave>,
     epoch: u64,
     point: SavePoint,
     target: PathBuf,
@@ -137,11 +193,29 @@ pub fn spawn_save(
             Ok(()) => tracing::info!("saved {}", target.display()),
             Err(e) => tracing::warn!("{e}"),
         }
+        let warning = match (&result, vehicles) {
+            (Ok(()), Some((file, path))) if path.is_file() => {
+                match vehicles::save_to(&file, &snapshot.network, &path) {
+                    Ok(()) => {
+                        tracing::info!("saved {}", path.display());
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!("{e}");
+                        Some(format!(
+                            "The config was saved, but vehicles.xml was not: {e}"
+                        ))
+                    }
+                }
+            }
+            _ => None,
+        };
         let _ = tx.send(JobResult::Saved {
             epoch,
             point,
             target,
             result,
+            warning,
         });
         notify();
     });
@@ -156,7 +230,7 @@ pub fn replace_document(
     path: PathBuf,
     settings: &Settings,
 ) {
-    let (config, image, heightmap, notice) = loaded;
+    let (config, image, heightmap, notice, vehicles) = loaded;
     let map_settings = config
         .map_name()
         .and_then(|name| settings.maps.get(name))
@@ -173,7 +247,7 @@ pub fn replace_document(
         map.height_map_scale = height_map_scale;
     }
     *epoch_counter += 1;
-    *doc = Some(Document::new(
+    let mut new = Document::new(
         config,
         map,
         image,
@@ -181,7 +255,9 @@ pub fn replace_document(
         path,
         *epoch_counter,
         settings.global.history_cap,
-    ));
+    );
+    new.vehicles = vehicles;
+    *doc = Some(new);
 }
 
 /// Applies a finished job on the UI thread. Returns an error message to show, if any.
@@ -205,13 +281,14 @@ pub fn apply_result(
             point,
             target,
             result,
+            warning,
         } => match result {
             Ok(()) => {
                 if let Some(d) = doc.as_mut().filter(|d| d.epoch == epoch) {
                     d.history.mark_saved_at(point);
                     d.path = target;
                 }
-                None
+                warning
             }
             Err(message) => Some(message),
         },
@@ -253,7 +330,7 @@ mod tests {
     }
 
     fn loaded_config(config: LoadedConfig) -> Loaded {
-        (config, map_image::blank(), None, None)
+        (config, map_image::blank(), None, None, None)
     }
 
     fn config() -> LoadedConfig {
@@ -283,6 +360,7 @@ mod tests {
             point,
             target: PathBuf::from("target.xml"),
             result,
+            warning: None,
         }
     }
 
@@ -546,7 +624,7 @@ mod tests {
         std::fs::write(&config, named(&inline_text("1.000,2.500"))).expect("write");
         let loaded = load_file(&config, None, &settings(500));
         std::fs::remove_dir_all(&dir).expect("cleanup");
-        let (_, image, _, notice) = loaded.expect("loads");
+        let (_, image, _, notice, _) = loaded.expect("loads");
         assert_ne!(image, map_image::blank());
         assert_eq!(&image.rgba[..4], &[1, 2, 3, 255]);
         assert!(notice.expect("notice").contains("Tiny.png"));
@@ -561,7 +639,7 @@ mod tests {
             inline_text("1.000,2.500"),
         ] {
             std::fs::write(&config, text).expect("write");
-            let (_, image, heightmap, notice) =
+            let (_, image, heightmap, notice, _) =
                 load_file(&config, None, &settings(500)).expect("loads");
             assert_eq!((image, heightmap), (map_image::blank(), None));
             assert!(
@@ -640,9 +718,146 @@ mod tests {
         std::fs::write(&config, inline_text("1.000,2.500")).expect("write");
         let loaded = load_file(&config, None, &settings(500));
         std::fs::remove_dir_all(&dir).expect("cleanup");
-        let (_, _, heightmap, notice) = loaded.expect("loads");
+        let (_, _, heightmap, notice, _) = loaded.expect("loads");
         assert!(heightmap.is_none());
         assert!(notice.expect("notice").contains("terrain.heightmap.png"));
+    }
+
+    /// The FS25 inline config with markers 1 (node 1) and 2 (node 2).
+    fn with_markers() -> String {
+        inline_text("1.000,2.500").replace(
+            "</AutoDrive>",
+            "    <mapmarker><mm1><id>1</id><name>A</name><group>All</group></mm1>\
+             <mm2><id>2</id><name>B</name><group>All</group></mm2></mapmarker>\n</AutoDrive>",
+        )
+    }
+
+    const VEHICLES: &str = "<vehicles>\r\n    <vehicle uniqueId=\"v1\">\r\n        \
+        <AutoDrive parkDestination=\"2\" firstMarker=\"2\" mode=\"1\"/>\r\n    </vehicle>\r\n</vehicles>\r\n";
+
+    /// A folder with the config and, if given, `vehicles.xml`; opened through `load_file`.
+    fn open_in(name: &str, vehicles: Option<&str>) -> (PathBuf, Document, Option<String>) {
+        let dir = temp_dir(name);
+        let config = dir.join("AutoDrive_config.xml");
+        std::fs::write(&config, with_markers()).expect("write");
+        if let Some(text) = vehicles {
+            std::fs::write(dir.join("vehicles.xml"), text).expect("write");
+        }
+        let loaded = load_file(&config, None, &settings(500)).expect("loads");
+        let notice = loaded.3.clone();
+        let (mut doc, mut counter) = (None, 0);
+        replace_document(&mut doc, &mut counter, loaded, config, &settings(500));
+        (dir, doc.expect("doc"), notice)
+    }
+
+    /// Runs a save of `doc` to `target` as `App::save` does and applies its result.
+    fn save_as(doc: Document, target: &Path) -> (Document, Option<String>) {
+        let (tx, rx) = mpsc::channel();
+        spawn_save(
+            doc.config.clone(),
+            vehicles_to_patch(&doc, target),
+            doc.epoch,
+            doc.history.save_point(),
+            target.to_path_buf(),
+            tx,
+            || {},
+        );
+        let result = rx.recv_timeout(Duration::from_secs(30)).expect("saved");
+        let (mut doc, mut counter) = (Some(doc), 1);
+        let message = apply_result(&mut doc, &mut counter, &settings(500), result);
+        (doc.expect("doc"), message)
+    }
+
+    fn remove_first_marker(doc: &mut Document) {
+        let node = doc.config.network.markers()[0].node;
+        let edit = ad_core::command::EditMarker::new(node, None);
+        doc.apply(Transaction::new(vec![Command::EditMarker(edit)]))
+            .expect("edit");
+    }
+
+    #[test]
+    fn vehicles_are_patched_only_by_a_save_to_the_opened_path() {
+        let (dir, mut doc, notice) = open_in("vehicles_save", Some(VEHICLES));
+        assert!(notice.is_none_or(|n| !n.contains("vehicles.xml")));
+        assert!(doc.vehicles.is_some());
+        assert_eq!(doc.config.network.markers()[1].parked_vehicles, ["v1"]);
+        remove_first_marker(&mut doc);
+        let vehicles = dir.join("vehicles.xml");
+        // Save as: the config goes elsewhere and vehicles.xml stays.
+        let other = dir.join("other.xml");
+        let (doc, message) = save_as(doc, &other);
+        assert_eq!(message, None);
+        assert!(other.is_file());
+        assert_eq!(std::fs::read_to_string(&vehicles).expect("read"), VEHICLES);
+        // A later save to the new path is still not to the opened config.
+        let (doc, _) = save_as(doc, &other);
+        assert_eq!(std::fs::read_to_string(&vehicles).expect("read"), VEHICLES);
+        // Save to the opened path, spelled differently: patched.
+        let opened = dir.join(".").join("AutoDrive_config.xml");
+        let (doc, message) = save_as(doc, &opened);
+        let saved = std::fs::read_to_string(&vehicles).expect("read");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert_eq!(message, None);
+        assert!(!doc.is_dirty());
+        assert_eq!(
+            saved,
+            VEHICLES.replace(
+                "parkDestination=\"2\" firstMarker=\"2\"",
+                "parkDestination=\"1\" firstMarker=\"1\""
+            )
+        );
+    }
+
+    #[test]
+    fn no_vehicles_file_loads_and_saves_as_before() {
+        let (dir, mut doc, notice) = open_in("vehicles_none", None);
+        assert!(notice.is_none_or(|n| !n.contains("vehicles.xml")));
+        assert!(doc.vehicles.is_none());
+        remove_first_marker(&mut doc);
+        let config = dir.join("AutoDrive_config.xml");
+        let (doc, message) = save_as(doc, &config);
+        let written = dir.join("vehicles.xml").exists();
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert_eq!(message, None);
+        assert!(!doc.is_dirty() && !written);
+    }
+
+    #[test]
+    fn broken_vehicles_file_gives_a_notice_and_is_never_written() {
+        let broken = VEHICLES.replace("</vehicle>", "");
+        let (dir, mut doc, notice) = open_in("vehicles_broken", Some(&broken));
+        let notice = notice.expect("notice");
+        assert!(notice.contains("vehicles.xml"), "{notice}");
+        assert_eq!(doc.notice.as_deref(), Some(notice.as_str()));
+        assert!(doc.vehicles.is_none());
+        assert!(doc.config.network.markers()[1].parked_vehicles.is_empty());
+        remove_first_marker(&mut doc);
+        let config = dir.join("AutoDrive_config.xml");
+        let (_, message) = save_as(doc, &config);
+        let after = std::fs::read_to_string(dir.join("vehicles.xml")).expect("read");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert_eq!(message, None);
+        assert_eq!(after, broken);
+    }
+
+    #[test]
+    fn a_vehicles_warning_is_shown_and_the_config_save_still_counts() {
+        let (mut doc, mut counter) = (None, 0);
+        loaded(&mut doc, &mut counter);
+        let d = doc.as_mut().expect("doc");
+        d.apply(edit()).expect("edit");
+        let result = JobResult::Saved {
+            epoch: d.epoch,
+            point: d.history.save_point(),
+            target: PathBuf::from("target.xml"),
+            result: Ok(()),
+            warning: Some("vehicles.xml was not saved".to_owned()),
+        };
+        assert_eq!(
+            apply_result(&mut doc, &mut counter, &settings(500), result),
+            Some("vehicles.xml was not saved".to_owned())
+        );
+        assert!(!doc.expect("doc").is_dirty());
     }
 
     /// Needs the gitignored `terrain.heightmap.png` beside the fixture.

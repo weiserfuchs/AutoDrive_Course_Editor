@@ -67,10 +67,10 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] model -- `parked_vehicles` through set, replace, remove, node delete and their reverts; tests
-- [ ] `vehicles.rs` -- load, attach, patch; tests for every matrix row up to FS19 / FS22
-- [ ] app wiring -- load, save rule, notices; tests for Save as, No file, Broken file
-- [ ] parking icon -- drawn for parked markers; frame-time test still green
+- [x] model -- `parked_vehicles` through set, replace, remove, node delete and their reverts; tests
+- [x] `vehicles.rs` -- load, attach, patch; tests for every matrix row up to FS19 / FS22
+- [x] app wiring -- load, save rule, notices; tests for Save as, No file, Broken file
+- [x] parking icon -- drawn for parked markers; frame-time test still green
 
 **Acceptance Criteria:**
 - Given copies of both fixtures in one folder, when the user opens the config, deletes a marker before a parking one and saves, then `vehicles.xml` differs from the original only in the shifted marker references.
@@ -84,6 +84,26 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **Model:** `Marker.parked_vehicles: Vec<String>`. `set_marker` copies the old list into a replacing marker; a new marker starts empty. Remove, node delete and all reverts already move whole `Marker` values, so they keep the list unchanged. `Network::park_vehicle(index, id)` is the load-time setter, like `push_marker`. Paste builds markers through `EditMarker` on new nodes, so a paste has none.
+- **`ad-io::vehicles`:** one `load(bytes, version, &mut Network)` parses, then attaches. The network is touched only after the parse succeeded. A hand-written attribute scanner over the raw start tag, checked against quick-xml's tag bytes, records for each reference attribute the value range and the attribute range with its leading whitespace. The target is `Vehicle(id)` for `parkDestination`, `Node(id)` for first/second, or `Verbatim` for a value that is out of range or not a number (and for a park value of a vehicle without an id). A Verbatim value is never rewritten. An element is a vehicle's AutoDrive element by its parent chain: FS19 `vehicle/FS19_AutoDrive/AutoDriveVehicleData`, otherwise `vehicle/AutoDrive`. The id is `uniqueId` for FS25 and `id` otherwise. `patch` counts positions over markers whose node exists (as `mapmarker_block` writes them). It replaces only values that differ from the loaded number, so unchanged values stay byte-identical even with odd spacing. `save_to` writes atomically (AD-6).
+- **App:** `Loaded` gains `Option<Arc<VehiclesFile>>`; `load_file` reads `vehicles.xml` beside the config. A missing file gives none. An unreadable file gives none plus a notice in the document notice, so it is never written. `Document` holds `vehicles` and `opened_path`; a Save As moves `path` but not `opened_path`. `vehicles_to_patch` returns the file only when the target equals `opened_path` (canonicalised when both exist). `spawn_save` writes `vehicles.xml` only after the config write succeeded and only if the file is still there. A vehicles error comes back as `JobResult::Saved { warning }`: the document is marked saved, the message is shown, and a pending close is cancelled so the message is seen.
+- **Icon:** the parking icon (20 px) is centred on the node of each marker with parked vehicles, as Java `NodeDrawThread` 120-122 does. It is drawn after the height warning and before the marker icons. Java's F3 toggle is not ported. `frame_time` now also loads the fixture's `vehicles.xml` (read only), so the icons are part of the timing.
+- **Not done:** the base for patching is the bytes read at load; a `vehicles.xml` that the game rewrote while the editor was open is overwritten from that base (the config save has the same property).
+- **Tests:**
+  - `ad-core`: `parked_vehicles_survive_replace_remove_and_reverts` and `parked_vehicles_survive_marker_edits_node_delete_and_undo`.
+  - `ad-io` vehicles: `fs22_sample_parks_patches_and_keeps_the_rest`, `fs19_sample_uses_its_own_element`, `fs25_reads_unique_id_and_a_new_park_target_adds_no_attribute` and `broken_file_is_an_error_and_leaves_the_network`.
+  - `ad-io/tests/vehicles_roundtrip.rs` (temp copies of both fixtures):
+    - Load fixture: 223 markers, parking on 161/163/164/165/167/178, 50 first/second references.
+    - Save unchanged: byte-identical.
+    - Delete before (marker 100): only the reference values differ, and they differ as expected.
+    - Delete referenced (161 and 180): one park removed, its element becomes `<AutoDrive/>`, the five 180s become 1, and later references shift by two.
+    - Undo: byte-identical.
+    - Node delete: the parked vehicle comes back after undo.
+  - `ad-app` jobs: `vehicles_are_patched_only_by_a_save_to_the_opened_path` (Save as, a later save to the new path, a save to the opened path spelled differently), `no_vehicles_file_loads_and_saves_as_before`, `broken_vehicles_file_gives_a_notice_and_is_never_written` and `a_vehicles_warning_is_shown_and_the_config_save_still_counts`.
+  - `ad-app` main: `a_vehicles_warning_keeps_the_window_but_the_save_counts`.
+  - `ad-app` view: `parking_icon_sits_on_the_node_of_a_marker_with_parked_vehicles`.
+- **Verification (2026-11-08):** `cargo fmt --all --check` passes and `cargo clippy --workspace --all-targets -- -D warnings` is clean. `cargo test --workspace` passes: ad-app 306 (2 ignored), ad-core 66 plus 4, ad-io 44, golden_edited 6, golden_roundtrip 1 and vehicles_roundtrip 6. `frame_time` (release): every case is under 16 ms. The worst best-round max was 10.3 ms (rotate: min zoom, whole network selected); static min zoom with everything selected was 7.8 ms, and drag at min zoom with the whole network selected was 6.8 ms. The root `AutoDrive_config.xml` and `vehicles.xml` are unchanged.
 
 ## Plan Change Log
 

@@ -1056,6 +1056,30 @@ impl MapView {
                 painter.add(egui::Shape::mesh(mesh));
             }
         }
+        // A marker with parked vehicles shows the parking icon on its node (Java
+        // `NodeDrawThread` 120-122).
+        if let Some(tex) = self.icons.as_ref().and_then(|i| i.parking.as_ref()) {
+            let mut mesh = egui::Mesh::with_texture(tex.id());
+            for m in net
+                .markers()
+                .iter()
+                .filter(|m| !m.parked_vehicles.is_empty())
+            {
+                if let Some(n) = net.node(m.node)
+                    && let (x, z) = place(m.node, n, preview)
+                    && x >= x0 - pad
+                    && x <= x1 + pad
+                    && z >= z0 - pad
+                    && z <= z1 + pad
+                {
+                    let (sx, sy) = to_screen(x, z);
+                    add_icon(&mut mesh, (sx as f32, sy as f32), icons::SMALL_PX);
+                }
+            }
+            if !mesh.is_empty() {
+                painter.add(egui::Shape::mesh(mesh));
+            }
+        }
         if self.show_marker_icons || self.show_marker_names || hovered.is_some() {
             let marker_tex = self
                 .icons
@@ -1524,6 +1548,35 @@ mod tests {
         view.show_marker_icons = false;
         let (icons, texts) = overlay_shapes(&frame(&ctx, &mut view, &net, g, size, None));
         assert_eq!((icons.len(), texts.len()), (0, 1));
+    }
+
+    #[test]
+    fn parking_icon_sits_on_the_node_of_a_marker_with_parked_vehicles() {
+        let ctx = egui::Context::default();
+        let g = MapGeometry::new(1.0);
+        let size = egui::vec2(1024.0, 1024.0);
+        let mut net = Network::new();
+        let parked = net.add_node(100.0, 5.0, 200.0, NodeFlag::REGULAR);
+        let empty = net.add_node(150.0, 5.0, 200.0, NodeFlag::REGULAR);
+        for (id, name) in [(parked, "Hof"), (empty, "Feld")] {
+            net.set_marker(id, name.to_owned(), "All".to_owned())
+                .expect("marker");
+        }
+        let mut view = view_at(&ctx, &net, g, 1.0);
+        view.show_marker_icons = false;
+        view.show_marker_names = false;
+        view.transform.as_mut().expect("set").center = (1124.0, 1224.0);
+        let (icons, _) = overlay_shapes(&frame(&ctx, &mut view, &net, g, size, None));
+        assert!(icons.is_empty());
+        assert!(net.park_vehicle(0, "v1".to_owned()));
+        let t = view.transform.expect("set");
+        let (mx, my) = g.to_map(100.0, 200.0);
+        let (sx, sy) = t.map_to_screen(mx, my);
+        let (icons, _) = overlay_shapes(&frame(&ctx, &mut view, &net, g, size, None));
+        assert_eq!(icons.len(), 1);
+        assert_eq!(icons[0].size(), egui::vec2(20.0, 20.0));
+        let c = icons[0].center();
+        assert!((c.x - sx as f32).abs() < 1e-3 && (c.y - sy as f32).abs() < 1e-3);
     }
 
     /// Two nodes on a view at zoom 10 (ns 11): `a` at the panel centre (512, 512), `b` 200 px right.
@@ -2769,7 +2822,12 @@ mod tests {
             "/../../AutoDrive_config.xml"
         ))
         .expect("fixture");
-        let cfg = ad_io::config_xml::load(&bytes).expect("loads");
+        let mut cfg = ad_io::config_xml::load(&bytes).expect("loads");
+        // The fixture's vehicles.xml, read only, so the parking icons are drawn too.
+        let vehicles = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../vehicles.xml"))
+            .expect("vehicles fixture");
+        ad_io::vehicles::load(&vehicles, cfg.game_version(), &mut cfg.network)
+            .expect("vehicles load");
         let net = &cfg.network;
         let geometry = MapGeometry::new(2.0);
         let map = ad_core::map_context::MapContext::new(None, 2, 2.0, (2.0, 2.0));
