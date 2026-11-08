@@ -25,6 +25,10 @@ const SELECT_DASH_PX: f32 = 4.0;
 const SELECTED_MARK_PX: f32 = 3.0;
 /// Extra screen px around a selection mark that still grabs it, since the mark is tiny.
 const MARK_HIT_SLACK_PX: f64 = 2.0;
+/// Screen px the pointer moves before the lasso records another point.
+const LASSO_STEP_PX: f64 = 2.0;
+/// Opacity of the lasso's closing line back to its start (Java).
+const LASSO_CLOSING_ALPHA: f32 = 0.25;
 
 /// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
 /// centre is in map px. The panel is the screen rectangle the map is shown in.
@@ -152,10 +156,13 @@ pub enum DragEvent {
 }
 
 /// A secondary-button selection gesture on the view (AD-15), whichever tool is active.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SelectEvent {
     /// A right drag released; `a` is the press and `b` the release position, in map px.
     Rect { a: MapPx, b: MapPx },
+    /// A right drag in lasso mode released; the pointer path from press to release, in
+    /// map px. The outline closes from the last point back to the first.
+    Lasso { points: Vec<MapPx> },
     /// A right click, on `node` if one was under it.
     Click { node: Option<NodeId> },
 }
@@ -191,6 +198,11 @@ impl Hasher for IdHasher {
 pub trait ViewHooks {
     /// A secondary-button selection gesture.
     fn select(&mut self, _event: SelectEvent) {}
+
+    /// Whether a right drag draws a lasso instead of a rectangle; read at the drag's start.
+    fn lasso(&self) -> bool {
+        false
+    }
 
     /// The selected nodes, drawn with the selection ring.
     fn selection(&self) -> Option<&BTreeSet<NodeId>> {
@@ -247,6 +259,8 @@ pub struct MapView {
     drag_claimed: bool,
     /// Press position, in map px, of the selection rectangle being dragged.
     select_start: Option<MapPx>,
+    /// Path, in map px, of the lasso being dragged; empty while none is.
+    lasso: Vec<MapPx>,
     /// Loaded on the first frame, once per app run.
     icons: Option<Icons>,
     pub show_grid: bool,
@@ -271,6 +285,7 @@ impl Default for MapView {
             preview_edges: Vec::new(),
             drag_claimed: false,
             select_start: None,
+            lasso: Vec::new(),
             icons: None,
             show_grid: false,
             show_marker_icons: true,
@@ -289,6 +304,7 @@ impl MapView {
         self.transform = None;
         self.drag_claimed = false;
         self.select_start = None;
+        self.lasso.clear();
         self.clear_hover();
     }
 
@@ -385,9 +401,31 @@ impl MapView {
         // The press is kept in map px, so a wheel zoom mid-drag keeps the rectangle's corner.
         let secondary = egui::PointerButton::Secondary;
         if response.drag_started_by(secondary) {
-            self.select_start = ui
+            let origin = ui
                 .input(|i| i.pointer.press_origin())
                 .map(|p| transform.screen_to_map(f64::from(p.x), f64::from(p.y)));
+            self.lasso.clear();
+            if hooks.lasso() {
+                self.lasso.extend(origin);
+            } else {
+                self.select_start = origin;
+            }
+        }
+        // The lasso keeps its path in map px too; a point only once the pointer has moved
+        // `LASSO_STEP_PX` on screen from the last one, which keeps the path short.
+        if (response.dragged_by(secondary) || response.drag_stopped_by(secondary))
+            && let Some(&(lx, ly)) = self.lasso.last()
+            && let Some(p) = ui.input(|i| i.pointer.interact_pos())
+        {
+            let (sx, sy) = transform.map_to_screen(lx, ly);
+            let (px, py) = (f64::from(p.x), f64::from(p.y));
+            if (px - sx).hypot(py - sy) >= LASSO_STEP_PX {
+                self.lasso.push(transform.screen_to_map(px, py));
+            }
+        }
+        if response.drag_stopped_by(secondary) && !self.lasso.is_empty() {
+            let points = std::mem::take(&mut self.lasso);
+            hooks.select(SelectEvent::Lasso { points });
         }
         if response.drag_stopped_by(secondary)
             && let Some(a) = self.select_start.take()
@@ -489,6 +527,35 @@ impl MapView {
             painter.extend(egui::Shape::dashed_line(
                 &corners,
                 stroke,
+                SELECT_DASH_PX,
+                SELECT_DASH_PX,
+            ));
+        }
+        // The lasso path to the pointer, and a faint closing line back to its start (Java).
+        if response.dragged_by(secondary)
+            && let Some(&first) = self.lasso.first()
+            && let Some(pointer) = ui.input(|i| i.pointer.interact_pos())
+        {
+            let screen = |(mx, my): MapPx| {
+                let (sx, sy) = t.map_to_screen(mx, my);
+                egui::pos2(sx as f32, sy as f32)
+            };
+            let mut path: Vec<egui::Pos2> = self.lasso.iter().map(|&p| screen(p)).collect();
+            path.push(pointer);
+            let stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+            painter.extend(egui::Shape::dashed_line(
+                &path,
+                stroke,
+                SELECT_DASH_PX,
+                SELECT_DASH_PX,
+            ));
+            let faint = egui::Stroke::new(
+                1.0,
+                egui::Color32::WHITE.gamma_multiply(LASSO_CLOSING_ALPHA),
+            );
+            painter.extend(egui::Shape::dashed_line(
+                &[pointer, screen(first)],
+                faint,
                 SELECT_DASH_PX,
                 SELECT_DASH_PX,
             ));
@@ -1618,6 +1685,7 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         claim: bool,
+        lasso: bool,
         events: Vec<DragEvent>,
         selects: Vec<SelectEvent>,
         preview: Option<Preview>,
@@ -1627,6 +1695,10 @@ mod tests {
     impl ViewHooks for Recorder {
         fn select(&mut self, event: SelectEvent) {
             self.selects.push(event);
+        }
+
+        fn lasso(&self) -> bool {
+            self.lasso
         }
 
         fn drag(&mut self, event: DragEvent) -> bool {
@@ -1831,6 +1903,99 @@ mod tests {
     }
 
     #[test]
+    fn a_right_drag_in_lasso_mode_reports_the_path_and_no_rect() {
+        let mut net = Network::new();
+        net.add_node(-6.0, 0.0, -6.0, NodeFlag::REGULAR);
+        let mut hooks = Recorder {
+            claim: true,
+            lasso: true,
+            ..Recorder::default()
+        };
+        let (a, b, c) = (
+            egui::pos2(500.0, 500.0),
+            egui::pos2(560.0, 500.0),
+            egui::pos2(560.0, 440.0),
+        );
+        // 1 px from c: too close to record.
+        let d = egui::pos2(561.0, 440.0);
+        let (reported, centre) = pointer_frames_on(
+            egui::PointerButton::Secondary,
+            vec![
+                vec![egui::Event::PointerMoved(a)],
+                vec![press(a, true)],
+                vec![egui::Event::PointerMoved(b)],
+                vec![egui::Event::PointerMoved(c)],
+                vec![egui::Event::PointerMoved(d)],
+                vec![press(d, false)],
+                vec![],
+            ],
+            &net,
+            &mut hooks,
+        );
+        assert!(reported.iter().all(Option::is_none));
+        assert_eq!(centre, (1024.0, 1024.0));
+        assert!(hooks.events.is_empty());
+        assert_eq!(
+            hooks.selects,
+            [SelectEvent::Lasso {
+                points: vec![(1018.0, 1018.0), (1048.0, 1018.0), (1048.0, 988.0)]
+            }]
+        );
+    }
+
+    #[test]
+    fn lasso_points_stay_on_their_map_points_through_a_zoom() {
+        let mut hooks = Recorder {
+            lasso: true,
+            ..Recorder::default()
+        };
+        let (a, b, c) = (
+            egui::pos2(500.0, 500.0),
+            egui::pos2(560.0, 500.0),
+            egui::pos2(560.0, 440.0),
+        );
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = pointer_frames_on(
+            egui::PointerButton::Secondary,
+            vec![
+                vec![egui::Event::PointerMoved(a)],
+                vec![press(a, true)],
+                vec![egui::Event::PointerMoved(b)],
+                vec![wheel],
+                vec![egui::Event::PointerMoved(c)],
+                vec![press(c, false)],
+                vec![],
+            ],
+            &Network::new(),
+            &mut hooks,
+        );
+        let [SelectEvent::Lasso { points }] = hooks.selects.as_slice() else {
+            panic!("one lasso: {:?}", hooks.selects);
+        };
+        // a and b keep the map px they were drawn at; the zoom about b keeps b under the
+        // pointer, so c is 60 screen px above b at the new zoom.
+        let zoom = 2.0 * ZOOM_STEP;
+        let want = [
+            (1018.0, 1018.0),
+            (1048.0, 1018.0),
+            (1048.0, 1018.0 - 60.0 / zoom),
+        ];
+        assert_eq!(points.len(), want.len(), "{points:?}");
+        for (p, w) in points.iter().zip(want) {
+            assert!(
+                (p.0 - w.0).abs() < 1e-6 && (p.1 - w.1).abs() < 1e-6,
+                "{points:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_right_click_reports_the_node_under_it_or_none() {
         let mut net = Network::new();
         let id = net.add_node(-6.0, 0.0, -6.0, NodeFlag::REGULAR);
@@ -2013,6 +2178,87 @@ mod tests {
         assert!(!dashes[0].is_positive() && !dashes[1].is_positive());
         assert_eq!(dashes[2], egui::Rect::from_two_pos(a, b));
         assert!(!dashes[3].is_positive());
+    }
+
+    #[test]
+    fn the_lasso_is_drawn_only_while_right_dragging() {
+        let ctx = egui::Context::default();
+        let net = Network::new();
+        let g = MapGeometry::new(1.0);
+        let mut view = view_at(&ctx, &net, g, 2.0);
+        let mut hooks = Recorder {
+            lasso: true,
+            ..Recorder::default()
+        };
+        let (a, b, c) = (
+            egui::pos2(500.0, 500.0),
+            egui::pos2(560.0, 500.0),
+            egui::pos2(560.0, 440.0),
+        );
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let faint_colour = egui::Color32::WHITE.gamma_multiply(LASSO_CLOSING_ALPHA);
+        let (mut paths, mut closings) = (Vec::new(), Vec::new());
+        for (i, events) in [
+            vec![egui::Event::PointerMoved(a)],
+            vec![button(a, true)],
+            vec![egui::Event::PointerMoved(b)],
+            vec![egui::Event::PointerMoved(c)],
+            vec![button(c, false)],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                time: Some(i as f64 * 0.016),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                view.show(ui, &net, g, 2.0, None, &mut hooks);
+            });
+            out.textures_delta.clear();
+            let (mut path, mut closing) = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+            for s in &out.shapes {
+                if let egui::Shape::LineSegment { points, stroke } = &s.shape {
+                    let bounds = if stroke.color == egui::Color32::WHITE {
+                        &mut path
+                    } else if stroke.color == faint_colour {
+                        &mut closing
+                    } else {
+                        continue;
+                    };
+                    bounds.extend_with(points[0]);
+                    bounds.extend_with(points[1]);
+                }
+            }
+            paths.push(path);
+            closings.push(closing);
+        }
+        // Nothing before the drag or after the release.
+        for i in [0, 1, 4] {
+            assert!(!paths[i].is_positive() && !closings[i].is_positive(), "{i}");
+        }
+        // The path runs from the start through every recorded point to the pointer; the dash
+        // pattern continues around corners, so its end lies within one dash and gap of it.
+        assert_eq!(paths[2], egui::Rect::from_two_pos(a, b));
+        let reach = 2.0 * SELECT_DASH_PX;
+        assert!(egui::Rect::from_two_pos(a, c).contains_rect(paths[3]));
+        assert!(paths[3].contains(a) && paths[3].contains(b));
+        assert!(paths[3].min.y <= c.y + reach, "{:?}", paths[3]);
+        // The closing line runs from the pointer back towards the start.
+        let span = egui::Rect::from_two_pos(c, a);
+        assert!(closings[3].is_positive() && span.contains_rect(closings[3]));
+        assert!(closings[3].contains(c));
+        assert!(hooks.selects.len() == 1);
     }
 
     /// Centres of the painted circles.

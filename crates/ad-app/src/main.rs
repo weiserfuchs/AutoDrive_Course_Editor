@@ -71,6 +71,8 @@ struct App {
     snap: bool,
     /// Continuous connections for the connect tools; session only (Java default off).
     continuous: bool,
+    /// The right drag draws a lasso instead of a rectangle; session only (Java default off).
+    lasso: bool,
     /// The action that continues once the save started from the prompt has finished.
     pending: Option<Pending>,
     /// The action whose unsaved-changes prompt is shown.
@@ -100,6 +102,7 @@ impl App {
             tool: None,
             snap: false,
             continuous: false,
+            lasso: false,
             pending: None,
             prompt: None,
             allow_close: false,

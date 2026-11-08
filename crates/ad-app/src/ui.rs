@@ -98,6 +98,11 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     }
     ui.checkbox(&mut app.snap, "Snap")
         .on_hover_text("S; hold Shift to invert");
+    // The shape of the right-drag selection; selection works without an editable document.
+    ui.selectable_value(&mut app.lasso, false, "Rect")
+        .on_hover_text("Right drag selects a rectangle");
+    ui.selectable_value(&mut app.lasso, true, "Lasso")
+        .on_hover_text("Right drag selects inside a drawn outline");
     let history = app.doc.as_ref().map(|d| &d.history);
     let can_undo = editable && history.is_some_and(History::can_undo);
     let can_redo = editable && history.is_some_and(History::can_redo);
@@ -126,6 +131,8 @@ pub(crate) struct ToolHooks<'a> {
     net: &'a Network,
     selection: &'a BTreeSet<NodeId>,
     snap: bool,
+    /// The right drag draws a lasso instead of a rectangle.
+    pub lasso: bool,
     pub commit: Option<Transaction>,
     pub select_event: Option<SelectEvent>,
 }
@@ -144,6 +151,7 @@ impl<'a> ToolHooks<'a> {
             net,
             selection,
             snap,
+            lasso: false,
             commit: None,
             select_event: None,
         }
@@ -160,7 +168,7 @@ fn toggle(selection: &mut BTreeSet<NodeId>, ids: impl IntoIterator<Item = NodeId
 }
 
 /// Applies a selection gesture (AD-15): a rectangle toggles every node it covers, edges
-/// included (AD-5); a click on a node toggles it; a click on empty map clears the selection.
+/// included (AD-5); a lasso toggles every node inside its outline; a click on a node toggles it; a click on empty map clears the selection.
 /// The network never changes.
 pub(crate) fn select(
     selection: &mut BTreeSet<NodeId>,
@@ -176,6 +184,14 @@ pub(crate) fn select(
             net.nodes_in_rect_into(ax.min(bx), az.min(bz), ax.max(bx), az.max(bz), &mut ids);
             toggle(selection, ids);
         }
+        SelectEvent::Lasso { points } => {
+            let outline: Vec<(f64, f64)> = points
+                .iter()
+                .map(|&(px, py)| geometry.to_world(px, py))
+                .collect();
+            // Even-odd (AD-5); an outline of fewer than 3 points selects nothing.
+            toggle(selection, net.in_polygon(&outline));
+        }
         SelectEvent::Click { node: Some(id) } => toggle(selection, [id]),
         SelectEvent::Click { node: None } => selection.clear(),
     }
@@ -184,6 +200,10 @@ pub(crate) fn select(
 impl ViewHooks for ToolHooks<'_> {
     fn select(&mut self, event: SelectEvent) {
         self.select_event = Some(event);
+    }
+
+    fn lasso(&self) -> bool {
+        self.lasso
     }
 
     fn selection(&self) -> Option<&BTreeSet<NodeId>> {
@@ -276,6 +296,7 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     // Selection changes no data, so it works on a read-only document too.
     let tool = app.tool.as_deref_mut().filter(|_| editable);
     let mut hooks = ToolHooks::new(tool, &doc.map, &doc.config.network, &doc.selection, snap);
+    hooks.lasso = app.lasso;
     let clicked = app.view.show(
         ui,
         &doc.config.network,
@@ -437,6 +458,85 @@ mod tests {
         assert!(selection.is_empty());
     }
 
+    /// A lasso through the world points `outline`.
+    fn lasso(outline: &[(f64, f64)]) -> SelectEvent {
+        let points = outline
+            .iter()
+            .map(|&(x, z)| (x + 1024.0, z + 1024.0))
+            .collect();
+        SelectEvent::Lasso { points }
+    }
+
+    #[test]
+    fn a_lasso_toggles_the_nodes_inside_its_outline() {
+        // A curved road: a quarter circle of radius 50, and a node at its centre.
+        let mut net = Network::new();
+        let arc: Vec<NodeId> = (0..=6)
+            .map(|i| {
+                let t = f64::from(i) * std::f64::consts::FRAC_PI_2 / 6.0;
+                net.add_node(50.0 * t.cos(), 0.0, 50.0 * t.sin(), NodeFlag::REGULAR)
+            })
+            .collect();
+        let centre = net.add_node(0.0, 0.0, 0.0, NodeFlag::REGULAR);
+        let g = MapGeometry::new(1.0);
+        // A band from radius 40 to 60 around the arc, sampled every 15 degrees.
+        let ring = |r: f64| {
+            (0..=8).map(move |i| {
+                let t = (f64::from(i) * 15.0 - 15.0).to_radians();
+                (r * t.cos(), r * t.sin())
+            })
+        };
+        let outline: Vec<_> = ring(60.0).chain(ring(40.0).rev()).collect();
+        let mut selection = BTreeSet::from([centre, arc[0]]);
+        select(&mut selection, &net, g, lasso(&outline));
+        // Every arc node flips (arc[0] off), the centre outside the band keeps its state.
+        let mut want: Vec<NodeId> = arc[1..].to_vec();
+        want.push(centre);
+        want.sort();
+        assert_eq!(sorted(&selection), want);
+    }
+
+    #[test]
+    fn a_concave_lasso_leaves_the_node_in_its_notch() {
+        let mut net = Network::new();
+        let top = net.add_node(5.0, 0.0, 2.0, NodeFlag::REGULAR);
+        let notch = net.add_node(15.0, 0.0, 10.0, NodeFlag::REGULAR);
+        let bottom = net.add_node(5.0, 0.0, 18.0, NodeFlag::REGULAR);
+        let g = MapGeometry::new(1.0);
+        // A C open to the right: the notch is x 10..20, z 5..15.
+        let c = [
+            (0.0, 0.0),
+            (20.0, 0.0),
+            (20.0, 5.0),
+            (10.0, 5.0),
+            (10.0, 15.0),
+            (20.0, 15.0),
+            (20.0, 20.0),
+            (0.0, 20.0),
+        ];
+        let mut selection = BTreeSet::new();
+        select(&mut selection, &net, g, lasso(&c));
+        assert_eq!(sorted(&selection), [top, bottom]);
+        assert!(!selection.contains(&notch));
+    }
+
+    #[test]
+    fn a_lasso_of_fewer_than_three_distinct_points_toggles_nothing() {
+        let (net, [a, _, _]) = net3();
+        let g = MapGeometry::new(1.0);
+        for outline in [
+            vec![],
+            vec![(0.0, 0.0)],
+            vec![(-1.0, -1.0), (11.0, 1.0)],
+            // Three points, two of them the same: a line through a and b.
+            vec![(-1.0, 0.0), (-1.0, 0.0), (11.0, 0.0)],
+        ] {
+            let mut selection = BTreeSet::from([a]);
+            select(&mut selection, &net, g, lasso(&outline));
+            assert_eq!(sorted(&selection), [a], "{outline:?}");
+        }
+    }
+
     #[test]
     fn toggle_flips_each_id() {
         let (_, [a, b, c]) = net3();
@@ -583,6 +683,78 @@ mod tests {
         let doc = panner.doc.as_ref().expect("doc");
         assert_eq!(doc.config.network.len(), 1);
         assert_eq!(sorted(&doc.selection), [id]);
+    }
+
+    /// A right drag through `path` on the map panel.
+    fn right_drag(ctx: &egui::Context, app: &mut App, path: &[egui::Pos2]) {
+        let (first, last) = (path[0], path[path.len() - 1]);
+        let mut events: Vec<Vec<(egui::Pos2, Option<bool>)>> =
+            vec![vec![(first, None)], vec![(first, Some(true))]];
+        events.extend(path[1..].iter().map(|&p| vec![(p, None)]));
+        events.push(vec![(last, Some(false))]);
+        events.push(vec![]);
+        let frames_ref: Vec<&[(egui::Pos2, Option<bool>)]> =
+            events.iter().map(Vec::as_slice).collect();
+        frames(ctx, app, egui::PointerButton::Secondary, &frames_ref);
+    }
+
+    #[test]
+    fn the_switch_picks_the_shape_of_the_next_right_drag() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        let id = app.doc.as_ref().expect("doc").config.network.order()[0];
+        let selection = |app: &App| sorted(&app.doc.as_ref().expect("doc").selection);
+        // The node is at screen (512.5, 513). A straight drag across it is a rectangle
+        // over it, but as a lasso a line around nothing.
+        let diagonal = [egui::pos2(400.0, 400.0), egui::pos2(600.0, 600.0)];
+        assert!(!app.lasso, "rectangle by default");
+        right_drag(&ctx, &mut app, &diagonal);
+        assert_eq!(selection(&app), [id]);
+        app.lasso = true;
+        right_drag(&ctx, &mut app, &diagonal);
+        assert_eq!(selection(&app), [id]);
+        // A lasso drawn around the node toggles it off.
+        let around = [
+            egui::pos2(400.0, 400.0),
+            egui::pos2(600.0, 400.0),
+            egui::pos2(600.0, 600.0),
+            egui::pos2(400.0, 600.0),
+        ];
+        right_drag(&ctx, &mut app, &around);
+        assert!(selection(&app).is_empty());
+        // And back: the diagonal is a rectangle again.
+        app.lasso = false;
+        right_drag(&ctx, &mut app, &diagonal);
+        assert_eq!(selection(&app), [id]);
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.config.network.len(), 1);
+        assert!(!doc.history.can_undo());
+    }
+
+    #[test]
+    fn a_right_click_toggles_and_clears_in_lasso_mode() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        app.lasso = true;
+        let id = app.doc.as_ref().expect("doc").config.network.order()[0];
+        let secondary = egui::PointerButton::Secondary;
+        let click = |app: &mut App, p: egui::Pos2| {
+            frames(
+                &ctx,
+                app,
+                secondary,
+                &[&[(p, None)], &[(p, Some(true))], &[(p, Some(false))], &[]],
+            );
+            sorted(&app.doc.as_ref().expect("doc").selection)
+        };
+        // Zoom 2 so the node is large enough to hit: world (1, 2) is at screen (514, 516).
+        frames(&ctx, &mut app, secondary, &[&[]]);
+        app.view.transform_mut().expect("set").zoom = 2.0;
+        let node = egui::pos2(514.0, 516.0);
+        assert_eq!(click(&mut app, node), [id]);
+        assert_eq!(click(&mut app, node), []);
+        assert_eq!(click(&mut app, node), [id]);
+        assert_eq!(click(&mut app, egui::pos2(100.0, 100.0)), []);
     }
 
     #[test]
