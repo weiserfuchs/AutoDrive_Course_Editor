@@ -3,7 +3,7 @@ title: 'Align tools line the selection up with a reference node'
 type: 'feature'
 ticket: '7'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '0a664c607a904d0cabcea5125a4a3b41c7ff2e2c'
 route: 'full'
 route_source: 'auto'
