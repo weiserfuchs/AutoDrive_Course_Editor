@@ -73,3 +73,11 @@
 - source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-map-images-import/tickets/story-refactor-sweep-plan.md`
   summary: Add the AD-1 dependency check (ad-core may not depend on I/O or UI crates) to CI, as the architecture's deployment section says it runs.
   evidence: .github/workflows/ci.yml runs only cargo fmt, clippy and test.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-route-manager/tickets/story-a-route-manager-file-opens-with-its-markers-groups-and-map-plan.md`
+  summary: When the route writer lands (story 11.2), write the merge backup and autosaves of a route document with it; until then a merge on a route runs without a backup (notice) and a route is never autosaved.
+  evidence: main.rs `finish_merge` sends `MergeBackup Ok` for a route without writing; `tick_autosave` skips route documents; `config_xml::save` refuses a route (`ConfigError::Route`).
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-route-manager/tickets/story-a-route-manager-file-opens-with-its-markers-groups-and-map-plan.md`
+  summary: The mod's `readGraphFromXml` renumbers groups so "All" is always id 1 (others 2..n in table order) when the file has "All" at another id or not at all; the route loader keeps the group list as read. Decide in 11.2 whether the writer applies that rule.
+  evidence: XML.lua `readGraphFromXml` "fix group 'All' index"; routes_xml.rs `load` returns the `groups/g` entries unchanged.

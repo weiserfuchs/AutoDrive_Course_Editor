@@ -43,6 +43,8 @@ pub enum ConfigError {
     Network(#[from] NetworkError),
     #[error("config is read-only: {0}")]
     ReadOnly(ReadOnlyReason),
+    #[error("a route is never written as a config")]
+    Route,
     #[error("cannot write {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -115,10 +117,43 @@ pub struct LoadedConfig {
     read_only: Option<ReadOnlyReason>,
     flags_reset: bool,
     map_name: Option<String>,
+    /// The group list of a route document (`Some` only for one made by `for_route`).
+    route_groups: Option<Vec<(String, u32)>>,
     pub network: Network,
 }
 
 impl LoadedConfig {
+    /// A document of a route-manager file: its network, group list and the map name from
+    /// `routes.xml`. It is editable, has no game version and is never written by `save`.
+    pub fn for_route(route: crate::routes_xml::LoadedRoute, map_name: Option<String>) -> Self {
+        Self {
+            original: Vec::new(),
+            waypoints: 0..0,
+            mapmarker: None,
+            root_end: 0,
+            newline: "\n".to_owned(),
+            base_indent: String::new(),
+            unit: "    ".to_owned(),
+            child_order: Vec::new(),
+            game_version: GameVersion::Unknown,
+            read_only: None,
+            flags_reset: route.flags_reset,
+            map_name,
+            route_groups: Some(route.groups),
+            network: route.network,
+        }
+    }
+
+    /// True for a document made by `for_route`.
+    pub fn is_route(&self) -> bool {
+        self.route_groups.is_some()
+    }
+
+    /// The group list (name, id) of a route document, as read.
+    pub fn route_groups(&self) -> Option<&[(String, u32)]> {
+        self.route_groups.as_deref()
+    }
+
     pub fn game_version(&self) -> GameVersion {
         self.game_version
     }
@@ -478,6 +513,7 @@ pub fn load(bytes: &[u8]) -> Result<LoadedConfig, ConfigError> {
         read_only,
         flags_reset,
         map_name: map_name_text.and_then(|t| strip_map_name(&t)),
+        route_groups: None,
         network,
     })
 }
@@ -614,6 +650,9 @@ fn mapmarker_block(cfg: &LoadedConfig, file_ids: &SaveIdMap) -> String {
 
 /// Regenerates the two modelled blocks and splices them into the original bytes.
 pub fn save(cfg: &LoadedConfig) -> Result<Vec<u8>, ConfigError> {
+    if cfg.is_route() {
+        return Err(ConfigError::Route);
+    }
     if let Some(reason) = &cfg.read_only {
         return Err(ConfigError::ReadOnly(reason.clone()));
     }
@@ -855,6 +894,23 @@ mod tests {
             save_to(&cfg, &target),
             Err(ConfigError::ReadOnly(_))
         ));
+        assert_eq!(std::fs::read_dir(&dir).expect("ls").count(), 0);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_route_is_never_written_as_a_config() {
+        let dir = scratch_dir("route");
+        let target = dir.join("route.xml");
+        let route = crate::routes_xml::LoadedRoute {
+            network: Network::default(),
+            groups: vec![("All".to_owned(), 1)],
+            flags_reset: false,
+        };
+        let cfg = LoadedConfig::for_route(route, Some("M".to_owned()));
+        assert!(cfg.is_route() && cfg.read_only().is_none());
+        assert_eq!(cfg.map_name(), Some("M"));
+        assert!(matches!(save_to(&cfg, &target), Err(ConfigError::Route)));
         assert_eq!(std::fs::read_dir(&dir).expect("ls").count(), 0);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

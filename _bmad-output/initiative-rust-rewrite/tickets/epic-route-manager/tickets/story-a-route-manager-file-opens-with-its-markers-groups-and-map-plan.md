@@ -61,9 +61,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `routes_xml` parse and `routes.xml` -- tests for Parse, No flags, Flag reset, Short, Bad id, Map name, Suffix
-- [ ] app -- tests for Detect, No routes.xml, Save guard, Fixture route
-- [ ] hand-test files generated under `target/handtest/routesManager/`
+- [x] `routes_xml` parse and `routes.xml` -- tests for Parse, No flags, Flag reset, Short, Bad id, Map name, Suffix
+- [x] app -- tests for Detect, No routes.xml, Save guard, Fixture route
+- [x] hand-test files generated under `target/handtest/routesManager/`
 
 **Acceptance Criteria:**
 - Given the generated `routesManager` folder, when the user opens `routes/TestRoute0000001.xml`, then the fixture's network and markers appear on the NF_Marsch_4fach map image, and every tool works on it.
@@ -77,6 +77,14 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- **Document kind:** a route document is a `LoadedConfig` built by `LoadedConfig::for_route(route, map_name)` (no original bytes, `GameVersion::Unknown`, not read-only, `flags_reset` from the route). It carries the route's group list (`route_groups()`); `is_route()` is the kind, and `Document::is_route()` asks it. This keeps `doc.config.network` and the `Loaded` tuple unchanged and puts the group list in every snapshot, ready for the 11.2 writer.
+- **Write guards:** `config_xml::save` refuses a route (`ConfigError::Route`), so the config writer can never write one, whatever the caller. In the app: Save on a route shows "Saving routes comes with story 11.2" (once) before any dialog and returns false; `tick_autosave` skips route documents; `finish_merge` on a route skips the backup (sends `MergeBackup Ok` without writing) and adds "Merged without a backup: route backups come with story 11.2", so the merge tool still works. `spawn_save`, `spawn_autosave` and `spawn_merge_backup` are the only callers of `config_xml::save_to`.
+- **Detection:** `routes_xml::is_route` looks only at the root element; anything else goes to `config_xml::load` unchanged, so config errors stay as before.
+- **Parsing:** `x`, `y`, `z`, `out`, `in` and a non-empty `flags` must have exactly `c` values (more is an error too, not ignored as in Lua: the mod never writes more); ids out of `1..=c` are errors naming `<out>`, `<in>` or `<m i>`; marker `n` and `g` are required; a group without `i` gets index + 1 (the mod's `getNoNil`). The mod's "All is id 1" renumbering is not applied (deferred to 11.2).
+- **Map name:** `routes.xml` two folders up; notice "No map name for this route (…)" with "routes.xml not found", "not listed in routes.xml" or "routes.xml could not be read: …". A `vehicles.xml` beside a route is not read.
+- **Hand-test files:** `target/handtest/routesManager/routes.xml` and `routes/TestRoute0000001.xml` (35652 nodes, fixture markers, 17 groups with "All" = 1), written by the ignored test `jobs::route_tests::write_handtest_route_manager` with the test-only writer `jobs::test_route_text`; that test also loads the file back through `load_file` with map name NF_Marsch_4fach.
+- **Verification:** `cargo fmt --all --check` ok; `cargo clippy --workspace --all-targets -- -D warnings` ok; `cargo test --workspace` all pass (ad-app 424 + 4 ignored, ad-io 88); `frame_time` every case ok, worst best-round max 9.9 ms (rotate, min zoom, whole network).
 
 ## Plan Change Log
 
