@@ -18,7 +18,7 @@ use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
 use crate::tools::edit_location::{self, EditLocationTool};
 use crate::tools::flip::FlipTool;
-use crate::tools::marker::{AddMarkerTool, DeleteMarkerTool, EditMarkerTool};
+use crate::tools::marker::{ALL, AddMarkerTool, DeleteMarkerTool, EditMarkerTool, group_counts};
 use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
 use crate::tools::priority::PriorityTool;
@@ -107,6 +107,13 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
             // A click on the active tool turns it off.
             app.set_tool((!selected).then_some(tool));
         }
+    }
+    if ui
+        .add_enabled(editable, egui::Button::new("Groups"))
+        .on_hover_text("Rename or delete marker groups")
+        .clicked()
+    {
+        app.open_groups();
     }
     let mut continuous = app.continuous;
     if ui
@@ -562,6 +569,76 @@ pub(crate) fn marker_dialog(app: &mut App, ctx: &egui::Context) {
         app.finish_marker(true);
     } else if cancel || closed {
         app.finish_marker(false);
+    }
+}
+
+/// The groups window: one row per group with its marker count, "All" first. Rename opens
+/// a text field in the row, with a red note while the name is refused; OK or Enter commits
+/// one `RenameGroup`, Cancel closes the field. Delete moves the group's markers to "All".
+/// "All" has neither button. Close, Escape or a click beside the window closes it.
+pub(crate) fn groups_window(app: &mut App, ctx: &egui::Context) {
+    let (Some(doc), Some(window)) = (&app.doc, &mut app.groups) else {
+        return;
+    };
+    let rows = group_counts(&doc.config.network);
+    let field = egui::Id::unique("group_rename");
+    let (mut ok, mut delete, mut close) = (false, None, false);
+    let modal = egui::Modal::new(egui::Id::unique("groups")).show(ctx, |ui| {
+        ui.heading("Groups");
+        egui::ScrollArea::vertical()
+            .max_height(400.0)
+            .show(ui, |ui| {
+                for (group, count) in &rows {
+                    let renaming = window
+                        .rename
+                        .as_ref()
+                        .is_some_and(|(from, _)| from == group);
+                    if !renaming {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{group} ({count})"));
+                            if group != ALL {
+                                if ui.button("Rename").clicked() {
+                                    window.start_rename(group);
+                                    ui.memory_mut(|m| m.request_focus(field));
+                                }
+                                if ui.button("Delete").clicked() {
+                                    delete = Some(group.clone());
+                                }
+                            }
+                        });
+                        continue;
+                    }
+                    let note = window.validate().and_then(Result::err);
+                    ui.horizontal(|ui| {
+                        if let Some((_, text)) = &mut window.rename {
+                            ui.add(egui::TextEdit::singleline(text).id(field));
+                        }
+                        ui.label(format!("({count})"));
+                        let valid = note.is_none();
+                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ok = ui.add_enabled(valid, egui::Button::new("OK")).clicked()
+                            || (valid && enter);
+                        if ui.button("Cancel").clicked() {
+                            window.rename = None;
+                        }
+                    });
+                    if let Some(note) = note {
+                        ui.colored_label(ui.visuals().error_fg_color, note.to_string());
+                    }
+                }
+            });
+        close = ui.button("Close").clicked();
+    });
+    // Always asked, so Escape is consumed while the window is on top.
+    let closed = modal.should_close();
+    if ok {
+        app.finish_group_rename();
+    }
+    if let Some(group) = delete {
+        app.delete_group(&group);
+    }
+    if close || closed {
+        app.groups = None;
     }
 }
 
@@ -1183,6 +1260,66 @@ mod tests {
         let net = &app.doc.as_ref().expect("doc").config.network;
         assert_eq!(net.markers()[0].name, "Hof");
         assert_eq!(net.markers()[0].group, "All");
+    }
+
+    /// One frame of the groups window with `events`; returns the texts it painted.
+    fn groups_frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> String {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 1024.0),
+            )),
+            time: Some(ctx.input(|i| i.time) + 0.016),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| groups_window(app, ui.ctx()));
+        out.textures_delta.clear();
+        let mut texts = Vec::new();
+        for shape in &out.shapes {
+            if let egui::Shape::Text(t) = &shape.shape {
+                texts.push(t.galley.text().to_owned());
+            }
+        }
+        texts.join("|")
+    }
+
+    #[test]
+    fn the_groups_window_lists_counts_commits_on_enter_and_closes_on_escape() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        let id = app.doc.as_ref().expect("doc").config.network.order()[0];
+        let net = &mut app.doc.as_mut().expect("doc").config.network;
+        net.push_marker(ad_core::network::Marker {
+            node: id,
+            name: "Hof".to_owned(),
+            group: "b".to_owned(),
+            parked_vehicles: Vec::new(),
+        });
+        app.open_groups();
+        // The first frame only sizes the window.
+        groups_frame(&ctx, &mut app, vec![]);
+        let texts = groups_frame(&ctx, &mut app, vec![]);
+        assert!(texts.contains("All (0)|"), "{texts}");
+        assert!(texts.contains("b (1)|Rename|Delete"), "{texts}");
+        // A refused name shows the note, and Enter keeps the field.
+        let window = app.groups.as_mut().expect("window");
+        window.start_rename("b");
+        window.rename.as_mut().expect("field").1 = "None".to_owned();
+        let texts = groups_frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+        assert!(texts.contains("cannot name a group"), "{texts}");
+        assert!(app.groups.as_ref().expect("window").rename.is_some());
+        // A valid one commits on Enter; the window stays open.
+        app.groups.as_mut().expect("window").rename = Some(("b".into(), "c".into()));
+        groups_frame(&ctx, &mut app, vec![]);
+        groups_frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        assert_eq!(net.markers()[0].group, "c");
+        assert_eq!(app.groups, Some(Default::default()));
+        let texts = groups_frame(&ctx, &mut app, vec![]);
+        assert!(texts.contains("c (1)"), "{texts}");
+        groups_frame(&ctx, &mut app, vec![key(egui::Key::Escape)]);
+        assert!(app.groups.is_none());
     }
 
     #[test]

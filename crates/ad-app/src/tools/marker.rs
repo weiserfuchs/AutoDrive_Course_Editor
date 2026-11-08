@@ -5,12 +5,15 @@
 //! The Edit marker tool (Java `EditMarkerButton`) opens the same dialog prefilled for a
 //! node with a marker; OK replaces it in place, keeping its parked vehicles. The Delete
 //! marker tool (Java `DeleteMarkerButton`) removes a node's marker in one `EditMarker`.
+//!
+//! The groups window (no Java counterpart) renames or deletes a whole group in one
+//! `RenameGroup`; a deleted group's markers stay, in "All".
 
 use std::fmt;
 
 use eframe::egui;
 
-use ad_core::command::{Command, EditMarker, Transaction};
+use ad_core::command::{Command, EditMarker, RenameGroup, Transaction};
 use ad_core::geometry::MapGeometry;
 use ad_core::network::{Network, NodeId};
 
@@ -62,6 +65,98 @@ pub fn groups(net: &Network) -> Vec<String> {
     });
     groups.dedup();
     groups
+}
+
+/// One row per group with its marker count: "All" first (also when empty), then the
+/// groups in the order of `groups`.
+pub fn group_counts(net: &Network) -> Vec<(String, usize)> {
+    let count = |group: &str| net.markers().iter().filter(|m| m.group == group).count();
+    let mut rows = vec![(ALL.to_owned(), count(ALL))];
+    rows.extend(groups(net).into_iter().map(|g| {
+        let n = count(&g);
+        (g, n)
+    }));
+    rows
+}
+
+/// Why the groups window refuses a new group name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupNote {
+    /// Empty once trimmed.
+    EmptyName,
+    /// The group's current name.
+    SameName,
+    /// "None" names no group in the marker dialog.
+    Reserved,
+}
+
+impl fmt::Display for GroupNote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GroupNote::EmptyName => write!(f, "* Enter a name"),
+            GroupNote::SameName => write!(f, "* The group already has this name"),
+            GroupNote::Reserved => write!(f, "* \"None\" cannot name a group"),
+        }
+    }
+}
+
+/// The groups window; `rename` is the group whose row shows a text field, and its text.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GroupsWindow {
+    pub rename: Option<(String, String)>,
+}
+
+impl GroupsWindow {
+    /// Opens the text field in the row of `group`, prefilled with its name; "All" has no
+    /// rename.
+    pub fn start_rename(&mut self, group: &str) {
+        if group != ALL {
+            self.rename = Some((group.to_owned(), group.to_owned()));
+        }
+    }
+
+    /// The trimmed new name of the group being renamed, or why it is refused; `None` when
+    /// no rename is open. "All" is allowed and means delete.
+    pub fn validate(&self) -> Option<Result<String, GroupNote>> {
+        let (from, text) = self.rename.as_ref()?;
+        let to = text.trim();
+        Some(if to.is_empty() {
+            Err(GroupNote::EmptyName)
+        } else if to == from {
+            Err(GroupNote::SameName)
+        } else if to == NONE {
+            Err(GroupNote::Reserved)
+        } else {
+            Ok(to.to_owned())
+        })
+    }
+
+    /// The one `RenameGroup` the open rename commits; `None` while refused or closed.
+    pub fn rename_plan(&self, net: &Network) -> Option<Transaction> {
+        let to = self.validate()?.ok()?;
+        let (from, _) = self.rename.as_ref()?;
+        rename_group_plan(net, from, &to)
+    }
+}
+
+/// The one `RenameGroup` that moves the markers of `from` to `to`; `None` when `from` has
+/// no markers.
+pub fn rename_group_plan(net: &Network, from: &str, to: &str) -> Option<Transaction> {
+    net.markers().iter().any(|m| m.group == from).then(|| {
+        Transaction::new(vec![Command::RenameGroup(RenameGroup::new(
+            from.to_owned(),
+            to.to_owned(),
+        ))])
+    })
+}
+
+/// The one `RenameGroup` that deletes `group`: its markers move to "All". `None` for "All"
+/// itself or a group without markers.
+pub fn delete_group_plan(net: &Network, group: &str) -> Option<Transaction> {
+    if group == ALL {
+        return None;
+    }
+    rename_group_plan(net, group, ALL)
 }
 
 /// Whether `node` has a marker.
@@ -557,6 +652,95 @@ mod tests {
         assert_eq!(delete.take_request(), None, "taken once");
         assert!(delete.on_click(&ctx(None)).is_none());
         assert_eq!(delete.take_request(), None);
+    }
+
+    /// Markers in "b" twice, "A" once and "All" three times, as in the plan's matrix.
+    fn matrix() -> Network {
+        let mut net = Network::new();
+        for (i, group) in ["b", "All", "A", "All", "b", "All"].iter().enumerate() {
+            let id = net.add_node(i as f64, 0.0, 0.0, NodeFlag::REGULAR);
+            net.push_marker(marker(id, &format!("m{i}"), group));
+        }
+        net
+    }
+
+    #[test]
+    fn group_counts_list_all_first_then_the_groups_ignoring_case() {
+        let rows = group_counts(&matrix());
+        let want = [("All", 3), ("A", 1), ("b", 2)].map(|(g, n)| (g.to_owned(), n));
+        assert_eq!(rows, want);
+        assert_eq!(group_counts(&Network::new()), [(ALL.to_owned(), 0)]);
+    }
+
+    fn renaming(from: &str, text: &str) -> GroupsWindow {
+        let mut w = GroupsWindow::default();
+        w.start_rename(from);
+        if let Some((_, t)) = &mut w.rename {
+            *t = text.to_owned();
+        }
+        w
+    }
+
+    #[test]
+    fn a_rename_to_an_empty_or_the_same_name_or_none_is_refused() {
+        let net = matrix();
+        for (text, note) in [
+            ("", GroupNote::EmptyName),
+            ("  ", GroupNote::EmptyName),
+            ("b", GroupNote::SameName),
+            (" b ", GroupNote::SameName),
+            ("None", GroupNote::Reserved),
+        ] {
+            let w = renaming("b", text);
+            assert_eq!(w.validate(), Some(Err(note)), "{text:?}");
+            assert!(w.rename_plan(&net).is_none(), "{text:?}");
+        }
+        assert_eq!(GroupsWindow::default().validate(), None, "no rename open");
+    }
+
+    #[test]
+    fn a_rename_plans_one_rename_group_to_the_trimmed_name_and_all_means_delete() {
+        let mut net = matrix();
+        let w = renaming("b", " c ");
+        assert_eq!(w.validate(), Some(Ok("c".to_owned())));
+        let mut tx = w.rename_plan(&net).expect("valid");
+        let [Command::RenameGroup(r)] = tx.0.as_slice() else {
+            panic!("one RenameGroup");
+        };
+        assert_eq!((&*r.from, &*r.to), ("b", "c"));
+        let before = net.markers().to_vec();
+        tx.apply(&mut net).expect("apply");
+        assert_eq!(group_counts(&net)[2], ("c".to_owned(), 2));
+        tx.revert(&mut net).expect("revert");
+        assert_eq!(net.markers(), before);
+        // A rename onto "All" is the same as a delete.
+        let w = renaming("b", ALL);
+        assert_eq!(w.rename_plan(&net), delete_group_plan(&net, "b"));
+    }
+
+    #[test]
+    fn delete_moves_the_group_to_all_keeping_the_markers_and_reverts() {
+        let mut net = matrix();
+        let before = net.markers().to_vec();
+        let mut tx = delete_group_plan(&net, "b").expect("group");
+        tx.apply(&mut net).expect("apply");
+        let rows = group_counts(&net);
+        assert_eq!(rows, [(ALL.to_owned(), 5), ("A".to_owned(), 1)]);
+        let names: Vec<_> = net.markers().iter().map(|m| m.name.clone()).collect();
+        let old: Vec<_> = before.iter().map(|m| m.name.clone()).collect();
+        assert_eq!(names, old);
+        tx.revert(&mut net).expect("revert");
+        assert_eq!(net.markers(), before);
+    }
+
+    #[test]
+    fn the_all_row_has_no_rename_or_delete() {
+        let net = matrix();
+        let mut w = GroupsWindow::default();
+        w.start_rename(ALL);
+        assert_eq!(w.rename, None);
+        assert!(delete_group_plan(&net, ALL).is_none());
+        assert!(delete_group_plan(&net, "gone").is_none(), "no markers");
     }
 
     #[test]

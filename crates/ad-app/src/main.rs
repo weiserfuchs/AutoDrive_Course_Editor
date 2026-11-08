@@ -83,6 +83,8 @@ struct App {
     location: Option<tools::edit_location::LocationDialog>,
     /// The marker dialog, while it is shown.
     marker: Option<tools::marker::MarkerDialog>,
+    /// The groups window, while it is shown.
+    groups: Option<tools::marker::GroupsWindow>,
     /// A tool's info for the toolbar's notice line, shown until the next click on the map.
     tool_notice: Option<&'static str>,
     /// Set once closing was agreed; the next close request is not intercepted.
@@ -119,6 +121,7 @@ impl App {
             prompt: None,
             location: None,
             marker: None,
+            groups: None,
             tool_notice: None,
             allow_close: false,
             title: window_title(None),
@@ -222,6 +225,7 @@ impl App {
                 self.set_tool(None);
                 self.location = None;
                 self.marker = None;
+                self.groups = None;
                 self.tool_notice = None;
             }
         }
@@ -245,9 +249,9 @@ impl App {
         self.doc.as_ref().is_some_and(document::Document::editable)
     }
 
-    /// Whether a modal node dialog (Edit location or marker) is shown.
+    /// Whether a modal dialog (Edit location, marker or groups) is shown.
     fn dialog_shown(&self) -> bool {
-        self.location.is_some() || self.marker.is_some()
+        self.location.is_some() || self.marker.is_some() || self.groups.is_some()
     }
 
     /// Runs a toolbar or shortcut action.
@@ -607,6 +611,53 @@ impl App {
         }
     }
 
+    /// Shows the groups window; not for a read-only document.
+    fn open_groups(&mut self) {
+        if self.editable() {
+            self.groups = Some(tools::marker::GroupsWindow::default());
+        }
+    }
+
+    /// Commits the groups window's open rename in one transaction and closes its text
+    /// field; nothing while the name is refused or the document is read-only.
+    fn finish_group_rename(&mut self) {
+        let (Some(doc), Some(window)) = (&self.doc, &self.groups) else {
+            return;
+        };
+        let Some(tx) = window
+            .rename_plan(&doc.config.network)
+            .filter(|_| self.editable())
+        else {
+            return;
+        };
+        self.apply_group_change(tx);
+        if let Some(window) = &mut self.groups {
+            window.rename = None;
+        }
+    }
+
+    /// Deletes `group` from the groups window in one transaction: its markers stay, in
+    /// "All". Nothing for "All" or on a read-only document.
+    fn delete_group(&mut self, group: &str) {
+        let Some(tx) = self
+            .doc
+            .as_ref()
+            .filter(|_| self.editable() && self.groups.is_some())
+            .and_then(|doc| tools::marker::delete_group_plan(&doc.config.network, group))
+        else {
+            return;
+        };
+        self.apply_group_change(tx);
+    }
+
+    fn apply_group_change(&mut self, tx: Transaction) {
+        if let Some(doc) = &mut self.doc
+            && let Err(e) = doc.apply(tx)
+        {
+            self.error = Some(e.to_string());
+        }
+    }
+
     fn open(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("XML", &["xml"])
@@ -682,6 +733,7 @@ impl eframe::App for App {
         // Before the prompt, so a prompt from a window close shows on top of it.
         ui::location_dialog(self, &ctx);
         ui::marker_dialog(self, &ctx);
+        ui::groups_window(self, &ctx);
         ui::unsaved_prompt(self, &ctx);
     }
 }
@@ -1777,6 +1829,140 @@ mod tests {
         app.run(Action::DeleteMarker);
         assert!(app.marker.is_none());
         assert_eq!(markers(&app), before);
+    }
+
+    /// Loads the one-node config of `version` plus two nodes, with markers "m0" and "m1" in
+    /// "b" (a vehicle parked at "m0") and "m2" in "A", outside the history.
+    fn grouped(version: &str) -> App {
+        let mut app = App::new(Settings::default());
+        load(&mut app, version);
+        let net = &mut app.doc.as_mut().expect("doc").config.network;
+        let mut ids = vec![net.order()[0]];
+        ids.push(net.add_node(5.0, 0.0, 5.0, NodeFlag::REGULAR));
+        ids.push(net.add_node(9.0, 0.0, 9.0, NodeFlag::REGULAR));
+        for (i, (id, group)) in ids.into_iter().zip(["b", "b", "A"]).enumerate() {
+            net.push_marker(ad_core::network::Marker {
+                node: id,
+                name: format!("m{i}"),
+                group: group.to_owned(),
+                parked_vehicles: Vec::new(),
+            });
+        }
+        assert!(net.park_vehicle(0, "7".to_owned()));
+        app
+    }
+
+    fn group_names(app: &App) -> Vec<String> {
+        markers(app).into_iter().map(|m| m.group).collect()
+    }
+
+    #[test]
+    fn the_groups_window_renames_and_deletes_each_in_one_undo_step() {
+        let mut app = grouped("<version>3</version>");
+        let before = markers(&app);
+        app.open_groups();
+        let window = app.groups.as_mut().expect("window");
+        window.start_rename("b");
+        window.rename.as_mut().expect("field").1 = " c ".to_owned();
+        app.finish_group_rename();
+        assert_eq!(group_names(&app), ["c", "c", "A"]);
+        let window = app.groups.as_ref().expect("still open");
+        assert_eq!(window.rename, None, "the field closes");
+        app.delete_group("A");
+        assert_eq!(group_names(&app), ["c", "c", "All"]);
+        let after = markers(&app);
+        assert_eq!(after[0].parked_vehicles, ["7"]);
+        let names: Vec<_> = after.iter().map(|m| m.name.clone()).collect();
+        assert_eq!(names, ["m0", "m1", "m2"]);
+        app.groups = None;
+        app.run(Action::Undo);
+        assert_eq!(group_names(&app), ["c", "c", "A"]);
+        app.run(Action::Undo);
+        assert_eq!(markers(&app), before);
+        app.run(Action::Redo);
+        assert_eq!(group_names(&app), ["c", "c", "A"]);
+    }
+
+    #[test]
+    fn a_refused_group_rename_commits_nothing_and_keeps_the_field() {
+        let mut app = grouped("<version>3</version>");
+        let before = markers(&app);
+        app.open_groups();
+        for text in ["", "  ", "b", "None"] {
+            let window = app.groups.as_mut().expect("window");
+            window.start_rename("b");
+            window.rename.as_mut().expect("field").1 = text.to_owned();
+            app.finish_group_rename();
+            assert!(app.groups.as_ref().expect("window").rename.is_some());
+            assert_eq!(markers(&app), before, "{text:?}");
+        }
+        app.delete_group("All");
+        assert_eq!(markers(&app), before);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+    }
+
+    #[test]
+    fn read_only_document_does_not_open_the_groups_window_or_change_groups() {
+        let mut app = grouped("<markerID>1</markerID>");
+        let before = markers(&app);
+        app.open_groups();
+        assert!(app.groups.is_none());
+        // Even a window shown by force commits nothing.
+        let mut window = tools::marker::GroupsWindow::default();
+        window.start_rename("b");
+        window.rename.as_mut().expect("field").1 = "c".to_owned();
+        app.groups = Some(window);
+        app.finish_group_rename();
+        app.delete_group("A");
+        assert_eq!(markers(&app), before);
+    }
+
+    #[test]
+    fn shortcuts_and_clicks_do_nothing_while_the_groups_window_is_shown() {
+        let mut app = grouped("<version>3</version>");
+        app.view_epoch = app.doc.as_ref().map(|d| d.epoch);
+        app.tool = Some(Box::new(NodeTool::new(NodeFlag::REGULAR)));
+        // Something to undo: a delete through the window.
+        app.open_groups();
+        app.delete_group("A");
+        let before = markers(&app);
+        let nodes_before = nodes(&app);
+        assert!(app.dialog_shown());
+        let ctx = egui::Context::default();
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let ctrl = egui::Modifiers::CTRL.plus(egui::Modifiers::COMMAND);
+        let input = egui::RawInput {
+            events: vec![
+                key(egui::Key::Z, ctrl),
+                key(egui::Key::S, egui::Modifiers::NONE),
+                key(egui::Key::W, egui::Modifiers::NONE),
+            ],
+            ..Default::default()
+        };
+        app.view.hovered_node = Some(first(&app));
+        let mut out = ctx.run_ui(input, |ui| input::handle_shortcuts(&mut app, ui.ctx()));
+        out.textures_delta.clear();
+        assert_eq!(markers(&app), before, "no undo");
+        assert!(!app.snap);
+        assert!(app.marker.is_none(), "no marker dialog from W");
+        app.click(0.0, 0.0, false);
+        assert_eq!(nodes(&app), nodes_before, "no node from a click");
+        assert!(app.groups.is_some());
+    }
+
+    #[test]
+    fn a_new_document_closes_the_groups_window() {
+        let mut app = grouped("<version>3</version>");
+        app.open_groups();
+        app.groups.as_mut().expect("window").start_rename("b");
+        load(&mut app, "<version>3</version>");
+        assert!(app.groups.is_none());
     }
 
     #[test]

@@ -111,6 +111,27 @@ impl EditMarker {
     }
 }
 
+/// Moves every marker in group `from` to group `to` (AD-17); names, order and parked
+/// vehicles stay. Revert moves back exactly the markers the apply moved, so a rename onto
+/// an existing group (a merge) leaves that group's own markers in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenameGroup {
+    pub from: String,
+    pub to: String,
+    /// Indexes in the marker order of the markers the last apply moved.
+    moved: Vec<usize>,
+}
+
+impl RenameGroup {
+    pub fn new(from: String, to: String) -> Self {
+        Self {
+            from,
+            to,
+            moved: Vec::new(),
+        }
+    }
+}
+
 /// Sets a node's flag; revert restores the flag it had, whatever its file value (AD-3).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetFlag {
@@ -235,6 +256,7 @@ pub enum Command {
     Disconnect(Disconnect),
     MoveNodes(MoveNodes),
     EditMarker(EditMarker),
+    RenameGroup(RenameGroup),
     SetFlag(SetFlag),
 }
 
@@ -303,6 +325,19 @@ impl Command {
                 };
                 Ok(())
             }
+            Command::RenameGroup(c) => {
+                c.moved = net
+                    .markers()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.group == c.from)
+                    .map(|(i, _)| i)
+                    .collect();
+                for &i in &c.moved {
+                    net.set_marker_group(i, c.to.clone());
+                }
+                Ok(())
+            }
             Command::SetFlag(c) => {
                 let old = net
                     .node(c.node)
@@ -347,6 +382,12 @@ impl Command {
             }
             Command::EditMarker(c) => {
                 net.revert_marker(&c.delta);
+                Ok(())
+            }
+            Command::RenameGroup(c) => {
+                for &i in &c.moved {
+                    net.set_marker_group(i, c.from.clone());
+                }
                 Ok(())
             }
             Command::SetFlag(c) => match c.old {
@@ -668,6 +709,111 @@ pub(crate) mod tests {
         let set = EditMarker::new(b, Some(("B".to_owned(), "g".to_owned())));
         let (n, _) = round_trip(n, one(Command::EditMarker(set)));
         assert_eq!(parked_on_b(&n), Some(Vec::new()));
+    }
+
+    /// Markers in order: "b1" in "b" (vehicle "v1" parked), "a" in "A", "f1" in "All",
+    /// "b2" in "b", "f2" and "f3" in "All".
+    fn grouped() -> Network {
+        let mut n = Network::new();
+        for (i, (name, group)) in [
+            ("b1", "b"),
+            ("a", "A"),
+            ("f1", "All"),
+            ("b2", "b"),
+            ("f2", "All"),
+            ("f3", "All"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let node = n.add_node(i as f64, 0.0, 0.0, NodeFlag::REGULAR);
+            n.push_marker(Marker {
+                node,
+                name: name.into(),
+                group: group.into(),
+                parked_vehicles: Vec::new(),
+            });
+        }
+        assert!(n.park_vehicle(0, "v1".into()));
+        n
+    }
+
+    /// `(name, group)` of each marker in order.
+    fn groups_of(n: &Network) -> Vec<(&str, &str)> {
+        n.markers()
+            .iter()
+            .map(|m| (m.name.as_str(), m.group.as_str()))
+            .collect()
+    }
+
+    fn rename(from: &str, to: &str) -> Transaction {
+        one(Command::RenameGroup(RenameGroup::new(
+            from.into(),
+            to.into(),
+        )))
+    }
+
+    #[test]
+    fn rename_group_moves_every_marker_of_the_group_and_reverts() {
+        let before = grouped();
+        let nodes: Vec<NodeId> = before.markers().iter().map(|m| m.node).collect();
+        // `round_trip` checks that undo and redo restore the exact network.
+        let (n, _) = round_trip(before, rename("b", "c"));
+        assert_eq!(
+            groups_of(&n),
+            [
+                ("b1", "c"),
+                ("a", "A"),
+                ("f1", "All"),
+                ("b2", "c"),
+                ("f2", "All"),
+                ("f3", "All")
+            ]
+        );
+        let after: Vec<NodeId> = n.markers().iter().map(|m| m.node).collect();
+        assert_eq!(after, nodes, "order kept");
+    }
+
+    #[test]
+    fn rename_group_onto_an_existing_group_merges_and_undo_splits_exactly() {
+        let (mut n, mut tx) = round_trip(grouped(), rename("b", "A"));
+        let in_a = n.markers().iter().filter(|m| m.group == "A").count();
+        assert_eq!(in_a, 3);
+        tx.revert(&mut n).expect("undo");
+        assert_eq!(
+            groups_of(&n)[..4],
+            [("b1", "b"), ("a", "A"), ("f1", "All"), ("b2", "b")],
+            "the marker already in A stays there"
+        );
+    }
+
+    #[test]
+    fn rename_group_to_all_ungroups_and_keeps_names_and_parked_vehicles() {
+        let (n, _) = round_trip(grouped(), rename("b", "All"));
+        assert_eq!(n.markers().iter().filter(|m| m.group == "All").count(), 5);
+        assert_eq!(groups_of(&n)[0], ("b1", "All"));
+        assert_eq!(groups_of(&n)[3], ("b2", "All"));
+        assert_eq!(n.markers().len(), 6, "no marker deleted");
+        assert_eq!(n.markers()[0].parked_vehicles, ["v1"]);
+    }
+
+    #[test]
+    fn rename_group_keeps_parked_vehicles_through_undo_and_redo() {
+        let (mut n, mut tx) = round_trip(grouped(), rename("b", "c"));
+        assert_eq!(n.markers()[0].parked_vehicles, ["v1"]);
+        tx.revert(&mut n).expect("undo");
+        assert_eq!(n.markers()[0].parked_vehicles, ["v1"]);
+    }
+
+    #[test]
+    fn rename_of_a_group_without_markers_changes_nothing() {
+        let mut n = grouped();
+        let before = snap(&n);
+        let mut tx = rename("gone", "c");
+        tx.apply(&mut n).expect("apply");
+        assert_eq!(snap(&n), before);
+        tx.revert(&mut n).expect("revert");
+        assert_eq!(snap(&n), before);
     }
 
     #[test]
