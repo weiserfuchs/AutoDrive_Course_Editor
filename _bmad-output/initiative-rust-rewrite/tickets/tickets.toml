@@ -51,7 +51,7 @@ after = [{ epic = 3, needs = "the Tool trait and command pattern" }]
 id = 7
 slug = "epic-map-images-import"
 title = "Map images arrive from anywhere"
-description = "Map images and heightmaps are downloaded on demand and imported from DDS files and mod zips, proven by a DDS format spike; local lookup and attach come from epic 2."
+description = "Map images and heightmaps come from DDS and mod-zip imports, an on-demand download and manual load/save, in the background, saved where the next load finds them; a DDS spike settles format coverage first."
 covers = ["R9"]
 after = [{ epic = 2, needs = "MapContext attach and map texture upload" }]
 
