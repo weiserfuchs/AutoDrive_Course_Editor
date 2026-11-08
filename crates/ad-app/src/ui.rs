@@ -17,6 +17,7 @@ use crate::tools::flip::FlipTool;
 use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
 use crate::tools::priority::PriorityTool;
+use crate::tools::rotate::RotateTool;
 use crate::tools::{Tool, ToolContext};
 use crate::view::{DragEvent, MapPx, Preview, SelectEvent, ViewHooks, ViewTransform};
 use crate::{App, Choice, Pending};
@@ -69,10 +70,11 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
-    let tools: [Box<dyn Tool>; 9] = [
+    let tools: [Box<dyn Tool>; 10] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
+        Box::new(RotateTool::default()),
         Box::new(DeleteTool),
         Box::new(PriorityTool),
         Box::new(FlipTool),
@@ -270,6 +272,7 @@ impl ViewHooks for ToolHooks<'_> {
         hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     ) {
         if let Some(tool) = self.tool.as_deref() {
+            tool.paint_selection(painter, t, self.map, self.net, self.selection);
             let snap_grid = self.snap.then_some(self.map.grid);
             tool.paint(painter, t, geometry, cursor, snap_grid, hovered_edge);
         }

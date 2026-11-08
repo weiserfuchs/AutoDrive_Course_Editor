@@ -307,11 +307,62 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
             moves: group.clone(),
         })]),
     )?;
+    // The rotate tool on a selection: three more untouched nodes turn 37° about the centre
+    // of their bounding box in one MoveNodes, y kept. The turn is ad-app's
+    // `tools::rotate::turned`; each result is taken as the writer's three decimals read
+    // back, so the reloaded model compares exactly.
+    let busy = [
+        &busy[..],
+        &group.iter().map(|g| g.0).collect::<Vec<_>>()[..],
+    ]
+    .concat();
+    let turning: Vec<(NodeId, Position)> = cfg
+        .network
+        .order()
+        .iter()
+        .copied()
+        .filter(|id| !busy.contains(id))
+        .take(3)
+        .filter_map(|id| cfg.network.node(id).map(|n| (id, (n.x, n.y, n.z))))
+        .collect();
+    assert_eq!(turning.len(), 3);
+    let (x0, x1, z0, z1) = turning.iter().fold(
+        (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ),
+        |(x0, x1, z0, z1), &(_, (x, _, z))| (x0.min(x), x1.max(x), z0.min(z), z1.max(z)),
+    );
+    let (cx, cz) = ((x0 + x1) / 2.0, (z0 + z1) / 2.0);
+    let (sin, cos) = 37f64.to_radians().sin_cos();
+    let written3 = |v: f64| format!("{v:.3}").parse::<f64>();
+    let rotated: Vec<(NodeId, Position, Position)> = turning
+        .iter()
+        .map(|&(id, (x, y, z))| {
+            let (dx, dz) = (x - cx, z - cz);
+            let after = (
+                written3(cx + dx * cos - dz * sin)?,
+                y,
+                written3(cz + dx * sin + dz * cos)?,
+            );
+            Ok((id, (x, y, z), after))
+        })
+        .collect::<Result<_, std::num::ParseFloatError>>()?;
+    assert!(rotated.iter().all(|(_, before, after)| before != after));
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::MoveNodes(MoveNodes {
+            moves: rotated.clone(),
+        })]),
+    )?;
     // The delete tool or key on a selection: three unmarked nodes no other edit touches go
     // in one DeleteNodes, in id order.
     let busy = [
         &busy[..],
         &group.iter().map(|g| g.0).collect::<Vec<_>>()[..],
+        &rotated.iter().map(|g| g.0).collect::<Vec<_>>()[..],
     ]
     .concat();
     let mut gone: Vec<NodeId> = cfg
@@ -360,6 +411,11 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
         .filter_map(|&(id, _, after)| Some((index_of(id)?, after)))
         .collect();
     assert_eq!(group_moved.len(), 3);
+    let rotated_moved: Vec<(usize, (f64, f64, f64))> = rotated
+        .iter()
+        .filter_map(|&(id, _, after)| Some((index_of(id)?, after)))
+        .collect();
+    assert_eq!(rotated_moved.len(), 3);
     assert_eq!(cfg.network.len(), order.len() - 4);
 
     let dir = std::env::temp_dir().join(format!("ad_golden_edited_{}", std::process::id()));
@@ -390,6 +446,10 @@ fn edited_fixture_saves_and_reloads_to_the_same_model() -> Result<(), Error> {
     assert_eq!((m.x, m.y, m.z), after);
     for (i, after) in group_moved {
         let m = net.node(net.order()[i]).ok_or("group node")?;
+        assert_eq!((m.x, m.y, m.z), after);
+    }
+    for (i, after) in rotated_moved {
+        let m = net.node(net.order()[i]).ok_or("rotated node")?;
         assert_eq!((m.x, m.y, m.z), after);
     }
     let kinds: Vec<_> = net

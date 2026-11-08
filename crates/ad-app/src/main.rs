@@ -239,6 +239,9 @@ impl App {
             Action::MoveTool if self.editable() => {
                 self.set_tool(Some(Box::new(tools::move_node::MoveTool::default())));
             }
+            Action::RotateTool if self.editable() => {
+                self.set_tool(Some(Box::new(tools::rotate::RotateTool::default())));
+            }
             Action::PriorityTool if self.editable() => {
                 self.set_tool(Some(Box::new(tools::priority::PriorityTool)));
             }
@@ -269,6 +272,7 @@ impl App {
             Action::DeleteHovered if self.editable() => self.delete_hovered(),
             Action::NodeTool
             | Action::MoveTool
+            | Action::RotateTool
             | Action::ConnectTool
             | Action::PriorityTool
             | Action::FlipTool
@@ -657,6 +661,63 @@ mod tests {
         assert!(!doc.history.can_undo(), "one undo step");
         assert_eq!(doc.selection, std::collections::BTreeSet::from([id, b, c]));
         assert_eq!(positions(&app), start);
+    }
+
+    #[test]
+    fn a_rotation_of_the_selection_undoes_in_one_step() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        let id = first(&app);
+        let doc = app.doc.as_mut().expect("doc");
+        let b = doc
+            .config
+            .network
+            .add_node(11.0, 3.0, 2.0, NodeFlag::REGULAR);
+        doc.selection.extend([id, b]);
+        // The tool has seen a view at zoom 4, as after one painted frame.
+        let tool = tools::rotate::RotateTool::default();
+        let mut t = crate::view::ViewTransform::new((512.0, 512.0), (1024.0, 1024.0));
+        t.zoom = 4.0;
+        tool.see(&t, doc.map.geometry, doc.map.node_size);
+        let net = &doc.config.network;
+        let (hx, hz) = tool.handle_at(net, &doc.selection).expect("handle");
+        let geometry = doc.map.geometry;
+        app.set_tool(Some(Box::new(tool)));
+        let positions = |app: &App| {
+            let net = &app.doc.as_ref().expect("doc").config.network;
+            [id, b].map(|n| net.node(n).map(|n| (n.x, n.y, n.z)).expect("node"))
+        };
+        let start = positions(&app);
+        // The centre is (6, 2); the pointer ends 90° clockwise from the handle.
+        let radius = 2.0 - hz;
+        let events = [
+            DragEvent::Start {
+                at: geometry.to_map(hx, hz),
+                node: None,
+            },
+            DragEvent::End {
+                at: geometry.to_map(6.0 + radius, 2.0),
+            },
+        ];
+        for event in events {
+            drag(&mut app, event, false);
+        }
+        let [(ax, ay, az), (bx, by, bz)] = positions(&app);
+        assert!((ax - 6.0).abs() < 1e-9 && (az - -3.0).abs() < 1e-9);
+        assert!((bx - 6.0).abs() < 1e-9 && (bz - 7.0).abs() < 1e-9);
+        assert_eq!((ay, by), (0.0, 3.0));
+        app.run(Action::Undo);
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(!doc.history.can_undo(), "one undo step");
+        assert_eq!(positions(&app), start);
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_rotate_tool() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<markerID>1</markerID>");
+        app.run(Action::RotateTool);
+        assert!(app.tool.is_none());
     }
 
     #[test]

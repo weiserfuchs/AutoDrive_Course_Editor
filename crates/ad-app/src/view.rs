@@ -3057,5 +3057,53 @@ mod tests {
             west_grabbed,
             0.0,
         );
+
+        // Story 4.6: every node inside the map selected and turned with the rotate tool's
+        // handle, 2° per frame back and forth (0 → 16° → -14° → -2°), the view centred on the
+        // dense node and given the tool's selection.
+        let pivot = crate::tools::rotate::centre(net, &inside).expect("a centre");
+        let rotate_case = |name: &str, steps: f64| {
+            let ctx = |(x, z): (f64, f64)| crate::tools::ToolContext {
+                x,
+                z,
+                map: &map,
+                net,
+                selection: &inside,
+                snap: false,
+                hovered_node: None,
+                hovered_edge: None,
+            };
+            let handle = std::cell::Cell::new((0.0, 0.0));
+            let begin = |v: &mut MapView| {
+                at(start_px, steps)(v);
+                let tool = crate::tools::rotate::RotateTool::default();
+                tool.see(v.transform.as_ref().expect("set"), geometry, 2.0);
+                handle.set(tool.handle_at(net, &inside).expect("a handle"));
+                let mut tool: Box<dyn crate::tools::Tool> = Box::new(tool);
+                assert!(tool.on_drag_start(&ctx(handle.get()), None));
+                app.borrow_mut().tool = Some(tool);
+            };
+            let step = |_: &mut MapView, i: usize| {
+                let angle = drag_px(i) / 20.0;
+                let mut app = app.borrow_mut();
+                let tool = app.tool.as_deref_mut().expect("rotate tool");
+                tool.on_drag(&ctx(crate::tools::rotate::turned(
+                    handle.get(),
+                    pivot,
+                    angle,
+                )));
+                // Every selected node is previewed, turned by the whole-degree angle.
+                let preview = tool.preview().expect("preview");
+                assert_eq!(preview.len(), inside.len());
+                let want = crate::tools::rotate::turned(start, pivot, angle);
+                let got = preview[&dragged];
+                assert!((got.0 - want.0).abs() < 1e-6 && (got.1 - want.1).abs() < 1e-6);
+            };
+            group_selected.set(Some(&inside));
+            report(name, true, &begin, &step, false);
+            group_selected.set(None);
+        };
+        rotate_case("rotate: min zoom, whole network selected", 0.0);
+        rotate_case("rotate: max zoom, whole network selected", 100.0);
     }
 }
