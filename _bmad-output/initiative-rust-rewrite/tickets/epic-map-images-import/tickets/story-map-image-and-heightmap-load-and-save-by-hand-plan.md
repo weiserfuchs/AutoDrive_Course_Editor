@@ -3,14 +3,14 @@ title: 'Map image and heightmap load and save by hand'
 type: 'feature'
 ticket: '5'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: 'e0a118a'
 route: 'full'
 route_source: 'auto'
 risk: 'low'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -90,3 +90,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - checked: `MapImage` carries its PNG bytes, so every way an image is shown can be saved without a full RGBA copy after upload (AD-8).
+  - accepted: without a map name the targets are Java's `mapImages/unknown.png` and `unknown_HeightMap.png`; a manual load drops earlier "Map image …" notice lines.
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 384).
