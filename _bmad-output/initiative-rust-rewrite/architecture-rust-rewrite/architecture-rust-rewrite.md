@@ -219,6 +219,8 @@ graph TD
   - Copy and align clearing the selection. Both keep it, as the other selection tools do (epic-selection-clipboard, 2026-11-08).
   - Paste duplicating marker names. A name already used gets the first free `_2`, `_3`, … suffix (epic-selection-clipboard, 2026-11-08).
   - Edit Location rounding untouched fields to three decimals. A field left as prefilled keeps the node's exact value, so OK without an edit changes nothing (epic-selection-clipboard, 2026-11-08).
+  - Arc spline nodes committed at y = 0. They take heights per AD-7, or the "no height" sentinel without a heightmap (epic-curves-lines, 2026-11-08).
+  - Curve previews surviving a tool switch, several at once. One curve or arc at a time; switching tools or files discards it (AD-10) (epic-curves-lines, 2026-11-08).
   - A line reusing an existing node that lies under an interpolated point (Java's `getNodeAtWorldPosition`). A line always creates its interpolated nodes and links only its start and end to existing nodes (epic-curves-lines, 2026-11-08).
 
 ### AD-14 — MapContext is the single owner of map-level data
