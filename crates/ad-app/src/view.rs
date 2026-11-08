@@ -3249,5 +3249,83 @@ mod tests {
             false,
         );
         all_selected.set(false);
+
+        // Story 5.5: a Bézier curve from the dense node to a node of the dense cell 40 to 80
+        // world units away, 50 interpolation points and 4 control points, the handles spread
+        // 20 world units apart, the first handle dragged with the pointer triangle of the drags
+        // above. The view is centred on the curve's midpoint.
+        let curve_end = *ids
+            .iter()
+            .find(|id| {
+                net.node(**id).is_some_and(|n| {
+                    let d = (n.x - start.0).hypot(n.z - start.1);
+                    (40.0..80.0).contains(&d)
+                })
+            })
+            .expect("a node 40 to 80 world units from the dense node");
+        let end = net.node(curve_end).map(|n| (n.x, n.z)).expect("node");
+        let mid = ((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0);
+        let curve_ctx = |(x, z): (f64, f64), hovered: Option<NodeId>| crate::tools::ToolContext {
+            x,
+            z,
+            map: &map,
+            net,
+            selection: &none_selected,
+            snap: false,
+            hovered_node: hovered,
+            hovered_edge: None,
+        };
+        let curve_case = |name: &str, steps: f64| {
+            // The grabbed handle's position when the drag starts, and its last position.
+            let grabbed = std::cell::Cell::new((0.0, 0.0));
+            let last = std::cell::Cell::new(None);
+            let begin = |v: &mut MapView| {
+                at(geometry.to_map(mid.0, mid.1), steps)(v);
+                let mut tool = crate::tools::bezier::BezierTool::default();
+                tool.see(v.transform.as_ref().expect("set"), geometry);
+                let tool_ref: &mut dyn crate::tools::Tool = &mut tool;
+                assert!(
+                    tool_ref
+                        .on_click(&curve_ctx(start, Some(dragged)))
+                        .is_none()
+                );
+                assert!(
+                    tool_ref
+                        .on_click(&curve_ctx(end, Some(curve_end)))
+                        .is_none()
+                );
+                let curve = tool_ref.curve_mut().expect("a curve");
+                curve.points = crate::tools::bezier::MAX_POINTS;
+                curve.controls = crate::tools::bezier::MAX_CONTROLS;
+                for i in 0..crate::tools::bezier::MAX_CONTROLS {
+                    curve.move_handle(i, ((i as f64 - 1.5) * 20.0, 10.0));
+                }
+                let handle = curve.handles()[0];
+                assert!(tool_ref.on_drag_start(&curve_ctx(handle, None), None));
+                grabbed.set(handle);
+                last.set(None);
+                app.borrow_mut().tool = Some(Box::new(tool));
+            };
+            let step = |v: &mut MapView, i: usize| {
+                let zoom = v.transform.as_ref().expect("set").zoom;
+                let dx = drag_px(i) / zoom * geometry.scale;
+                let (hx, hz) = grabbed.get();
+                let mut app = app.borrow_mut();
+                let tool = app.tool.as_deref_mut().expect("bezier tool");
+                tool.on_drag(&curve_ctx((hx + dx, hz), None));
+                // The handle follows the pointer, so it moved since the last step.
+                let curve = tool.curve_mut().expect("a curve");
+                assert_eq!(curve.handles().len(), crate::tools::bezier::MAX_CONTROLS);
+                let now = curve.handles()[0];
+                assert!((now.0 - (hx + dx)).abs() < 1e-9 && (now.1 - hz).abs() < 1e-9);
+                if let Some(prev) = last.get() {
+                    assert_ne!(prev, now);
+                }
+                last.set(Some(now));
+            };
+            report(name, true, &begin, &step, false);
+        };
+        curve_case("curve: min zoom, 50 points, dragging a handle", 0.0);
+        curve_case("curve: max zoom, 50 points, dragging a handle", 100.0);
     }
 }

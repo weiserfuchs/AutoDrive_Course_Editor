@@ -41,4 +41,11 @@ context: []
 
 ## Implementation Notes
 
+- `frame_time` (`crates/ad-app/src/view.rs`) gains `curve_case`, built like `rotate_case`. `begin` centres the view on the curve's midpoint at the case's zoom, creates the Bézier tool, has it `see` the view, clicks the dense node (the drag cases' `dragged`) and then the first node of the dense cell 40 to 80 world units away. It sets the curve's panel fields `points = MAX_POINTS` (50) and `controls = MAX_CONTROLS` (4), spreads the four handles 20 world units apart (`move_handle(i, ((i - 1.5) * 20, 10))`), starts a drag on handle 0 and installs the tool in `app`. `step` moves the pointer by `drag_px(i)` along x and asserts that the handle sits under the pointer and moved since the last step (from the second step after `begin` on). The tool's `paint_selection` draws the preview, so every frame paints the 50 points, 51 segments and 4 handles.
+- Cases: "curve: min zoom, 50 points, dragging a handle" and "curve: max zoom, 50 points, dragging a handle". No other case changed, and no Bézier code changed: both cases came in far under budget, so the paint path needed no fix.
+- Numbers (best round: median / max ms, release, developer machine):
+  - Run 1: min zoom 2.134 / 2.259; max zoom 0.108 / 0.120.
+  - Run 2: min zoom 2.169 / 2.482; max zoom 0.103 / 0.110.
+  - At min zoom the cost is the network itself, about the same as "drag: min zoom, dense node" (2.2 to 2.3 ms). Every other case was ok in both runs; the worst best-round max was "rotate: min zoom, whole network selected" at 12.280 ms.
+
 ## Review Triage Log
