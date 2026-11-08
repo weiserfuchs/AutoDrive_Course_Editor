@@ -1,0 +1,81 @@
+# Stories of epic-curves-lines in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "PasteNodes links new nodes to existing ones"
+description = "Tracer for every commit of the epic: a PasteNodes link end may be a new node (by index) or an existing node (by NodeId); apply checks the existing ends, revert removes only what it added, redo keeps the ids. Copy and paste (story 4.9) keep working unchanged. No user-visible change."
+verify = "ad-core tests show links to existing nodes applied, reverted and redone exactly, and a missing existing end refused with the network unchanged; the paste tests and the edited golden test still pass, and it saves a group linked to existing nodes."
+covers = ["R4"]
+after = ["epic-selection-clipboard"]
+hitl = false
+risk = "medium"
+references = ["architecture-rust-rewrite/architecture-rust-rewrite.md#ad-4--every-model-mutation-is-a-command-through-one-history"]
+
+[[entry]]
+id = 2
+type = "story"
+title = "Connect tools draw straight lines with interpolated nodes"
+description = "As Java's LinearLine: a connect (regular, dual, reverse) between two nodes farther apart than the line node distance creates nodes at that spacing along the line and links start, nodes and end with the chosen shape, in one PasteNodes; shorter links connect directly as today. With the end-node option on, a click on empty map ends the line at a new node there (grid snap as the node tool). Heights per AD-7. The preview shows the interpolated nodes. Continuous mode continues from the end. Both options live in settings.toml (LinearLineNodeDistance default 12, CreateLinearLineEndNode default off). The person's step: draw a long line on the fixture and undo it."
+verify = "Tests show the node count and spacing, shapes of every segment, heights from a heightmap and interpolated without one, the end-node option, continuous mode, one undo; the edited golden test saves a line; the user draws a long line on the fixture and undoes it."
+covers = ["R1", "R4"]
+after = [1]
+hitl = true
+risk = "medium"
+references = ["research-editing-tools-and-change-history/research-editing-tools-and-change-history.md#1-how-does-a-toolbar-tool-receive-mouse-and-keyboard-input-and-change-the-road-network-create-move-and-delete-nodes-connections"]
+
+[[entry]]
+id = 3
+type = "story"
+title = "A Bézier curve previews between two nodes and commits from a curve panel"
+description = "The Bézier tool (B): a click on a start node, then on an end node, shows a curve preview with its control points placed as Java does. A curve panel sets interpolation points (1..50, default 6), control points (1..4), priority, connection type (regular, dual, reverse), swaps direction, commits and cancels. Commit is one PasteNodes: the interpolated nodes linked start → nodes → end; heights per AD-7, without Java's divide-by-zero at one point. Switching tools or files cancels the preview (AD-10). The person's step: draw a curve on the fixture, change its settings, commit and undo."
+verify = "Tests show the Bernstein points for each control-point count (t = i/(N+1)), the panel settings in the commit, swap direction, one interpolation point, heights, cancel on tool switch and document replacement, one undo; the edited golden test saves a curve; the user draws and commits a curve on the fixture."
+covers = ["R2", "R4"]
+after = [2]
+hitl = true
+risk = "medium"
+references = ["research-editing-tools-and-change-history/research-editing-tools-and-change-history.md#2-how-are-curves-bezier-arc-spline-created-edited-and-committed-to-nodes"]
+
+[[entry]]
+id = 4
+type = "story"
+title = "Dragging control points reshapes the Bézier preview"
+description = "Control points of the previewed curve show as handles; dragging one moves its virtual control point by the mouse difference times Java's move scaler 3, and the preview follows live. A drag on a handle never pans or selects. Nothing commits until the panel's commit. The person's step: reshape a curve on the fixture by dragging its control points and commit it."
+verify = "Tests show the scaled control-point move, the preview following it, handles taking the drag before the map, and no commit until commit; the user reshapes and commits a curve."
+covers = ["R2"]
+after = [3]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "A curve preview at fifty interpolation points stays within the frame budget"
+description = "Extends the headless frame-time test with a Bézier preview at 50 interpolation points and 4 control points being dragged, at minimum and maximum zoom. Fixes what the measurement shows is over budget."
+verify = "cargo test -p ad-app --release -- --ignored frame_time reports the curve cases under 16 ms best-round median and max."
+covers = ["R5"]
+after = [4]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 6
+type = "story"
+title = "An arc spline previews with handles and commits with heightmap heights"
+description = "As Java's experimental ArcSpline: a click on empty map places a half circle (radius 8, minimum 2) as a preview; handles move it, turn its start and end angles and change its radius; the curve panel sets interpolation points, priority and connection type and commits or cancels. Commit is one PasteNodes of N+2 nodes linked in order, standalone as in Java, with heights per AD-7 instead of Java's y = 0. The person's step: place, shape and commit an arc on the fixture and undo it."
+verify = "Tests show the arc points (even in angle, both ends included), each handle, heights, cancel on tool switch, one undo; the edited golden test saves an arc; the user places and commits an arc on the fixture."
+covers = ["R3", "R4"]
+after = [5]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred; scope is set at its start and limited to cleanup."
+verify = "CI is green and the golden, round-trip and frame-time tests still pass."
+covers = []
+after = [1, 2, 3, 4, 5, 6]
+hitl = false
+risk = "low"

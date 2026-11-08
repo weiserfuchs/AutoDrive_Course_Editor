@@ -35,9 +35,9 @@ after = [{ epic = 3, needs = "the Tool trait and core edit commands" }]
 id = 5
 slug = "epic-curves-lines"
 title = "Users draw curves and lines"
-description = "Bezier curves, arc splines and straight lines preview, adjust and commit as nodes and connections with heightmap heights."
+description = "Users draw straight lines with interpolated nodes, Bézier curves and arc splines; each previews, adjusts and commits as nodes and connections with heightmap heights in one undoable step."
 covers = ["R5"]
-after = [{ epic = 3, needs = "the Tool trait, connect commands and overlays" }]
+after = [{ epic = 3, needs = "the Tool trait, connect commands and overlays" }, { epic = 4, needs = "PasteNodes and the selection-aware Document" }]
 
 [[epic]]
 id = 6
