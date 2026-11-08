@@ -4,6 +4,7 @@
 pub mod align;
 pub mod connect;
 pub mod delete;
+pub mod edit_location;
 pub mod flip;
 pub mod move_node;
 pub mod node;
@@ -58,6 +59,12 @@ pub trait Tool {
 
     /// A primary click on the map; returns the transaction to commit, if any.
     fn on_click(&mut self, ctx: &ToolContext) -> Option<Transaction>;
+
+    /// The node whose Edit location dialog the last click asked for; the app takes it
+    /// right after the click. Only the Edit location tool asks.
+    fn take_location_request(&mut self) -> Option<NodeId> {
+        None
+    }
 
     /// A primary drag starts at `ctx`, on `hovered` if it started on a node. Returning
     /// true claims the drag: the view does not pan it and reports its moves and end here.

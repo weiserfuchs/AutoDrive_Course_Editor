@@ -75,6 +75,7 @@ context: []
 - The guide line needs the hovered node at paint time, which no hook carried. `ViewHooks::paint` gained a `hovered_node` parameter (this frame's hover, which the view knows when it calls the hook), and `ToolHooks` forwards it to `Tool::paint_selection`, which gained a `hovered: Option<NodeId>` parameter (rotate ignores it; `#[allow(clippy::too_many_arguments)]` as in `view.rs`). A first version passed the previous frame's hover from before `view.show`; review found the guide could go stale once the pointer rests, since egui repaints only on input, so it now uses the same frame's hover (test `the_align_guide_follows_the_hover_of_the_same_frame`).
 - Depth draws no guide, as in Java. The guide is a white dashed 3 px line at half alpha across the painter's clip rect.
 - Verified: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (incl. `golden_edited` with the aligned group) and `frame_time` (all cases under 16 ms) pass. The GUI hand check (acceptance criterion on the fixture) is still for a human; `shift_x_aligns_the_selection_to_a_clicked_node_and_undo_restores_it` covers it headless.
+- Hand check (user): horizontal and vertical align, guide and undo confirmed. Align depth is hard to see without a way to read heights; the user checks it after story 4.8 (Edit Location).
 
 ## Plan Change Log
 

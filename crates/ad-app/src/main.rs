@@ -77,6 +77,8 @@ struct App {
     pending: Option<Pending>,
     /// The action whose unsaved-changes prompt is shown.
     prompt: Option<Pending>,
+    /// The Edit location dialog, while it is shown.
+    location: Option<tools::edit_location::LocationDialog>,
     /// Set once closing was agreed; the next close request is not intercepted.
     allow_close: bool,
     /// The title last sent to the window.
@@ -105,6 +107,7 @@ impl App {
             lasso: false,
             pending: None,
             prompt: None,
+            location: None,
             allow_close: false,
             title: window_title(None),
         }
@@ -197,9 +200,10 @@ impl App {
             ) {
                 self.error = Some(message);
             }
-            // A new document cancels the active tool (AD-18).
+            // A new document cancels the active tool (AD-18) and the dialog of an old node.
             if self.doc.as_ref().map(|d| d.epoch) != before {
                 self.set_tool(None);
+                self.location = None;
             }
         }
     }
@@ -325,16 +329,17 @@ impl App {
     }
 
     /// Hands a primary click at map pixel `(px, py)` to the active tool and commits the
-    /// transaction it returns. A read-only document gets no click.
+    /// transaction it returns, or opens the Edit location dialog it asks for. A read-only
+    /// document gets no click, nor does the map while the dialog is shown.
     fn click(&mut self, px: f64, py: f64, snap: bool) {
-        if !self.editable() {
+        if !self.editable() || self.location.is_some() {
             return;
         }
         let (Some(doc), Some(tool)) = (&mut self.doc, &mut self.tool) else {
             return;
         };
         let (x, z) = doc.map.geometry.to_world(px, py);
-        let Some(tx) = tool.on_click(&tools::ToolContext {
+        let tx = tool.on_click(&tools::ToolContext {
             x,
             z,
             map: &doc.map,
@@ -343,7 +348,36 @@ impl App {
             snap,
             hovered_node: self.view.hovered_node,
             hovered_edge: self.view.hovered_edge,
-        }) else {
+        });
+        if let Some(node) = tool.take_location_request() {
+            self.location = tools::edit_location::LocationDialog::open(&doc.config.network, node);
+        }
+        let Some(tx) = tx else {
+            return;
+        };
+        if let Err(e) = doc.apply(tx) {
+            self.error = Some(e.to_string());
+        }
+    }
+
+    /// Closes the Edit location dialog. With `ok`, sets its node to the typed position in
+    /// one transaction, unless a field is invalid, nothing changed, the node is gone or
+    /// the document is read-only.
+    fn finish_location(&mut self, ok: bool) {
+        let Some(dialog) = self.location.take() else {
+            return;
+        };
+        if !ok || !self.editable() {
+            return;
+        }
+        let Some(doc) = &mut self.doc else {
+            return;
+        };
+        let [Ok(x), Ok(y), Ok(z)] = dialog.values(doc.map.geometry.scale) else {
+            return;
+        };
+        let Some(tx) = tools::edit_location::plan(&doc.config.network, dialog.node, (x, y, z))
+        else {
             return;
         };
         if let Err(e) = doc.apply(tx) {
@@ -417,13 +451,12 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
         }
-        // The prompt is modal: no shortcut reaches the map while it is shown.
-        if self.prompt.is_none() {
-            input::handle_shortcuts(self, &ctx);
-        }
+        input::handle_shortcuts(self, &ctx);
         ui::top_bar(self, ui, &ctx);
         egui::CentralPanel::default().show(ui, |ui| ui::map_panel(self, ui));
         ui::error_window(self, &ctx);
+        // Before the prompt, so a prompt from a window close shows on top of it.
+        ui::location_dialog(self, &ctx);
         ui::unsaved_prompt(self, &ctx);
     }
 }
@@ -787,6 +820,121 @@ mod tests {
         app.view.hovered_node = Some(reference);
         app.click(0.0, 0.0, false);
         assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+    }
+
+    /// Loads the one-node config of `version`, picks Edit location and clicks with the node
+    /// hovered, or with nothing hovered when `on_node` is false.
+    fn edit_location(version: &str, on_node: bool) -> App {
+        let mut app = App::new(Settings::default());
+        load(&mut app, version);
+        app.tool = Some(Box::new(tools::edit_location::EditLocationTool::default()));
+        app.view.hovered_node = on_node.then(|| first(&app));
+        app.click(0.0, 0.0, false);
+        app
+    }
+
+    #[test]
+    fn an_edit_location_click_opens_the_dialog_for_the_hovered_node_only() {
+        let app = edit_location("<version>3</version>", true);
+        let dialog = app.location.as_ref().expect("dialog");
+        assert_eq!(dialog.node, first(&app));
+        assert_eq!(dialog.text, ["1.000", "0.000", "2.000"].map(String::from));
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+        let app = edit_location("<version>3</version>", false);
+        assert!(app.location.is_none());
+    }
+
+    #[test]
+    fn edit_location_ok_commits_one_move_and_one_undo_restores_it() {
+        let mut app = edit_location("<version>3</version>", true);
+        let id = first(&app);
+        app.doc.as_mut().expect("doc").selection.insert(id);
+        let start = state(&app).0;
+        app.location.as_mut().expect("dialog").text =
+            ["12.3456", "  4,5 ", "-7.0005"].map(String::from);
+        app.finish_location(true);
+        assert!(app.location.is_none());
+        assert_eq!(state(&app), ((12.346, 4.5, -7.001), true));
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!(doc.selection, std::collections::BTreeSet::from([id]));
+        app.run(Action::Undo);
+        assert_eq!(state(&app), (start, false), "one undo step");
+    }
+
+    #[test]
+    fn edit_location_cancel_unchanged_or_invalid_commits_nothing() {
+        let edits: [([&str; 3], bool); 4] = [
+            (["5", "5", "5"], false),
+            (["1.000", "0.000", "2.000"], true),
+            (["1.0004", "0", "2"], true),
+            (["5", "-1", "5"], true),
+        ];
+        for (text, ok) in edits {
+            let mut app = edit_location("<version>3</version>", true);
+            let start = state(&app);
+            app.location.as_mut().expect("dialog").text = text.map(String::from);
+            app.finish_location(ok);
+            assert!(app.location.is_none(), "{text:?}");
+            assert_eq!(state(&app), start, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn read_only_document_ignores_the_edit_location_tool() {
+        let mut app = edit_location("<markerID>1</markerID>", true);
+        assert!(app.location.is_none(), "no dialog");
+        // Even a dialog left open commits nothing.
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        let mut dialog = tools::edit_location::LocationDialog::open(net, first(&app));
+        dialog.as_mut().expect("dialog").text[0] = "5".to_owned();
+        app.location = dialog;
+        app.finish_location(true);
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
+    }
+
+    #[test]
+    fn shortcuts_and_clicks_do_nothing_while_the_edit_location_dialog_is_shown() {
+        let mut app = edit_location("<version>3</version>", true);
+        // Something to undo: the node moved through the dialog, then the dialog again.
+        app.location.as_mut().expect("dialog").text[0] = "5".to_owned();
+        app.finish_location(true);
+        app.click(0.0, 0.0, false);
+        assert!(app.location.is_some());
+        let before = state(&app);
+        let ctx = egui::Context::default();
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let ctrl = egui::Modifiers::CTRL.plus(egui::Modifiers::COMMAND);
+        let input = egui::RawInput {
+            events: vec![
+                key(egui::Key::Z, ctrl),
+                key(egui::Key::N, egui::Modifiers::NONE),
+                key(egui::Key::S, egui::Modifiers::NONE),
+            ],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| input::handle_shortcuts(&mut app, ui.ctx()));
+        out.textures_delta.clear();
+        assert_eq!(state(&app), before, "no undo");
+        assert_eq!(active(&app), Some("Edit location"));
+        assert!(!app.snap);
+        // A click on the map while it is shown opens nothing new and commits nothing.
+        let shown = app.location.clone();
+        app.click(0.0, 0.0, false);
+        assert_eq!(app.location, shown);
+    }
+
+    #[test]
+    fn a_new_document_closes_the_edit_location_dialog() {
+        let mut app = edit_location("<version>3</version>", true);
+        assert!(app.location.is_some());
+        load(&mut app, "<version>3</version>");
+        assert!(app.location.is_none());
     }
 
     #[test]

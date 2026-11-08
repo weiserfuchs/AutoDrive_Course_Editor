@@ -125,8 +125,12 @@ pub(crate) fn pressed(ctx: &egui::Context) -> Vec<Action> {
     })
 }
 
-/// Handles the shortcuts pressed this frame.
+/// Handles the shortcuts pressed this frame. The unsaved prompt and the Edit location
+/// dialog are modal: no shortcut acts, nor is its key consumed, while one is shown.
 pub(crate) fn handle_shortcuts(app: &mut App, ctx: &egui::Context) {
+    if app.prompt.is_some() || app.location.is_some() {
+        return;
+    }
     for action in pressed(ctx) {
         app.run(action);
     }

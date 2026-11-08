@@ -14,6 +14,7 @@ use crate::input::{self, Action};
 use crate::tools::align::{AlignTool, Axis};
 use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
+use crate::tools::edit_location::{self, EditLocationTool};
 use crate::tools::flip::FlipTool;
 use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
@@ -71,7 +72,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
-    let tools: [Box<dyn Tool>; 13] = [
+    let tools: [Box<dyn Tool>; 14] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
@@ -79,6 +80,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         Box::new(AlignTool::new(Axis::Horizontal)),
         Box::new(AlignTool::new(Axis::Vertical)),
         Box::new(AlignTool::new(Axis::Depth)),
+        Box::new(EditLocationTool::default()),
         Box::new(DeleteTool),
         Box::new(PriorityTool),
         Box::new(FlipTool),
@@ -298,6 +300,8 @@ impl ViewHooks for ToolHooks<'_> {
 /// The map view of the open document, with the overlay hook tools draw into.
 pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
+    // The Edit location dialog is modal: the map takes no tool input or selection then.
+    let modal = app.location.is_some();
     let snap = input::snap(app.snap, ui.ctx());
     let Some(doc) = &mut app.doc else {
         app.view.clear_hover();
@@ -320,7 +324,7 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     app.view.grid = doc.map.grid;
     // A read-only document gets no tool input (AD-11).
     // Selection changes no data, so it works on a read-only document too.
-    let tool = app.tool.as_deref_mut().filter(|_| editable);
+    let tool = app.tool.as_deref_mut().filter(|_| editable && !modal);
     let mut hooks = ToolHooks::new(tool, &doc.map, &doc.config.network, &doc.selection, snap);
     hooks.lasso = app.lasso;
     hooks.revision = doc.revision;
@@ -339,7 +343,7 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     {
         app.error = Some(e.to_string());
     }
-    if let Some(event) = select_event {
+    if let Some(event) = select_event.filter(|_| !modal) {
         select(
             &mut doc.selection,
             &doc.config.network,
@@ -366,6 +370,43 @@ pub(crate) fn error_window(app: &mut App, ctx: &egui::Context) {
         if !open {
             app.error = None;
         }
+    }
+}
+
+/// The Edit location dialog: x, y and z fields, each with a red note while its text is
+/// refused. OK or Enter, with every field valid, commits; Cancel, Escape or a click
+/// beside the dialog commits nothing.
+pub(crate) fn location_dialog(app: &mut App, ctx: &egui::Context) {
+    let Some(scale) = app.doc.as_ref().map(|d| d.map.geometry.scale) else {
+        return;
+    };
+    let Some(dialog) = &mut app.location else {
+        return;
+    };
+    let (mut ok, mut cancel) = (false, false);
+    let modal = egui::Modal::new(egui::Id::unique("edit_location")).show(ctx, |ui| {
+        ui.heading("Edit location");
+        let mut valid = true;
+        for (i, axis) in edit_location::AXES.iter().enumerate() {
+            ui.label(*axis);
+            ui.text_edit_singleline(&mut dialog.text[i]);
+            if let Err(note) = &dialog.values(scale)[i] {
+                ui.colored_label(ui.visuals().error_fg_color, note.to_string());
+                valid = false;
+            }
+        }
+        ui.horizontal(|ui| {
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ok = ui.add_enabled(valid, egui::Button::new("OK")).clicked() || (valid && enter);
+            cancel = ui.button("Cancel").clicked();
+        });
+    });
+    // Always asked, so Escape is consumed while the dialog is on top.
+    let closed = modal.should_close();
+    if ok {
+        app.finish_location(true);
+    } else if cancel || closed {
+        app.finish_location(false);
     }
 }
 
@@ -843,6 +884,104 @@ mod tests {
         assert_eq!(click(&mut app, node), []);
         assert_eq!(click(&mut app, node), [id]);
         assert_eq!(click(&mut app, egui::pos2(100.0, 100.0)), []);
+    }
+
+    /// One frame of the Edit location dialog with `keys` pressed.
+    fn dialog_frame(ctx: &egui::Context, app: &mut App, keys: &[egui::Key]) {
+        let events = keys
+            .iter()
+            .map(|&key| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            })
+            .collect();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 1024.0),
+            )),
+            time: Some(ctx.input(|i| i.time) + 0.016),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| location_dialog(app, ui.ctx()));
+        out.textures_delta.clear();
+    }
+
+    /// The node's position and whether there is anything to undo.
+    fn node_state(app: &App) -> ((f64, f64, f64), bool) {
+        let doc = app.doc.as_ref().expect("doc");
+        let net = &doc.config.network;
+        let n = net.node(net.order()[0]).expect("node");
+        ((n.x, n.y, n.z), doc.history.can_undo())
+    }
+
+    #[test]
+    fn enter_commits_a_valid_dialog_and_escape_cancels_it() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        let id = app.doc.as_ref().expect("doc").config.network.order()[0];
+        let open = |app: &mut App, x: &str| {
+            let net = &app.doc.as_ref().expect("doc").config.network;
+            let mut dialog = edit_location::LocationDialog::open(net, id).expect("node");
+            dialog.text[0] = x.to_owned();
+            app.location = Some(dialog);
+        };
+        // Enter with a field refused keeps the dialog and commits nothing.
+        open(&mut app, "abc");
+        dialog_frame(&ctx, &mut app, &[]);
+        dialog_frame(&ctx, &mut app, &[egui::Key::Enter]);
+        assert!(app.location.is_some());
+        assert_eq!(node_state(&app), ((1.0, 0.0, 2.0), false));
+        // Escape closes it and commits nothing.
+        open(&mut app, "8");
+        dialog_frame(&ctx, &mut app, &[egui::Key::Escape]);
+        assert!(app.location.is_none());
+        assert_eq!(node_state(&app), ((1.0, 0.0, 2.0), false));
+        // Enter with every field valid commits.
+        open(&mut app, "8,25");
+        dialog_frame(&ctx, &mut app, &[]);
+        dialog_frame(&ctx, &mut app, &[egui::Key::Enter]);
+        assert!(app.location.is_none());
+        assert_eq!(node_state(&app), ((8.25, 0.0, 2.0), true));
+    }
+
+    #[test]
+    fn a_click_with_edit_location_opens_the_dialog_and_the_map_then_ignores_selection() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        let id = app.doc.as_ref().expect("doc").config.network.order()[0];
+        app.tool = Some(Box::new(EditLocationTool::default()));
+        let primary = egui::PointerButton::Primary;
+        // Zoom 2 so the node is large enough to hit: world (1, 2) is at screen (514, 516).
+        frames(&ctx, &mut app, primary, &[&[]]);
+        app.view.transform_mut().expect("set").zoom = 2.0;
+        let node = egui::pos2(514.0, 516.0);
+        frames(
+            &ctx,
+            &mut app,
+            primary,
+            &[
+                &[(node, None)],
+                &[(node, Some(true))],
+                &[(node, Some(false))],
+            ],
+        );
+        assert_eq!(app.location.as_ref().map(|d| d.node), Some(id));
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(doc.selection.is_empty(), "the selection is unaffected");
+        assert!(!doc.history.can_undo());
+        // A right click on the node would select it, but not while the dialog is shown.
+        frames(
+            &ctx,
+            &mut app,
+            egui::PointerButton::Secondary,
+            &[&[(node, Some(true))], &[(node, Some(false))], &[]],
+        );
+        assert!(app.doc.as_ref().expect("doc").selection.is_empty());
     }
 
     #[test]
