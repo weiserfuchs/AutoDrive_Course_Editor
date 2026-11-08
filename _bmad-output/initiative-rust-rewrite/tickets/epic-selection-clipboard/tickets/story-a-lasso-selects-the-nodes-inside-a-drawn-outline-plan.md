@@ -3,14 +3,14 @@ title: 'A lasso selects the nodes inside a drawn outline'
 type: 'feature'
 ticket: '4'
 created: '2026-11-08'
-status: 'in-progress'
+status: 'built'
 baseline_revision: '6efe7efd0a7212d6932105e2400ef0d5f366042d'
 route: 'full'
 route_source: 'auto'
 risk: 'low'
-review: ''
-review_source: ''
-lenses_ran: []
+review: 'quick'
+review_source: 'pinned'
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/initiative-rust-rewrite/tickets/epic-selection-clipboard/tickets/story-a-right-drag-rectangle-selects-nodes-and-the-selection-survi-plan.md'
@@ -80,3 +80,10 @@ context:
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 3 low patched; 1 low and 1 false rejected.
+  - low, patch: a long lasso made the release-frame query cost nodes-in-box × path length (unbounded). The outline is thinned evenly to at most `LASSO_MAX_POINTS` (256) for the query.
+  - low, patch: the `select` doc line ran past the file's wrap width; rewrapped.
+  - low, patch: the `SelectEvent::Lasso` doc promised the release point is always included; it now says the path is sampled every few px.
+  - low, reject: the toolbar switch is untested (the test sets `App.lasso`); two selectable labels bound to one bool, covered by the user's hand check.
+  - false: "the fixture criterion has no evidence". It is the user's hand check.

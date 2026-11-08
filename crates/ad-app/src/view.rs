@@ -160,8 +160,9 @@ pub enum DragEvent {
 pub enum SelectEvent {
     /// A right drag released; `a` is the press and `b` the release position, in map px.
     Rect { a: MapPx, b: MapPx },
-    /// A right drag in lasso mode released; the pointer path from press to release, in
-    /// map px. The outline closes from the last point back to the first.
+    /// A right drag in lasso mode released; the pointer path from the press, sampled every
+    /// few screen px (the release point only when it moved that far), in map px. The
+    /// outline closes from the last point back to the first.
     Lasso { points: Vec<MapPx> },
     /// A right click, on `node` if one was under it.
     Click { node: Option<NodeId> },

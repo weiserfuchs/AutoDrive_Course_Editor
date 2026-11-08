@@ -167,9 +167,12 @@ fn toggle(selection: &mut BTreeSet<NodeId>, ids: impl IntoIterator<Item = NodeId
     }
 }
 
+/// Most outline points a lasso query uses; a longer path is thinned evenly.
+const LASSO_MAX_POINTS: usize = 256;
+
 /// Applies a selection gesture (AD-15): a rectangle toggles every node it covers, edges
-/// included (AD-5); a lasso toggles every node inside its outline; a click on a node toggles it; a click on empty map clears the selection.
-/// The network never changes.
+/// included (AD-5); a lasso toggles every node inside its outline; a click on a node
+/// toggles it; a click on empty map clears the selection. The network never changes.
 pub(crate) fn select(
     selection: &mut BTreeSet<NodeId>,
     net: &Network,
@@ -185,8 +188,12 @@ pub(crate) fn select(
             toggle(selection, ids);
         }
         SelectEvent::Lasso { points } => {
+            // The point-in-polygon test costs nodes-in-box × outline length, so a long
+            // outline is thinned to at most LASSO_MAX_POINTS evenly spaced points.
+            let step = points.len().div_ceil(LASSO_MAX_POINTS).max(1);
             let outline: Vec<(f64, f64)> = points
                 .iter()
+                .step_by(step)
                 .map(|&(px, py)| geometry.to_world(px, py))
                 .collect();
             // Even-odd (AD-5); an outline of fewer than 3 points selects nothing.
