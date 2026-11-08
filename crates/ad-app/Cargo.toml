@@ -18,6 +18,7 @@ image.workspace = true
 
 [dev-dependencies]
 zip.workspace = true
+ad-io = { workspace = true, features = ["test-util"] }
 
 [lints.clippy]
 unwrap_used = "deny"

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+# The download test server, for the tests of dependent crates.
+test-util = []
+
 [dependencies]
 ad-core.workspace = true
 quick-xml.workspace = true
@@ -13,6 +17,7 @@ toml.workspace = true
 image.workspace = true
 image_dds.workspace = true
 zip.workspace = true
+ureq.workspace = true
 
 [lints.clippy]
 unwrap_used = "deny"

@@ -65,3 +65,7 @@
 - source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-selection-clipboard/tickets/story-copy-cut-and-paste-to-the-view-centre-or-the-original-place-plan.md`
   summary: Let Ctrl+C/X/V reach a focused or highlighted text widget outside the modal dialogs before the editor's clipboard shortcuts take them.
   evidence: input.rs consumes egui's Copy/Cut/Paste events before the UI is drawn; today only the error window shows selectable text.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-map-images-import/tickets/story-a-missing-map-image-downloads-in-the-background-plan.md`
+  summary: A map-image download that finishes after another config was opened may overwrite an image the user imported for the same map meanwhile; skip the save when the target appeared after the download started.
+  evidence: jobs.rs saves the fetched bytes unconditionally; Import is enabled again as soon as the open document changes.

@@ -53,7 +53,8 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             {
                 app.save(ctx);
             }
-            let can_import = !app.loading && !app.importing;
+            // Not while downloading either: the download would replace the imported image.
+            let can_import = !app.loading && !app.importing && !app.downloading_for_doc();
             let has_doc = app.doc.is_some();
             ui.add_enabled_ui(can_import, |ui| {
                 ui.menu_button("Import", |ui| {
@@ -87,6 +88,9 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             if app.importing {
                 ui.label("Importing…");
             }
+            if let Some(label) = download_label(app) {
+                ui.label(label);
+            }
             if let Some(reason) = app.doc.as_ref().and_then(|d| d.config.read_only()) {
                 ui.colored_label(ui.visuals().warn_fg_color, reason.to_string());
             }
@@ -98,6 +102,12 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             }
         });
     });
+}
+
+/// The top bar label while a map image downloads for the open document.
+pub(crate) fn download_label(app: &App) -> Option<&'static str> {
+    app.downloading_for_doc()
+        .then_some("Downloading map image…")
 }
 
 /// The tool buttons, Undo and Redo; all disabled without an editable document (AD-11).
