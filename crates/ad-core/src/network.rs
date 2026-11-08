@@ -430,6 +430,52 @@ impl Network {
         self.refresh_looks(value);
     }
 
+    /// Removes the list entries at `entries` (`(node, side, index)`, indexes into the lists
+    /// as they are now; repeats count once) and records each removal. Fails without a
+    /// change when a node is missing or an index is out of range.
+    pub fn remove_entries(
+        &mut self,
+        entries: &[(NodeId, Side, usize)],
+    ) -> Result<LinkDelta, NetworkError> {
+        let mut sorted: Vec<(NodeId, bool, usize)> = Vec::with_capacity(entries.len());
+        for &(node, side, index) in entries {
+            let n = self.require(node)?;
+            let len = match side {
+                Side::Out => n.outgoing.len(),
+                Side::In => n.incoming.len(),
+            };
+            if index >= len {
+                return Err(NetworkError::IndexOutOfRange { index, len });
+            }
+            sorted.push((node, side == Side::In, index));
+        }
+        sorted.sort_unstable();
+        sorted.dedup();
+        let mut delta = LinkDelta::default();
+        // Highest index first per list, so each recorded index is the entry's position
+        // before the removal and a backwards replay inserts every entry where it was.
+        for &(node, incoming, index) in sorted.iter().rev() {
+            let side = if incoming { Side::In } else { Side::Out };
+            let Some(list) = self.list_mut(node, side) else {
+                continue;
+            };
+            let value = list.remove(index);
+            delta.0.push(LinkRecord {
+                node,
+                side,
+                index,
+                value,
+                change: LinkChange::Removed,
+            });
+            if side == Side::Out {
+                self.drop_edge(node, value);
+            }
+            self.refresh_looks(node);
+            self.refresh_looks(value);
+        }
+        Ok(delta)
+    }
+
     /// Undoes a delta exactly: records are replayed backwards.
     pub fn revert_links(&mut self, delta: &LinkDelta) {
         for r in delta.0.iter().rev() {

@@ -1206,3 +1206,59 @@ fn nodes_fixed_to_the_map_edge_and_a_filled_height_save_and_reload() -> Result<(
     assert!(model(&cfg.network) == before);
     Ok(())
 }
+
+/// The fixture with one dangling incoming entry (node 6 lists 8, which does not list 6),
+/// one duplicate (node 3 lists 4 twice) and one self-link (node 7 lists itself) planted
+/// in its lists, as `target/handtest/AutoDrive_config_links.xml` holds them.
+fn plant_link_defects(fixture: &[u8]) -> Result<String, Error> {
+    let text = String::from_utf8(fixture.to_vec())?;
+    let mut planted = text.clone();
+    for (from, to) in [
+        (
+            "<out>2,696;3,1;4;5,31355;6;7;8;",
+            "<out>2,696;3,1;4,4;5,31355;6;7;8,7;",
+        ),
+        ("<incoming>2,696;1;2;3;4;5;", "<incoming>2,696;1;2;3;4;5,8;"),
+    ] {
+        assert_eq!(text.matches(from).count(), 1, "{from}");
+        planted = planted.replacen(from, to, 1);
+    }
+    Ok(planted)
+}
+
+#[test]
+fn fixed_connection_defects_save_as_the_fixture_and_reload_clean() -> Result<(), Error> {
+    use ad_core::scan::{connection_defects, connection_fix_plan};
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    assert!(connection_defects(&load(&original)?.network).is_empty());
+    let mut cfg = load(plant_link_defects(&original)?.as_bytes())?;
+    let found = connection_defects(&cfg.network);
+    let order = cfg.network.order().to_vec();
+    assert_eq!(found.dangling, [(order[5], order[7])]);
+    assert_eq!(
+        found.duplicates,
+        [(order[2], ad_core::network::Side::Out, order[3])]
+    );
+    assert_eq!(found.self_links, [(order[6], ad_core::network::Side::Out)]);
+    let planted = model(&cfg.network);
+    let mut history = History::default();
+    let fix = connection_fix_plan(&cfg.network);
+    history.apply(&mut cfg.network, fix)?;
+    assert!(connection_defects(&cfg.network).is_empty());
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_links_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    // Only the planted entries were removed: the save is the fixture, byte for byte.
+    assert!(written == original);
+    assert!(connection_defects(&load(&written)?.network).is_empty());
+    // One undo brings every planted entry back.
+    assert!(history.undo(&mut cfg.network));
+    assert!(model(&cfg.network) == planted);
+    Ok(())
+}

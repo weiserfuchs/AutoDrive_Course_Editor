@@ -115,6 +115,8 @@ struct App {
     /// The question of a Scan menu fix, while it is shown: which fix and how many nodes it
     /// changes.
     fix_prompt: Option<(Fix, usize)>,
+    /// The connection check's report, while it is shown.
+    connection_report: Option<ad_core::scan::Defects>,
     /// A merge's backup is being written; the merge follows when it was.
     merging: bool,
     /// A tool's info for the toolbar's notice line, shown until the next click on the map.
@@ -163,6 +165,7 @@ impl App {
             overlap_dialog: None,
             merge_prompt: None,
             fix_prompt: None,
+            connection_report: None,
             merging: false,
             tool_notice: None,
             allow_close: false,
@@ -298,6 +301,7 @@ impl App {
                 self.overlap_dialog = None;
                 self.merge_prompt = None;
                 self.fix_prompt = None;
+                self.connection_report = None;
                 self.tool_notice = None;
                 self.zip_preview = None;
                 if let Some(name) = download {
@@ -365,8 +369,8 @@ impl App {
     }
 
     /// Whether a modal dialog (Edit location, marker, groups, overlap scan, the merge
-    /// question, a fix question, the map image replace question or the zip preview) is
-    /// shown.
+    /// question, a fix question, the connection report, the map image replace question or
+    /// the zip preview) is shown.
     fn dialog_shown(&self) -> bool {
         self.location.is_some()
             || self.marker.is_some()
@@ -374,6 +378,7 @@ impl App {
             || self.overlap_dialog.is_some()
             || self.merge_prompt.is_some()
             || self.fix_prompt.is_some()
+            || self.connection_report.is_some()
             || self.zip_preview.is_some()
             || self
                 .doc
@@ -813,6 +818,30 @@ impl App {
         }
     }
 
+    /// Runs the connection check on the open document (read-only too): with broken entries
+    /// their report is shown, else only a notice says the connections are consistent.
+    fn check_connections(&mut self) {
+        if let Some(doc) = &mut self.doc {
+            let defects = doc.check_connections();
+            if !defects.is_empty() {
+                self.connection_report = Some(defects);
+            }
+        }
+    }
+
+    /// Closes the connection report. With `fix` and an editable document, removes the
+    /// reported entries in one undoable entry.
+    fn finish_connections(&mut self, fix: bool) {
+        if self.connection_report.take().is_none() || !fix || !self.editable() {
+            return;
+        }
+        if let Some(doc) = &mut self.doc
+            && let Err(e) = doc.fix_connections()
+        {
+            self.error = Some(e.to_string());
+        }
+    }
+
     /// Closes the marker dialog. With `ok`, sets its node's marker in one transaction,
     /// unless the name is refused, an edit changed nothing or the document is read-only.
     fn finish_marker(&mut self, ok: bool) {
@@ -1171,6 +1200,7 @@ impl eframe::App for App {
         ui::overlap_dialog(self, &ctx);
         ui::merge_prompt(self, &ctx);
         ui::fix_prompt(self, &ctx);
+        ui::connection_report(self, &ctx);
         ui::zip_preview_window(self, &ctx);
         ui::replace_image_prompt(self, &ctx);
         ui::unsaved_prompt(self, &ctx);
@@ -3693,6 +3723,119 @@ mod tests {
         }
         assert_eq!(snapshot(&app), before);
         assert_eq!(notice(&app), None);
+    }
+
+    /// Four nodes with broken lists: 1.out = [2, 2] (a duplicate), 3.out = [3] (a
+    /// self-link), 2.in = [1, 3] though 3.out does not list 2 (dangling); node 4 is clean.
+    fn load_broken_links(app: &mut App, version: &str) {
+        let text = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<AutoDrive>\n    \
+             {version}\n    <waypoints>\n        <id>1,2,3,4</id>\n        \
+             <x>1.000,2.000,3.000,4.000</x>\n        <y>0.000,0.000,0.000,0.000</y>\n        \
+             <z>2.000,2.000,2.000,2.000</z>\n        <out>2,2;-1;3;-1</out>\n        \
+             <incoming>-1;1,3;-1;-1</incoming>\n        <flags>0,0,0,0</flags>\n    \
+             </waypoints>\n</AutoDrive>\n"
+        );
+        let config = config_xml::load(text.as_bytes()).expect("loads");
+        let result = JobResult::Loaded {
+            path: PathBuf::from("a.xml"),
+            result: Ok(Box::new((
+                config,
+                map_image::blank(),
+                None,
+                None,
+                None,
+                true,
+            ))),
+        };
+        app.tx.send(result).expect("send");
+        app.poll_jobs();
+    }
+
+    fn report_counts(app: &App) -> Option<(usize, usize, usize)> {
+        app.connection_report
+            .as_ref()
+            .map(|d| (d.dangling.len(), d.duplicates.len(), d.self_links.len()))
+    }
+
+    #[test]
+    fn the_connection_fix_selects_the_relinked_nodes_and_one_undo_restores_every_entry() {
+        let mut app = App::new(Settings::default());
+        load_broken_links(&mut app, "<version>3</version>");
+        let order = app
+            .doc
+            .as_ref()
+            .expect("doc")
+            .config
+            .network
+            .order()
+            .to_vec();
+        app.doc.as_mut().expect("doc").selection.insert(order[3]);
+        let before = snapshot(&app);
+        app.check_connections();
+        assert_eq!(report_counts(&app), Some((1, 1, 1)));
+        assert!(app.dialog_shown());
+        // Close fixes nothing.
+        app.finish_connections(false);
+        assert!(!app.dialog_shown());
+        assert_eq!(snapshot(&app), before);
+        app.check_connections();
+        app.finish_connections(true);
+        assert!(!app.dialog_shown());
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        let lists = |i: usize| {
+            let n = net.node(order[i]).expect("node");
+            (n.outgoing().to_vec(), n.incoming().to_vec())
+        };
+        assert_eq!(lists(0), (vec![order[1]], vec![]));
+        assert_eq!(lists(1), (vec![], vec![order[0]]));
+        assert_eq!(lists(2), (vec![], vec![]));
+        assert_eq!(selection(&app), order[..3]);
+        assert!(app.dirty());
+        app.run(Action::Undo);
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(selection(&app), [order[3]]);
+        assert!(!app.dirty());
+        app.run(Action::Redo);
+        assert_eq!(selection(&app), order[..3]);
+        // Now clean: a notice, no report and nothing committed.
+        app.check_connections();
+        assert!(app.connection_report.is_none());
+        assert_eq!(notice(&app).as_deref(), Some("Connections are consistent"));
+        assert_eq!(app.error, None);
+    }
+
+    #[test]
+    fn a_read_only_document_shows_the_connection_report_without_a_fix() {
+        let mut app = App::new(Settings::default());
+        load_broken_links(&mut app, "<markerID>1</markerID>");
+        assert!(!app.editable());
+        let before = snapshot(&app);
+        app.check_connections();
+        assert_eq!(report_counts(&app), Some((1, 1, 1)));
+        // A Fix answer (the button is not shown) changes nothing.
+        app.finish_connections(true);
+        assert!(app.connection_report.is_none());
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(app.error, None);
+        assert!(!app.dirty());
+    }
+
+    #[test]
+    fn the_fixture_s_connections_are_consistent() {
+        let mut app = App::new(Settings::default());
+        load_fixture(&mut app);
+        let before = snapshot(&app);
+        // Twice: the notice line is replaced, not repeated.
+        for _ in 0..2 {
+            app.check_connections();
+            assert!(app.connection_report.is_none());
+            assert!(!app.dialog_shown());
+            assert_eq!(notice(&app).as_deref(), Some("Connections are consistent"));
+        }
+        assert_eq!(snapshot(&app), before);
+        assert!(!app.dirty());
+        assert!(!app.doc.as_ref().expect("doc").history.can_undo());
     }
 
     #[test]

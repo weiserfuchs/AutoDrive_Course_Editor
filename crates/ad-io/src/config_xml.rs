@@ -1081,6 +1081,31 @@ mod tests {
     }
 
     #[test]
+    fn dangling_duplicate_and_self_entries_are_kept_as_read_and_roundtrip() {
+        use ad_core::network::Side;
+        // 1.out = [2, 3, 2] (a duplicate), 3.out = [3] (a self-link), 1.in = [2] though
+        // 2.out does not list 1 (dangling).
+        let text = String::from_utf8(three_node_config(""))
+            .expect("utf8")
+            .replace("<out>2,3;3;-1</out>", "<out>2,3,2;3;3</out>")
+            .replace(
+                "<incoming>-1;1;2,1</incoming>",
+                "<incoming>2;1;2,1</incoming>",
+            );
+        let cfg = roundtrip(text.as_bytes());
+        let net = &cfg.network;
+        let [a, b, c] = [net.order()[0], net.order()[1], net.order()[2]];
+        let node = |id| net.node(id).expect("node");
+        assert_eq!(node(a).outgoing(), [b, c, b]);
+        assert_eq!(node(a).incoming(), [b]);
+        assert_eq!(node(c).outgoing(), [c]);
+        let d = ad_core::scan::connection_defects(net);
+        assert_eq!(d.dangling, [(a, b)]);
+        assert_eq!(d.duplicates, [(a, Side::Out, b)]);
+        assert_eq!(d.self_links, [(c, Side::Out)]);
+    }
+
+    #[test]
     fn save_id_map_follows_order() {
         let cfg = load(&config("\n", false, "")).expect("loads");
         let ids = SaveIdMap::from_network(&cfg.network);
