@@ -386,12 +386,11 @@ pub(crate) fn location_dialog(app: &mut App, ctx: &egui::Context) {
     let (mut ok, mut cancel) = (false, false);
     let modal = egui::Modal::new(egui::Id::unique("edit_location")).show(ctx, |ui| {
         ui.heading("Edit location");
-        let ranges = edit_location::ranges(scale);
         let mut valid = true;
         for (i, axis) in edit_location::AXES.iter().enumerate() {
             ui.label(*axis);
             ui.text_edit_singleline(&mut dialog.text[i]);
-            if let Err(note) = edit_location::parse(&dialog.text[i], ranges[i].0, ranges[i].1) {
+            if let Err(note) = &dialog.values(scale)[i] {
                 ui.colored_label(ui.visuals().error_fg_color, note.to_string());
                 valid = false;
             }

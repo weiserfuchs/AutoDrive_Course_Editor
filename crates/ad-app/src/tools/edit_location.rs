@@ -98,20 +98,37 @@ pub fn plan(net: &Network, node: NodeId, to: Position) -> Option<Transaction> {
 pub struct LocationDialog {
     pub node: NodeId,
     pub text: [String; 3],
+    /// The node's coordinates when the dialog opened, and their prefilled text.
+    old: [f64; 3],
+    prefill: [String; 3],
 }
 
 impl LocationDialog {
     /// The dialog for `node`, each field prefilled with its coordinate at three decimals.
     pub fn open(net: &Network, node: NodeId) -> Option<Self> {
         let n = net.node(node)?;
-        let text = [n.x, n.y, n.z].map(|v| format!("{v:.3}"));
-        Some(Self { node, text })
+        let old = [n.x, n.y, n.z];
+        let text = old.map(|v| format!("{v:.3}"));
+        Some(Self {
+            node,
+            prefill: text.clone(),
+            text,
+            old,
+        })
     }
 
-    /// Each field parsed against its range on a map of `scale`.
+    /// Each field parsed against its range on a map of `scale`. A field still showing its
+    /// prefilled text keeps the node's exact coordinate, so OK without an edit neither
+    /// rounds the node to three decimals nor refuses a value already out of range.
     pub fn values(&self, scale: f64) -> [Result<f64, Note>; 3] {
         let ranges = ranges(scale);
-        std::array::from_fn(|i| parse(&self.text[i], ranges[i].0, ranges[i].1))
+        std::array::from_fn(|i| {
+            if self.text[i] == self.prefill[i] {
+                Ok(self.old[i])
+            } else {
+                parse(&self.text[i], ranges[i].0, ranges[i].1)
+            }
+        })
     }
 }
 
@@ -234,6 +251,22 @@ mod tests {
             })
         );
         assert!(LocationDialog::open(&Network::new(), id).is_none());
+    }
+
+    #[test]
+    fn untouched_fields_keep_the_exact_coordinate() {
+        let mut net = Network::new();
+        let id = net.add_node(1.234567, -5.0, 9.8765, NodeFlag::REGULAR);
+        let mut dialog = LocationDialog::open(&net, id).expect("node");
+        assert_eq!(dialog.text, ["1.235", "-5.000", "9.877"].map(String::from));
+        // y is below 0, but untouched, so OK is not blocked.
+        assert_eq!(dialog.values(1.0), [Ok(1.234567), Ok(-5.0), Ok(9.8765)]);
+        let [Ok(x), Ok(y), Ok(z)] = dialog.values(1.0) else {
+            panic!("valid");
+        };
+        assert!(plan(&net, id, (x, y, z)).is_none(), "OK without edits");
+        dialog.text[0] = "2".to_owned();
+        assert_eq!(dialog.values(1.0), [Ok(2.0), Ok(-5.0), Ok(9.8765)]);
     }
 
     #[test]

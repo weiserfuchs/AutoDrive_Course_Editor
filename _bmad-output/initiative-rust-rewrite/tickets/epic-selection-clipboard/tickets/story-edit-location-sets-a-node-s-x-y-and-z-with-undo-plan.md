@@ -3,14 +3,14 @@ title: 'Edit Location sets a node''s x, y and z with undo'
 type: 'feature'
 ticket: '8'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '22d1172'
 route: 'full'
 route_source: 'auto'
 risk: 'low'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -83,3 +83,7 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 1 medium patched.
+  - medium, patch: OK without an edit moved the node, since the prefill shows three decimals and fixture coordinates have more; it also refused a node whose y was already below 0. A field still showing its prefilled text now keeps the exact coordinate (`LocationDialog::values`, used by the dialog and the commit); test `untouched_fields_keep_the_exact_coordinate`.
+- Verification after the patch: fmt, clippy and workspace tests pass.
