@@ -3,14 +3,14 @@ title: 'Out-of-bounds nodes move to the map edge and missing heights are filled'
 type: 'feature'
 ticket: '3'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '313eace'
 route: 'full'
 route_source: 'auto'
 risk: 'low'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -84,3 +84,7 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - finding about the plan, not the code: the matrix row "None outside / the fixture" is wrong. At the fixture's scale 2 two nodes lie far west of the map (file ids 35400 and 35401, x ≈ -9620); the test fixes them first and then checks the none-outside notice. The frozen row stays as written (human-owned).
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 405).
