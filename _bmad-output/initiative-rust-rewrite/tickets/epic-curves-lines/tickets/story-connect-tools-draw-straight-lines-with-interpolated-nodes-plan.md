@@ -3,7 +3,7 @@ title: 'Connect tools draw straight lines with interpolated nodes'
 type: 'feature'
 ticket: '2'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: 'dd52d30'
 route: 'full'
 route_source: 'auto'
