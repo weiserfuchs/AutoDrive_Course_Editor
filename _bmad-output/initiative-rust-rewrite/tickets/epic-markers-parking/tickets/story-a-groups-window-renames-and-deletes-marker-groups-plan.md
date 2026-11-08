@@ -3,14 +3,14 @@ title: 'A groups window renames and deletes marker groups'
 type: 'feature'
 ticket: '4'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '1acae57'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -88,3 +88,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: no patch.
+  - checked: revert sets back exactly the recorded markers, so a merge undoes cleanly; a redo recomputes from the same state.
+  - accepted: Escape closes the whole window even while a rename field is open; "None" and same-name checks are case-sensitive, as in the marker dialog.
+- Verification (orchestrator re-run): fmt, clippy and workspace tests pass (ad-app 346, golden_edited 9).
