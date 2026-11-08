@@ -3,14 +3,14 @@ title: 'A Bézier curve previews between two nodes and commits from a curve pane
 type: 'feature'
 ticket: '3'
 created: '2026-11-08'
-status: 'planned'
+status: 'built'
 baseline_revision: '06a89ad'
 route: 'full'
 route_source: 'auto'
 risk: 'medium'
 review: 'quick'
 review_source: 'pinned'
-lenses_ran: []
+lenses_ran: ['quick']
 review_loop_iteration: 0
 context: []
 ---
@@ -97,3 +97,8 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review (orchestrator), pass 1: 1 medium patched.
+  - medium, patch: a handle drag that egui cancels (pointer lost, `DragEvent::Cancel`) called `Tool::cancel` and threw the whole curve away. New trait hook `Tool::on_drag_cancel` (default: `cancel`, so other tools are unchanged); the Bézier tool ends only the drag. Covered in `dragging_a_handle_moves_it_and_its_control_point_three_times_as_far`.
+  - accepted: overlapping handles at the start grab the lowest index first (as Java); the pending line has no arrowhead; panel widgets are covered by the user's hand check.
+- Verification after the patch: fmt, clippy, workspace tests (ad-app 286) and the release frame-time test pass (no case over budget).

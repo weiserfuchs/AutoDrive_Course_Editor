@@ -90,6 +90,12 @@ pub trait Tool {
         None
     }
 
+    /// A claimed drag ended without a release position (the pointer was lost); by default
+    /// the tool's whole preview is cancelled.
+    fn on_drag_cancel(&mut self) {
+        self.cancel();
+    }
+
     /// The nodes the view draws, with their connections, at world (x, z) instead of their
     /// stored positions while the tool previews a move.
     fn preview(&self) -> Option<&Preview> {

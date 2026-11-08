@@ -292,6 +292,11 @@ impl Tool for BezierTool {
         None
     }
 
+    /// A lost pointer ends the handle drag only; the curve keeps its shape so far.
+    fn on_drag_cancel(&mut self) {
+        self.drag = None;
+    }
+
     fn curve_mut(&mut self) -> Option<&mut Curve> {
         self.curve.as_mut()
     }
@@ -600,6 +605,16 @@ mod tests {
         assert!(close(curve.control_points()[0], (80.0, 30.0)));
         let points = curve.points_between((0.0, 0.0), (100.0, 0.0));
         assert!(points.iter().all(|p| p.1 > 0.0));
+        // A lost pointer ends the drag but keeps the curve and its shape.
+        assert!(tool.on_drag_start(&ctx(&net, &map, (60.0, 10.0), None), None));
+        tool.on_drag_cancel();
+        let curve = tool.curve().expect("curve kept");
+        assert!(close(curve.control_points()[0], (80.0, 30.0)));
+        tool.on_drag(&ctx(&net, &map, (90.0, 90.0), None));
+        assert!(close(
+            tool.curve().expect("curve").handles()[0],
+            (60.0, 10.0)
+        ));
     }
 
     #[test]

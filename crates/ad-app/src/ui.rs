@@ -262,7 +262,7 @@ impl ViewHooks for ToolHooks<'_> {
                 true
             }
             DragEvent::Cancel => {
-                tool.cancel();
+                tool.on_drag_cancel();
                 true
             }
         }
