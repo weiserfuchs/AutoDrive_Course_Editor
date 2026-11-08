@@ -18,7 +18,7 @@ use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
 use crate::tools::edit_location::{self, EditLocationTool};
 use crate::tools::flip::FlipTool;
-use crate::tools::marker::AddMarkerTool;
+use crate::tools::marker::{AddMarkerTool, DeleteMarkerTool, EditMarkerTool};
 use crate::tools::move_node::MoveTool;
 use crate::tools::node::NodeTool;
 use crate::tools::priority::PriorityTool;
@@ -79,7 +79,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
     let line = app.line();
-    let tools: [Box<dyn Tool>; 17] = [
+    let tools: [Box<dyn Tool>; 19] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
@@ -97,6 +97,8 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         Box::new(BezierTool::default()),
         Box::new(ArcTool::default()),
         Box::new(AddMarkerTool::default()),
+        Box::new(EditMarkerTool::default()),
+        Box::new(DeleteMarkerTool::default()),
     ];
     for tool in tools {
         let selected = active == Some(tool.name());
@@ -512,8 +514,9 @@ pub(crate) fn location_dialog(app: &mut App, ctx: &egui::Context) {
 }
 
 /// The marker dialog: a name field with a red note while the name is refused, and a group
-/// field with a drop-down of "None" and the existing groups. OK or Enter, with the name
-/// valid, commits; Cancel, Escape or a click beside the dialog commits nothing.
+/// field with a drop-down of "None" and the existing groups, headed "Add marker" or "Edit
+/// marker". OK or Enter, with the name valid, commits; Cancel, Escape or a click beside
+/// the dialog commits nothing.
 pub(crate) fn marker_dialog(app: &mut App, ctx: &egui::Context) {
     let (Some(doc), Some(dialog)) = (&app.doc, &mut app.marker) else {
         return;
@@ -521,7 +524,7 @@ pub(crate) fn marker_dialog(app: &mut App, ctx: &egui::Context) {
     let net = &doc.config.network;
     let (mut ok, mut cancel) = (false, false);
     let modal = egui::Modal::new(egui::Id::unique("marker")).show(ctx, |ui| {
-        ui.heading("Add marker");
+        ui.heading(dialog.title());
         ui.label("Name");
         ui.text_edit_singleline(&mut dialog.name);
         let valid = match dialog.validate(net) {

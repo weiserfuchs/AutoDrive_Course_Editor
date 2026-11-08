@@ -30,6 +30,10 @@ pub(crate) enum Action {
     DeleteHovered,
     /// Opens the marker dialog for the hovered node, whichever tool is active (Java's W).
     AddMarker,
+    /// Opens the marker dialog prefilled for the hovered node's marker (Java's E).
+    EditMarker,
+    /// Removes the hovered node's marker (Java's Shift+D).
+    DeleteMarker,
     /// Copies the selection to the app clipboard.
     Copy,
     /// Copies the selection, then deletes it.
@@ -42,7 +46,7 @@ pub(crate) enum Action {
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 21] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 23] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -111,6 +115,14 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 21] = [
     (
         Action::AddMarker,
         KeyboardShortcut::new(Modifiers::NONE, Key::W),
+    ),
+    (
+        Action::EditMarker,
+        KeyboardShortcut::new(Modifiers::NONE, Key::E),
+    ),
+    (
+        Action::DeleteMarker,
+        KeyboardShortcut::new(Modifiers::SHIFT, Key::D),
     ),
     // eframe turns Ctrl+C, X and V into clipboard events (see `clipboard_actions`); these
     // key forms are kept for a backend that passes them on as keys.
@@ -243,6 +255,8 @@ mod tests {
         assert_eq!(press(Modifiers::NONE, Key::S), [Action::ToggleSnap]);
         assert_eq!(press(Modifiers::NONE, Key::Delete), [Action::DeleteHovered]);
         assert_eq!(press(Modifiers::NONE, Key::W), [Action::AddMarker]);
+        assert_eq!(press(Modifiers::NONE, Key::E), [Action::EditMarker]);
+        assert_eq!(press(Modifiers::SHIFT, Key::D), [Action::DeleteMarker]);
         assert_eq!(press(Modifiers::NONE, Key::L), [Action::ConnectTool]);
         assert_eq!(
             press(Modifiers::NONE, Key::Semicolon),
@@ -327,6 +341,12 @@ mod tests {
         assert!(press(Modifiers::SHIFT, Key::W).is_empty());
         assert!(press(CTRL, Key::W).is_empty());
         assert!(press(Modifiers::ALT, Key::W).is_empty());
+        assert!(press(Modifiers::SHIFT, Key::E).is_empty());
+        assert!(press(CTRL, Key::E).is_empty());
+        assert!(press(Modifiers::ALT, Key::E).is_empty());
+        assert!(press(Modifiers::NONE, Key::D).is_empty());
+        assert!(press(CTRL.plus(Modifiers::SHIFT), Key::D).is_empty());
+        assert!(press(Modifiers::SHIFT.plus(Modifiers::ALT), Key::D).is_empty());
     }
 
     #[test]

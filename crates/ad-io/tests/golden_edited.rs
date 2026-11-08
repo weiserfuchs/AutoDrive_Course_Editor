@@ -936,3 +936,59 @@ fn added_marker_in_a_new_group_saves_and_reloads() -> Result<(), Error> {
     assert_eq!((m.node, &*m.name, &*m.group), (node, "Hof", "Neu"));
     Ok(())
 }
+
+#[test]
+fn edited_and_deleted_markers_save_reload_and_undo() -> Result<(), Error> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    let mut cfg = load(&original)?;
+    let before = cfg.network.markers().to_vec();
+    let [edited, deleted, ..] = &before[..] else {
+        return Err("fixture has fewer than two markers".into());
+    };
+    let (edited, deleted) = (edited.node, deleted.node);
+    // A vehicle parked at the deleted marker, as a vehicles.xml load gives it (story 6.1).
+    assert!(cfg.network.park_vehicle(1, "7".to_owned()));
+    let parked = cfg.network.markers().to_vec();
+    let name = format!("{} edited", before[0].name);
+    // As the edit-marker dialog and the delete-marker tool commit them: one EditMarker each.
+    let mut history = History::default();
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::EditMarker(EditMarker::new(
+            edited,
+            Some((name.clone(), "Neu".to_owned())),
+        ))]),
+    )?;
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::EditMarker(EditMarker::new(deleted, None))]),
+    )?;
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_edit_marker_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    let reloaded = load(&written)?;
+    assert!(model(&cfg.network) == model(&reloaded.network));
+    assert!(untouched(&original)? == untouched(&written)?);
+    let net = &reloaded.network;
+    assert_eq!(net.markers().len(), before.len() - 1);
+    let m = &net.markers()[0];
+    assert_eq!((m.node, &*m.name, &*m.group), (edited, &*name, "Neu"));
+    assert!(net.markers().iter().all(|m| m.node != deleted));
+    // Later markers move up, in order.
+    let rest: Vec<NodeId> = net.markers()[1..].iter().map(|m| m.node).collect();
+    let want: Vec<NodeId> = before[2..].iter().map(|m| m.node).collect();
+    assert_eq!(rest, want);
+    // Each undo takes back one step; the deleted marker returns with its vehicle.
+    history.undo(&mut cfg.network);
+    assert_eq!(cfg.network.markers()[1], parked[1]);
+    assert_eq!(cfg.network.markers()[0].name, name);
+    history.undo(&mut cfg.network);
+    assert_eq!(cfg.network.markers(), parked);
+    Ok(())
+}
