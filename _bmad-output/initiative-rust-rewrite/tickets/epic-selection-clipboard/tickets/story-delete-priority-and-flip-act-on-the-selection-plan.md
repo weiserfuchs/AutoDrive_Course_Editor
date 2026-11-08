@@ -3,7 +3,7 @@ title: 'Delete, priority and flip act on the selection'
 type: 'feature'
 ticket: '5'
 created: '2026-11-08'
-status: 'in-review'
+status: 'built'
 baseline_revision: '80206b3914b399b966665c1523ebd925869cc077'
 route: 'full'
 route_source: 'auto'
@@ -85,3 +85,10 @@ The Delete key deletes the selection when it is not empty, else the hovered node
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 1 medium and 2 low patched; 1 false rejected.
+  - medium, patch: zoomed far out, a delete/priority/flip click on a selection mark did nothing (bug 4.11 fixed only the drag start). `node_or_mark_at` now serves the drag start and the per-frame hover; test `zoomed_out_a_delete_click_on_a_selection_mark_deletes_the_selection`.
+  - low, patch: the Delete key deleted the old selection while a rectangle or lasso was being drawn. `MapView::selecting()` blocks it; test `the_delete_key_does_nothing_while_a_selection_is_drawn`.
+  - low, patch: the golden group delete did not exclude the added node explicitly; it does now.
+  - false: "the fixture criterion rests on automated tests only partly". It is the user's hand check.
+- Verification after the patches: fmt, clippy, workspace tests pass. Frame time: one run showed the whole-network drag at 17.7 ms max; a back-to-back comparison then gave branch 9.7–11.0 ms and master 8.6–11.0 ms (3 runs each), so the spike was machine load, not this change.
