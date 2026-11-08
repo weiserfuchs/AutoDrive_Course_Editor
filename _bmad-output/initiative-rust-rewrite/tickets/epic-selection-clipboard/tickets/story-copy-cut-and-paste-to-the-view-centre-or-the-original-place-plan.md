@@ -64,11 +64,11 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `PasteNodes` -- apply, revert, redo with the same ids, markers and links; tests in ad-core
-- [ ] history accessor and document selection records -- tests: undo of paste restores the prior selection, redo selects the pasted nodes, undo of cut restores the cut selection
-- [ ] `clipboard.rs` -- copy and paste; tests for every matrix row up to Repeat, inner links only, shapes kept
-- [ ] wiring -- shortcuts (with the egui event caveat), gates; tests for Cut, Other file, Nothing, Read-only, blocked while drawing a selection
-- [ ] `golden_edited.rs` -- pasted group round-trip
+- [x] `PasteNodes` -- apply, revert, redo with the same ids, markers and links; tests in ad-core
+- [x] history accessor and document selection records -- tests: undo of paste restores the prior selection, redo selects the pasted nodes, undo of cut restores the cut selection
+- [x] `clipboard.rs` -- copy and paste; tests for every matrix row up to Repeat, inner links only, shapes kept
+- [x] wiring -- shortcuts (with the egui event caveat), gates; tests for Cut, Other file, Nothing, Read-only, blocked while drawing a selection
+- [x] `golden_edited.rs` -- pasted group round-trip
 
 **Acceptance Criteria:**
 - Given the fixture, when the user selects a junction, presses Ctrl+C and pastes it twice with Ctrl+V, then two linked copies appear, the last one selected, and Ctrl+Z twice removes them.
@@ -83,6 +83,16 @@ context: []
 
 ## Implementation Notes
 
+- **egui clipboard events (checked in egui-winit 0.37.0 `src/lib.rs`).** With `clipboard_shortcuts` on (eframe default), a key press that `is_cut_command`/`is_copy_command`/`is_paste_command` matches is replaced by `Event::Cut`/`Event::Copy`/`Event::Paste(text)` and no `Event::Key` is sent. Matched: Cmd/Ctrl alone (`command_only`) + X/C/V, the dedicated Cut/Copy/Paste keys, and on Windows Shift+Delete (cut), Ctrl+Insert (copy), Shift+Insert (paste). `Paste` is pushed only when the OS clipboard holds non-empty text; with no text but an image it pushes `PasteImage`; otherwise nothing. Ctrl+Shift+V and Shift+V stay key events.
+- **Handling.** `input::pressed` consumes, after the key table, `Event::Copy` -> Copy, `Event::Cut` -> Cut, `Event::Paste`/`PasteImage` -> Paste, so the Windows aliases work too. The key forms Ctrl+C/X/V stay in the table for a backend that passes keys through (and the tests). Copy and cut set `App.copied`, and `handle_shortcuts` puts that note ("AutoDrive Course Editor: N nodes copied") on the OS clipboard with `ctx.copy_text`, so a later Ctrl+V arrives as a paste event. The existing modal gate returns before anything is consumed, so the Edit location text fields keep their own copy and paste. Known limit: if another app later puts only a non-text, non-image item (e.g. files) on the OS clipboard, Ctrl+V sends no event and does nothing; Shift+V still works.
+- **Select-after.** `History` got `undo_target()`/`redo_target()` (the entry the next undo/redo acts on) and `transaction(id)`. `Document::apply_selecting(tx, select)` applies, stores `(before, select(&applied tx))` per `EntryId` in a `BTreeMap`, sets the selection to `after` and prunes. `undo`/`redo` look up the target first and, on success, restore `before`/`after` for a recorded entry; other entries keep the old rule (prune only). Records of entries no longer in the history are dropped at the next `apply_selecting`, so the map stays within the history cap plus one. Cut selects nothing after; paste selects `clipboard::pasted(tx)`.
+- **PasteNodes.** `Command::PasteNodes { nodes, markers (index, name, group), links (from, to, shape) }` composes the existing commands: the first apply runs an `AddNodes`, maps indexes to its ids (`IndexOutOfRange` otherwise) and applies one `EditMarker` per marker and one `Connect` per link; the parts are kept as an inner `Transaction`, so revert is its revert and redo reapplies it (AddNodes reinserts the same ids). A failure on the first apply reverts the add, leaving the network unchanged.
+- **Clipboard.** `clipboard::copy` keeps selected nodes in id order with x/z relative to the bounding-box centre, y and flag; markers in network marker order; links with both ends selected, from each node's `outgoing`: exact dual once (lower index), else one-way when the target lists the start as incoming, else reverse. `paste` rounds x/z with `edit_location::round3` (now `pub(crate)`), samples y or keeps the copied y, and renames taken marker names to the first free `_n` against the network and the paste's own earlier names.
+- **View centre.** `MapView::centre()` (read-only accessor, the only change in `view.rs`) gives the map pixel at the view centre; paste converts it with `geometry.to_world`. Before the first frame of a newly loaded document it uses the map centre.
+- **Verification (2026-11-08).** `cargo fmt --all --check` ok; `cargo clippy --workspace --all-targets -- -D warnings` ok; `cargo test --workspace` all pass (ad-app 260, ad-core 62, ad-io 39 + golden_edited 2 + golden_roundtrip 1); `frame_time` release: every case ok, worst best-round max 9.5 ms (min zoom, all selected).
+
 ## Plan Change Log
+
+- `view.rs`: added the read-only `MapView::centre()` accessor despite "Do not touch: view"; paste needs the view centre and the transform is private.
 
 ## Review Triage Log

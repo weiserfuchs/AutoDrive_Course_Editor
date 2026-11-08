@@ -47,7 +47,7 @@ pub fn ranges(scale: f64) -> [(f64, f64); 3] {
 /// `v` rounded half-up (away from zero on a tie) to three decimals, as decimal text: the
 /// shortest text that reads back as `v` is rounded, so a typed `0.0005` rounds up even
 /// though its nearest f64 lies just below it. `v` is finite and within the map.
-fn round3(v: f64) -> f64 {
+pub(crate) fn round3(v: f64) -> f64 {
     // Display never uses an exponent and prints the shortest round-trip digits.
     let text = format!("{}", v.abs());
     let (int, frac) = text.split_once('.').unwrap_or((&text, ""));

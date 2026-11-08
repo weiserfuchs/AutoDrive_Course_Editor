@@ -26,11 +26,19 @@ pub(crate) enum Action {
     ToggleNodeId,
     /// Deletes the hovered node, whichever tool is active (Java's Delete key).
     DeleteHovered,
+    /// Copies the selection to the app clipboard.
+    Copy,
+    /// Copies the selection, then deletes it.
+    Cut,
+    /// Pastes the clipboard centred on the view.
+    Paste,
+    /// Pastes the clipboard at the place it was copied from.
+    PasteInPlace,
 }
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 15] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 19] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -92,6 +100,24 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 15] = [
         Action::DeleteHovered,
         KeyboardShortcut::new(Modifiers::NONE, Key::Delete),
     ),
+    // eframe turns Ctrl+C, X and V into clipboard events (see `clipboard_actions`); these
+    // key forms are kept for a backend that passes them on as keys.
+    (
+        Action::Copy,
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::C),
+    ),
+    (
+        Action::Cut,
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::X),
+    ),
+    (
+        Action::Paste,
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::V),
+    ),
+    (
+        Action::PasteInPlace,
+        KeyboardShortcut::new(Modifiers::SHIFT, Key::V),
+    ),
 ];
 
 /// Whether grid snap applies this frame: the toggle, inverted while Shift is held.
@@ -114,25 +140,53 @@ fn consume_exact(i: &mut egui::InputState, shortcut: &KeyboardShortcut) -> bool 
     i.events.len() != before
 }
 
-/// The actions pressed this frame, in table order; their key presses are consumed.
+/// Consumes the clipboard events egui-winit sends instead of key presses: Ctrl+C, Ctrl+X
+/// and Ctrl+V (also Ctrl+Insert, Shift+Delete, Shift+Insert and the Copy, Cut and Paste
+/// keys) arrive as `Event::Copy`, `Event::Cut` and `Event::Paste(text)`. A paste arrives
+/// only while the OS clipboard holds text (or an image, as `Event::PasteImage`), so a copy
+/// puts a note there (see `handle_shortcuts`).
+fn clipboard_actions(i: &mut egui::InputState) -> Vec<Action> {
+    let mut actions = Vec::new();
+    i.events.retain(|e| {
+        let action = match e {
+            egui::Event::Copy => Action::Copy,
+            egui::Event::Cut => Action::Cut,
+            egui::Event::Paste(_) | egui::Event::PasteImage(_) => Action::Paste,
+            _ => return true,
+        };
+        actions.push(action);
+        false
+    });
+    actions
+}
+
+/// The actions pressed this frame, in table order, then the clipboard events; their key
+/// presses and events are consumed.
 pub(crate) fn pressed(ctx: &egui::Context) -> Vec<Action> {
     ctx.input_mut(|i| {
-        SHORTCUTS
+        let mut actions: Vec<Action> = SHORTCUTS
             .iter()
             .filter(|(_, shortcut)| consume_exact(i, shortcut))
             .map(|(action, _)| *action)
-            .collect()
+            .collect();
+        actions.extend(clipboard_actions(i));
+        actions
     })
 }
 
 /// Handles the shortcuts pressed this frame. The unsaved prompt and the Edit location
-/// dialog are modal: no shortcut acts, nor is its key consumed, while one is shown.
+/// dialog are modal: no shortcut acts, nor is its key consumed, while one is shown, so a
+/// text field there keeps its own copy and paste.
 pub(crate) fn handle_shortcuts(app: &mut App, ctx: &egui::Context) {
     if app.prompt.is_some() || app.location.is_some() {
         return;
     }
     for action in pressed(ctx) {
         app.run(action);
+        // Text on the OS clipboard, so the next Ctrl+V reaches the app as a paste event.
+        if let Some(text) = app.copied.take() {
+            ctx.copy_text(text);
+        }
     }
 }
 
@@ -184,6 +238,44 @@ mod tests {
             press(Modifiers::SHIFT, Key::Semicolon),
             [Action::ToggleContinuous]
         );
+    }
+
+    /// One frame with `events`; returns the resolved actions.
+    fn send(events: Vec<egui::Event>) -> Vec<Action> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut actions = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| actions = pressed(ui.ctx()));
+        out.textures_delta.clear();
+        actions
+    }
+
+    #[test]
+    fn copy_cut_and_paste_keys_and_shift_v() {
+        assert_eq!(press(CTRL, Key::C), [Action::Copy]);
+        assert_eq!(press(CTRL, Key::X), [Action::Cut]);
+        assert_eq!(press(CTRL, Key::V), [Action::Paste]);
+        assert_eq!(press(Modifiers::SHIFT, Key::V), [Action::PasteInPlace]);
+        for key in [Key::C, Key::V] {
+            assert!(press(Modifiers::NONE, key).is_empty());
+            assert!(press(CTRL.plus(Modifiers::SHIFT), key).is_empty());
+        }
+    }
+
+    #[test]
+    fn clipboard_events_map_to_copy_cut_and_paste() {
+        assert_eq!(
+            send(vec![
+                egui::Event::Copy,
+                egui::Event::Cut,
+                egui::Event::Paste("note".into()),
+            ]),
+            [Action::Copy, Action::Cut, Action::Paste]
+        );
+        assert!(send(vec![egui::Event::Text("v".into())]).is_empty());
     }
 
     #[test]

@@ -127,6 +127,22 @@ impl History {
         !self.read_only && self.cursor < self.entries.len()
     }
 
+    /// The entry the next `undo` reverts.
+    pub fn undo_target(&self) -> Option<EntryId> {
+        let index = self.cursor.checked_sub(1)?;
+        self.entries.get(index).map(|e| e.id)
+    }
+
+    /// The entry the next `redo` applies.
+    pub fn redo_target(&self) -> Option<EntryId> {
+        self.entries.get(self.cursor).map(|e| e.id)
+    }
+
+    /// The transaction of an entry still in the history, as last applied or reverted.
+    pub fn transaction(&self, id: EntryId) -> Option<&Transaction> {
+        self.entries.iter().find(|e| e.id == id).map(|e| &e.tx)
+    }
+
     /// Returns false when there is nothing to undo, or the revert failed.
     pub fn undo(&mut self, net: &mut Network) -> bool {
         if self.read_only {
@@ -459,5 +475,27 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), seen.len());
+    }
+
+    #[test]
+    fn undo_and_redo_targets_follow_the_cursor() {
+        let mut n = Network::new();
+        let mut h = History::new(2);
+        assert_eq!((h.undo_target(), h.redo_target()), (None, None));
+        let a = h.apply(&mut n, add(1.0)).expect("a");
+        let b = h.apply(&mut n, add(2.0)).expect("b");
+        assert_eq!((h.undo_target(), h.redo_target()), (Some(b), None));
+        assert!(h.undo(&mut n));
+        assert_eq!((h.undo_target(), h.redo_target()), (Some(a), Some(b)));
+        assert!(h.transaction(b).is_some());
+        // A new entry discards b.
+        let c = h.apply(&mut n, add(3.0)).expect("c");
+        assert!(h.transaction(b).is_none());
+        assert!(h.transaction(c).is_some());
+        // Another one evicts a.
+        h.apply(&mut n, add(4.0)).expect("d");
+        assert!(h.transaction(a).is_none());
+        assert!(h.undo(&mut n) && h.undo(&mut n));
+        assert_eq!((h.undo_target(), h.redo_target()), (None, Some(c)));
     }
 }

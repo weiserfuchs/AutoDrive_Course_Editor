@@ -1,6 +1,6 @@
 //! The open document: config, history, selection, path and epoch (AD-9, AD-15, AD-18).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use ad_core::command::Transaction;
@@ -27,6 +27,10 @@ pub struct Document {
     /// Bumped by every apply, undo and redo and by the map panel after a selection
     /// gesture; tools key per-frame caches of the network or selection on it.
     pub revision: u64,
+    /// The selection before and after each entry applied with `apply_selecting`; undo and
+    /// redo of such an entry restore it. Records of entries gone from the history are
+    /// dropped at the next `apply_selecting`.
+    selections: BTreeMap<EntryId, (BTreeSet<NodeId>, BTreeSet<NodeId>)>,
 }
 
 impl Document {
@@ -58,7 +62,30 @@ impl Document {
             notice,
             selection: BTreeSet::new(),
             revision: 0,
+            selections: BTreeMap::new(),
         }
+    }
+
+    /// Applies `tx`, then selects what `select` picks from the applied transaction (AD-15
+    /// `select_after`). Undo of the entry restores the selection from before it, redo the
+    /// one after it.
+    pub fn apply_selecting(
+        &mut self,
+        tx: Transaction,
+        select: impl FnOnce(&Transaction) -> BTreeSet<NodeId>,
+    ) -> Result<EntryId, NetworkError> {
+        let before = self.selection.clone();
+        let id = self.history.apply(&mut self.config.network, tx);
+        if let Ok(id) = id {
+            let history = &self.history;
+            self.selections
+                .retain(|entry, _| history.transaction(*entry).is_some());
+            let after = history.transaction(id).map(select).unwrap_or_default();
+            self.selection = after.clone();
+            self.selections.insert(id, (before, after));
+        }
+        self.prune_selection();
+        id
     }
 
     pub fn apply(&mut self, tx: Transaction) -> Result<EntryId, NetworkError> {
@@ -69,14 +96,22 @@ impl Document {
 
     /// Returns false when there is nothing to undo or the history is read-only.
     pub fn undo(&mut self) -> bool {
+        let target = self.history.undo_target();
         let done = self.history.undo(&mut self.config.network);
+        if done && let Some((before, _)) = target.and_then(|id| self.selections.get(&id)) {
+            self.selection = before.clone();
+        }
         self.prune_selection();
         done
     }
 
     /// Returns false when there is nothing to redo or the history is read-only.
     pub fn redo(&mut self) -> bool {
+        let target = self.history.redo_target();
         let done = self.history.redo(&mut self.config.network);
+        if done && let Some((_, after)) = target.and_then(|id| self.selections.get(&id)) {
+            self.selection = after.clone();
+        }
         self.prune_selection();
         done
     }
@@ -177,6 +212,54 @@ mod tests {
         assert!(d.undo());
         assert!(d.config.network.node(id).is_some());
         assert!(d.selection.is_empty());
+    }
+
+    #[test]
+    fn a_selecting_entry_restores_its_selections_on_undo_and_redo_only() {
+        use ad_core::command::{Command, PasteNodes};
+        let mut d = doc("<version>3</version>");
+        let first = d.config.network.order()[0];
+        d.selection.insert(first);
+        let paste = Transaction::new(vec![Command::PasteNodes(PasteNodes::new(
+            vec![(3.0, 0.0, 3.0, NodeFlag::REGULAR)],
+            Vec::new(),
+            Vec::new(),
+        ))]);
+        d.apply_selecting(paste, crate::clipboard::pasted)
+            .expect("applies");
+        let pasted = *d.config.network.order().last().expect("pasted");
+        assert_eq!(d.selection.iter().copied().collect::<Vec<_>>(), [pasted]);
+        // A plain entry on top keeps today's rule: no selection change on undo or redo.
+        let tx = node_tx(&d);
+        d.apply(tx).expect("applies");
+        d.selection.clear();
+        assert!(d.undo());
+        assert!(d.selection.is_empty());
+        assert!(d.undo());
+        assert_eq!(d.selection.iter().copied().collect::<Vec<_>>(), [first]);
+        assert!(d.redo());
+        assert_eq!(d.selection.iter().copied().collect::<Vec<_>>(), [pasted]);
+        // A cut: undo reselects the cut nodes, redo selects nothing.
+        let cut = delete_tx(pasted);
+        d.apply_selecting(cut, |_| BTreeSet::new())
+            .expect("applies");
+        assert!(d.selection.is_empty());
+        assert!(d.undo());
+        assert_eq!(d.selection.iter().copied().collect::<Vec<_>>(), [pasted]);
+        assert!(d.redo());
+        assert!(d.selection.is_empty());
+    }
+
+    #[test]
+    fn a_read_only_document_rejects_a_selecting_entry_and_keeps_the_selection() {
+        let mut d = doc("<markerID>1</markerID>");
+        let first = d.config.network.order()[0];
+        d.selection.insert(first);
+        assert_eq!(
+            d.apply_selecting(delete_tx(first), |_| BTreeSet::new()),
+            Err(NetworkError::ReadOnly)
+        );
+        assert_eq!(d.selection.iter().copied().collect::<Vec<_>>(), [first]);
     }
 
     #[test]

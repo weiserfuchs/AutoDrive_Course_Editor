@@ -129,9 +129,95 @@ impl SetFlag {
     }
 }
 
+/// Pastes a group: adds `nodes` as `AddNodes` does, then sets `markers` and creates
+/// `links`, both referring to nodes by their index in `nodes`. A redo reinserts each node
+/// under the id of the first apply, with the same markers and links.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PasteNodes {
+    pub nodes: Vec<(f64, f64, f64, NodeFlag)>,
+    /// `(index, name, group)`.
+    pub markers: Vec<(usize, String, String)>,
+    /// `(from index, to index, shape)`.
+    pub links: Vec<(usize, usize, ConnectionShape)>,
+    /// `AddNodes` first, then one `EditMarker` per marker and one `Connect` per link;
+    /// built on the first apply, once the ids are known.
+    parts: Transaction,
+}
+
+impl PasteNodes {
+    pub fn new(
+        nodes: Vec<(f64, f64, f64, NodeFlag)>,
+        markers: Vec<(usize, String, String)>,
+        links: Vec<(usize, usize, ConnectionShape)>,
+    ) -> Self {
+        Self {
+            nodes,
+            markers,
+            links,
+            parts: Transaction::default(),
+        }
+    }
+
+    /// The ids of the pasted nodes in order, known after the first apply.
+    pub fn ids(&self) -> &[NodeId] {
+        match self.parts.0.first() {
+            Some(Command::AddNodes(add)) => add.ids(),
+            _ => &[],
+        }
+    }
+
+    fn apply(&mut self, net: &mut Network) -> Result<(), NetworkError> {
+        if !self.parts.0.is_empty() {
+            return self.parts.apply(net);
+        }
+        let mut add = Command::AddNodes(AddNodes::new(self.nodes.clone()));
+        add.apply(net)?;
+        let ids = match &add {
+            Command::AddNodes(a) => a.ids().to_vec(),
+            _ => Vec::new(),
+        };
+        let id = |index: usize| {
+            ids.get(index)
+                .copied()
+                .ok_or(NetworkError::IndexOutOfRange {
+                    index,
+                    len: ids.len(),
+                })
+        };
+        let rest: Result<Vec<Command>, NetworkError> =
+            self.markers
+                .iter()
+                .map(|(i, name, group)| {
+                    Ok(Command::EditMarker(EditMarker::new(
+                        id(*i)?,
+                        Some((name.clone(), group.clone())),
+                    )))
+                })
+                .chain(self.links.iter().map(|&(a, b, shape)| {
+                    Ok(Command::Connect(Connect::new(id(a)?, id(b)?, shape)))
+                }))
+                .collect();
+        let mut rest = match rest {
+            Ok(rest) => Transaction::new(rest),
+            Err(e) => {
+                let _ = add.revert(net);
+                return Err(e);
+            }
+        };
+        if let Err(e) = rest.apply(net) {
+            let _ = add.revert(net);
+            return Err(e);
+        }
+        self.parts.0.push(add);
+        self.parts.0.extend(rest.0);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     AddNodes(AddNodes),
+    PasteNodes(PasteNodes),
     DeleteNodes(DeleteNodes),
     Connect(Connect),
     Disconnect(Disconnect),
@@ -163,6 +249,7 @@ impl Command {
                 }
                 Ok(())
             }
+            Command::PasteNodes(c) => c.apply(net),
             Command::DeleteNodes(c) => {
                 c.removed.clear();
                 for id in &c.ids {
@@ -225,6 +312,7 @@ impl Command {
                 }
                 Ok(())
             }
+            Command::PasteNodes(c) => c.parts.revert(net),
             Command::DeleteNodes(c) => {
                 while let Some(removed) = c.removed.pop() {
                     net.reinsert(removed);
@@ -587,6 +675,56 @@ pub(crate) mod tests {
             let node = n.node(*id).expect("added node");
             assert_eq!(((node.x, node.y, node.z), node.flag), ((x, y, z), flag));
         }
+    }
+
+    fn paste() -> PasteNodes {
+        PasteNodes::new(
+            vec![
+                (1.0, 1.0, 1.0, NodeFlag::REGULAR),
+                (2.0, 2.0, 2.0, NodeFlag::SUB_PRIO),
+                (3.0, 3.0, 3.0, NodeFlag::REGULAR),
+            ],
+            vec![(1, "P".into(), "g".into())],
+            vec![
+                (0, 1, ConnectionShape::OneWay),
+                (1, 2, ConnectionShape::Dual),
+                (2, 0, ConnectionShape::Reverse),
+            ],
+        )
+    }
+
+    #[test]
+    fn paste_adds_nodes_markers_and_links_and_redo_keeps_the_ids() {
+        let (n, [a, b, c, d]) = linked();
+        let (n, tx) = round_trip(n, one(Command::PasteNodes(paste())));
+        let Command::PasteNodes(p) = &tx.0[0] else {
+            panic!("paste");
+        };
+        let ids = p.ids().to_vec();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(n.order(), &[a, b, c, d, ids[0], ids[1], ids[2]]);
+        assert_eq!(n.node(ids[1]).map(|x| x.flag), Some(NodeFlag::SUB_PRIO));
+        let last = n.markers().last().expect("marker");
+        assert_eq!((last.node, &*last.name, &*last.group), (ids[1], "P", "g"));
+        use crate::network::ConnectionKind;
+        assert_eq!(n.connection_kind(ids[0], ids[1]), ConnectionKind::Regular);
+        assert_eq!(n.connection_kind(ids[1], ids[2]), ConnectionKind::Dual);
+        assert_eq!(n.connection_kind(ids[2], ids[0]), ConnectionKind::Reverse);
+        assert_eq!(n.connection_kind(ids[0], ids[2]), ConnectionKind::None);
+    }
+
+    #[test]
+    fn paste_with_a_bad_index_fails_and_changes_nothing() {
+        let (mut n, _) = linked();
+        let before = snap(&n);
+        let mut bad = paste();
+        bad.links.push((0, 7, ConnectionShape::OneWay));
+        let mut tx = one(Command::PasteNodes(bad));
+        assert_eq!(
+            tx.apply(&mut n),
+            Err(NetworkError::IndexOutOfRange { index: 7, len: 3 })
+        );
+        assert_eq!(snap(&n), before);
     }
 
     #[test]
