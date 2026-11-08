@@ -43,7 +43,7 @@ after = [{ epic = 3, needs = "the Tool trait, connect commands and overlays" }, 
 id = 6
 slug = "epic-markers-parking"
 title = "Users manage markers, groups and parking"
-description = "Markers and groups are added, edited and deleted; vehicles.xml park destinations survive and update on save."
+description = "Users add, edit and delete markers and rename and delete groups undoably; vehicles parked at markers survive edits, and vehicles.xml marker references follow marker order on save."
 covers = ["R10"]
 after = [{ epic = 3, needs = "the Tool trait and command pattern" }]
 
