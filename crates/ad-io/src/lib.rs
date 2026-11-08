@@ -5,3 +5,4 @@ mod atomic;
 pub mod config_xml;
 pub mod map_image;
 pub mod settings;
+pub mod vehicles;

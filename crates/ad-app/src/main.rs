@@ -191,10 +191,13 @@ impl App {
         while let Ok(result) = self.rx.try_recv() {
             match &result {
                 JobResult::Loaded { .. } => self.loading = false,
-                JobResult::Saved { result, .. } => {
+                JobResult::Saved {
+                    result, warning, ..
+                } => {
                     self.saving = false;
-                    // A failed save keeps the document and the window.
-                    if result.is_err() {
+                    // A failed save keeps the document and the window; so does a failed
+                    // vehicles.xml save, so its message is seen.
+                    if result.is_err() || warning.is_some() {
                         self.pending = None;
                     }
                 }
@@ -552,6 +555,7 @@ impl App {
         let ctx = ctx.clone();
         jobs::spawn_save(
             doc.config.clone(),
+            jobs::vehicles_to_patch(doc, &target),
             doc.epoch,
             doc.history.save_point(),
             target,
@@ -625,7 +629,7 @@ mod tests {
         let config = config_xml::load(text(version).as_bytes()).expect("loads");
         let result = JobResult::Loaded {
             path: PathBuf::from("a.xml"),
-            result: Ok(Box::new((config, map_image::blank(), None, None))),
+            result: Ok(Box::new((config, map_image::blank(), None, None, None))),
         };
         app.tx.send(result).expect("send");
         app.poll_jobs();
@@ -1989,6 +1993,7 @@ mod tests {
             point: doc.history.save_point(),
             target: PathBuf::from("b.xml"),
             result: Ok(()),
+            warning: None,
         };
         app.tx.send(saved).expect("send");
         app.poll_jobs();
@@ -2077,6 +2082,7 @@ mod tests {
             point: doc.history.save_point(),
             target: PathBuf::from("b.xml"),
             result: Err("disk full".to_owned()),
+            warning: None,
         };
         app.tx.send(failed).expect("send");
         app.poll_jobs();
@@ -2100,12 +2106,37 @@ mod tests {
             point: doc.history.save_point(),
             target: PathBuf::from("b.xml"),
             result: Ok(()),
+            warning: None,
         };
         app.tx.send(saved).expect("send");
         app.poll_jobs();
         app.resume(&ctx);
         assert!(app.pending.is_none());
         assert!(app.allow_close);
+    }
+
+    #[test]
+    fn a_vehicles_warning_keeps_the_window_but_the_save_counts() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        edit(&mut app);
+        app.pending = Some(Pending::Close);
+        app.saving = true;
+        let doc = app.doc.as_ref().expect("doc");
+        let saved = JobResult::Saved {
+            epoch: doc.epoch,
+            point: doc.history.save_point(),
+            target: PathBuf::from("b.xml"),
+            result: Ok(()),
+            warning: Some("vehicles.xml was not saved".to_owned()),
+        };
+        app.tx.send(saved).expect("send");
+        app.poll_jobs();
+        app.resume(&ctx);
+        assert!(app.pending.is_none() && !app.allow_close);
+        assert_eq!(app.error.as_deref(), Some("vehicles.xml was not saved"));
+        assert!(!app.dirty());
     }
 
     #[test]
@@ -2125,6 +2156,7 @@ mod tests {
             point: doc.history.save_point(),
             target: PathBuf::from("b.xml"),
             result: Ok(()),
+            warning: None,
         };
         app.tx.send(saved).expect("send");
         app.poll_jobs();
@@ -2186,6 +2218,7 @@ mod tests {
             node: b,
             name: "Hof".into(),
             group: "All".into(),
+            parked_vehicles: Vec::new(),
         });
         doc.selection.extend([a, b]);
         [a, b, c]
@@ -2439,7 +2472,7 @@ mod tests {
         let config = config_xml::load(&bytes).expect("loads");
         let result = JobResult::Loaded {
             path,
-            result: Ok(Box::new((config, map_image::blank(), None, None))),
+            result: Ok(Box::new((config, map_image::blank(), None, None, None))),
         };
         app.tx.send(result).expect("send");
         app.poll_jobs();

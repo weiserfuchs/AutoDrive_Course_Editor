@@ -57,8 +57,6 @@ pub fn rasterise(svg: &[u8], px: u32) -> Option<egui::ColorImage> {
 /// The icon textures. A texture is `None` when its SVG failed to rasterise.
 pub struct Icons {
     pub marker: Option<egui::TextureHandle>,
-    /// Prepared for parked vehicles (a later epic); no node draws it yet.
-    #[allow(dead_code)]
     pub parking: Option<egui::TextureHandle>,
     /// Prepared for the overlap scan (a later epic); no node draws it yet.
     #[allow(dead_code)]

@@ -462,11 +462,13 @@ pub(crate) mod tests {
             node: b,
             name: "B".into(),
             group: "g".into(),
+            parked_vehicles: Vec::new(),
         });
         n.push_marker(Marker {
             node: c,
             name: "C".into(),
             group: "g".into(),
+            parked_vehicles: Vec::new(),
         });
         (n, ids)
     }
@@ -636,6 +638,36 @@ pub(crate) mod tests {
         tx.apply(&mut n).expect("apply");
         tx.revert(&mut n).expect("revert");
         assert_eq!(snap(&n), before);
+    }
+
+    #[test]
+    fn parked_vehicles_survive_marker_edits_node_delete_and_undo() {
+        let (mut n, [_, b, ..]) = linked();
+        assert!(n.park_vehicle(0, "v1".into()));
+        let parked = vec!["v1".to_owned()];
+        let parked_on_b = |n: &Network| {
+            n.markers()
+                .iter()
+                .find(|m| m.node == b)
+                .map(|m| m.parked_vehicles.clone())
+        };
+        // `round_trip` checks that every undo restores the list (it is part of the snapshot).
+        let rename = EditMarker::new(b, Some(("B2".to_owned(), "h".to_owned())));
+        let (n, _) = round_trip(n, one(Command::EditMarker(rename)));
+        assert_eq!(parked_on_b(&n).as_ref(), Some(&parked));
+        let (mut n, mut tx) = round_trip(n, one(Command::EditMarker(EditMarker::new(b, None))));
+        assert_eq!(parked_on_b(&n), None);
+        tx.revert(&mut n).expect("undo");
+        assert_eq!(parked_on_b(&n).as_ref(), Some(&parked));
+        let (mut n, mut tx) = round_trip(n, one(Command::DeleteNodes(DeleteNodes::new(vec![b]))));
+        assert_eq!(parked_on_b(&n), None);
+        tx.revert(&mut n).expect("undo");
+        assert_eq!(parked_on_b(&n).as_ref(), Some(&parked));
+        // A marker set again on a node without one starts with none.
+        let (n, _) = round_trip(n, one(Command::EditMarker(EditMarker::new(b, None))));
+        let set = EditMarker::new(b, Some(("B".to_owned(), "g".to_owned())));
+        let (n, _) = round_trip(n, one(Command::EditMarker(set)));
+        assert_eq!(parked_on_b(&n), Some(Vec::new()));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ad_core::command::Transaction;
 use ad_core::history::{EntryId, History};
@@ -9,11 +10,16 @@ use ad_core::map_context::MapContext;
 use ad_core::network::{NetworkError, NodeId};
 use ad_io::config_xml::LoadedConfig;
 use ad_io::map_image::MapImage;
+use ad_io::vehicles::VehiclesFile;
 
 pub struct Document {
     pub config: LoadedConfig,
     pub history: History,
     pub path: PathBuf,
+    /// The path the config was opened from; only a save to it writes `vehicles.xml`.
+    pub opened_path: PathBuf,
+    /// The `vehicles.xml` beside the opened config, when one was read (AD-17).
+    pub vehicles: Option<Arc<VehiclesFile>>,
     pub epoch: u64,
     pub map: MapContext,
     /// Decoded image waiting for the UI thread to upload it; taken right after (AD-14).
@@ -54,6 +60,8 @@ impl Document {
         Self {
             config,
             history,
+            opened_path: path.clone(),
+            vehicles: None,
             path,
             epoch,
             map,

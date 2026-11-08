@@ -796,11 +796,13 @@ mod tests {
             node: a,
             name: "A".into(),
             group: "g".into(),
+            parked_vehicles: Vec::new(),
         });
         n.push_marker(Marker {
             node: b,
             name: "B".into(),
             group: "g".into(),
+            parked_vehicles: Vec::new(),
         });
         let before = (
             n.nodes.clone(),

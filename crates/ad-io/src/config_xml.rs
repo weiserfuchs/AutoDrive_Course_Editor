@@ -352,6 +352,7 @@ fn build_network(
             node: *node,
             name: require(entry, "name")?.to_owned(),
             group: require(entry, "group")?.to_owned(),
+            parked_vehicles: Vec::new(),
         });
     }
     Ok((network, flags_reset))
