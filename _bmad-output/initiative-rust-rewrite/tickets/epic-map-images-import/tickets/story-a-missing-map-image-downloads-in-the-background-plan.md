@@ -3,7 +3,7 @@ title: 'A missing map image downloads in the background'
 type: 'feature'
 ticket: '4'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '07a263d'
 route: 'full'
 route_source: 'auto'
