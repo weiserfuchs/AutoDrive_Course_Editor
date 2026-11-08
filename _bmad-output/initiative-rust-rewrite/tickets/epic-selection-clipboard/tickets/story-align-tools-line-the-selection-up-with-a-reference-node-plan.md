@@ -3,7 +3,7 @@ title: 'Align tools line the selection up with a reference node'
 type: 'feature'
 ticket: '7'
 created: '2026-11-08'
-status: 'in-review'
+status: 'built'
 baseline_revision: '0a664c607a904d0cabcea5125a4a3b41c7ff2e2c'
 route: 'full'
 route_source: 'auto'
@@ -79,3 +79,7 @@ context: []
 ## Plan Change Log
 
 ## Review Triage Log
+
+- Quick review, pass 1: 1 low patched.
+  - low, patch: the guide line used the previous frame's hover, and since egui repaints only on input, a stale guide could stay on screen (or be missing) after the pointer came to rest. `ViewHooks::paint` now gets this frame's hovered node from `MapView::show`; test `the_align_guide_follows_the_hover_of_the_same_frame` drives real frames.
+- Verification after the patch: fmt, clippy, workspace tests and the release frame-time test pass.
