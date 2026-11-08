@@ -3,7 +3,7 @@ title: 'The rotate tool turns the selection about its centre'
 type: 'feature'
 ticket: '6'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: 'dd0bf9f70a14b5c7f45884b4ef979b06968cb86e'
 route: 'full'
 route_source: 'auto'
