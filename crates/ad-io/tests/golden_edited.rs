@@ -1065,3 +1065,93 @@ fn renamed_and_deleted_groups_save_reload_and_undo() -> Result<(), Error> {
     assert_eq!(cfg.network.markers(), before);
     Ok(())
 }
+
+/// A copy of `ids` pasted in place as ad-app's paste builds it: same positions and flags,
+/// the links between copied nodes with their shapes, the markers renamed with `_2`.
+fn paste_in_place(net: &Network, ids: &[NodeId]) -> PasteNodes {
+    let index: HashMap<NodeId, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let nodes = ids
+        .iter()
+        .filter_map(|id| net.node(*id))
+        .map(|n| (n.x, n.y, n.z, n.flag))
+        .collect();
+    let markers = net
+        .markers()
+        .iter()
+        .filter_map(|m| {
+            Some((
+                *index.get(&m.node)?,
+                format!("{}_2", m.name),
+                m.group.clone(),
+            ))
+        })
+        .collect();
+    let mut links = Vec::new();
+    for (i, a) in ids.iter().enumerate() {
+        for b in net.node(*a).map(|n| n.outgoing()).unwrap_or_default() {
+            let (Some(&j), Some(shape)) = (index.get(b), net.link_shape(*a, *b)) else {
+                continue;
+            };
+            if shape == ConnectionShape::Dual && i > j {
+                continue;
+            }
+            links.push((LinkEnd::New(i), LinkEnd::New(j), shape));
+        }
+    }
+    PasteNodes::new(nodes, markers, links)
+}
+
+#[test]
+fn merged_pasted_copy_saves_and_reloads_as_the_original_and_undo_brings_it_back()
+-> Result<(), Error> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../AutoDrive_config.xml");
+    let original = std::fs::read(&fixture)?;
+    let mut cfg = load(&original)?;
+    let original_model = model(&cfg.network);
+    // The user's case: a few hundred nodes copied and pasted in place.
+    let copied: Vec<NodeId> = cfg.network.order()[..650].to_vec();
+    let paste = paste_in_place(&cfg.network, &copied);
+    let mut history = History::default();
+    history.apply(
+        &mut cfg.network,
+        Transaction::new(vec![Command::PasteNodes(paste)]),
+    )?;
+    let pasted_model = model(&cfg.network);
+    let marks = ad_core::scan::overlaps(&cfg.network, 0.1);
+    assert_eq!(marks.len(), 2 * copied.len());
+    let groups = ad_core::scan::overlap_groups(&cfg.network, 0.1, &marks);
+    assert_eq!(groups.len(), copied.len());
+    let kept: Vec<NodeId> = groups.iter().map(|g| g.keep).collect();
+    assert_eq!(kept, copied, "the originals come first and are kept");
+    let (tx, removed_markers) = ad_core::scan::merge_plan(&cfg.network, &groups);
+    assert!(
+        !tx.0.iter().any(|c| matches!(c, Command::Connect(_))),
+        "the copies' links are the originals' links"
+    );
+    let copied_markers = cfg
+        .network
+        .markers()
+        .iter()
+        .filter(|m| copied.contains(&m.node))
+        .count();
+    assert_eq!(removed_markers.len(), copied_markers);
+    history.apply(&mut cfg.network, tx)?;
+    assert!(model(&cfg.network) == original_model);
+
+    let dir = std::env::temp_dir().join(format!("ad_golden_merged_{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("AutoDrive_config.xml");
+    save_to(&cfg, &out)?;
+    let written = std::fs::read(&out)?;
+    std::fs::remove_dir_all(&dir)?;
+
+    let reloaded = load(&written)?;
+    assert!(model(&reloaded.network) == original_model);
+    assert!(untouched(&original)? == untouched(&written)?);
+    // One undo returns the pasted network exactly, a second the original.
+    assert!(history.undo(&mut cfg.network));
+    assert!(model(&cfg.network) == pasted_model);
+    assert!(history.undo(&mut cfg.network));
+    assert!(model(&cfg.network) == original_model);
+    Ok(())
+}

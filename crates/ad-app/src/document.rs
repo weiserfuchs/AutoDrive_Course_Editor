@@ -17,6 +17,8 @@ use ad_io::vehicles::VehiclesFile;
 const NO_OVERLAPS: &str = "No overlapping nodes";
 /// The notice line of a scan that marked nodes, after their count.
 const OVERLAPS_FOUND_SUFFIX: &str = " overlapping nodes found";
+/// The notice line naming the markers deleted with merged nodes, before their names.
+pub const MARKERS_MERGED_PREFIX: &str = "Markers deleted with merged nodes: ";
 
 /// [`scan::around`] `nodes`, or `None` (rescan the whole network) when they are more than 64
 /// and an eighth of it: remarking around every node of the fixture costs about 43 ms, a full
@@ -205,6 +207,38 @@ impl Document {
     pub fn clear_overlaps(&mut self) {
         self.overlap = None;
         self.overlap_notice();
+    }
+
+    /// How many nodes are marked and how many stay after their merge; `None` without marks.
+    pub fn merge_counts(&self) -> Option<(usize, usize)> {
+        let (distance, marks) = self.overlap.as_ref().filter(|(_, m)| !m.is_empty())?;
+        let groups = scan::overlap_groups(&self.config.network, *distance, marks);
+        Some((marks.len(), groups.len()))
+    }
+
+    /// Merges the marked overlapping nodes in one entry (story 8.2): each group keeps one
+    /// node, which takes over the links of the others, and the kept nodes become the
+    /// selection. A notice names the markers deleted with merged nodes. Without marks,
+    /// nothing happens.
+    pub fn merge_overlaps(&mut self) -> Result<(), NetworkError> {
+        let Some((distance, marks)) = &self.overlap else {
+            return Ok(());
+        };
+        let net = &self.config.network;
+        let groups = scan::overlap_groups(net, *distance, marks);
+        let (tx, removed_markers) = scan::merge_plan(net, &groups);
+        if tx.0.is_empty() {
+            return Ok(());
+        }
+        let kept: BTreeSet<NodeId> = groups.iter().map(|g| g.keep).collect();
+        self.apply_selecting(tx, |_| kept)?;
+        if !removed_markers.is_empty() {
+            self.add_notice(format!(
+                "{MARKERS_MERGED_PREFIX}{}",
+                removed_markers.join(", ")
+            ));
+        }
+        Ok(())
     }
 
     /// The nodes whose overlap mark `tx` can change, from where its nodes are now; none

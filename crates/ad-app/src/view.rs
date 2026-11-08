@@ -3044,6 +3044,41 @@ mod tests {
         println!("overlap follow, one node moved, d = 1.0: {n} nodes remarked, {ms:.3} ms");
         let (ms, n) = follow(&all, 1.0);
         println!("overlap follow, every node moved, d = 1.0: {n} nodes remarked, {ms:.3} ms");
+        // Story 8.2: merging the user's case, 650 nodes pasted in place (1300 marked), on
+        // the UI thread: building the plan, applying it and the full rescan that follows.
+        {
+            let mut pasted = net.clone();
+            let copied: BTreeSet<NodeId> = net.order()[..650].iter().copied().collect();
+            let clip = crate::clipboard::copy(net, &copied).expect("clipboard");
+            let mut paste = crate::clipboard::paste(&clip, None, net, &map);
+            paste.apply(&mut pasted).expect("pastes");
+            let marks = ad_core::scan::overlaps(&pasted, 0.1);
+            let (plan_ms, removed) = best_ms(&mut || {
+                let groups = ad_core::scan::overlap_groups(&pasted, 0.1, &marks);
+                let (tx, _) = ad_core::scan::merge_plan(&pasted, &groups);
+                assert!(!tx.0.is_empty());
+                groups.iter().map(|g| g.removed.len()).sum::<usize>()
+            });
+            let groups = ad_core::scan::overlap_groups(&pasted, 0.1, &marks);
+            let (tx, _) = ad_core::scan::merge_plan(&pasted, &groups);
+            let mut apply_ms = f64::INFINITY;
+            let mut rescan_ms = f64::INFINITY;
+            for _ in 0..20 {
+                let mut tx = tx.clone();
+                let start = std::time::Instant::now();
+                tx.apply(&mut pasted).expect("merges");
+                apply_ms = apply_ms.min(start.elapsed().as_secs_f64() * 1000.0);
+                let start = std::time::Instant::now();
+                assert!(ad_core::scan::overlaps(&pasted, 0.1).is_empty());
+                rescan_ms = rescan_ms.min(start.elapsed().as_secs_f64() * 1000.0);
+                tx.revert(&mut pasted).expect("reverts");
+            }
+            println!(
+                "merge of {} marked nodes ({removed} removed): plan {plan_ms:.3} ms, apply \
+                 {apply_ms:.3} ms, rescan after {rescan_ms:.3} ms (best of 20)",
+                marks.len()
+            );
+        }
         let marks_shown = std::cell::Cell::new(false);
         // One timed frame: tessellation included.
         let timed = |view: &mut MapView, pointer: Option<egui::Pos2>| {

@@ -515,7 +515,7 @@ pub(crate) mod tests {
     }
 
     /// Applies, then checks that undo and redo alternate between exactly two states.
-    fn round_trip(mut net: Network, mut tx: Transaction) -> (Network, Transaction) {
+    pub(crate) fn round_trip(mut net: Network, mut tx: Transaction) -> (Network, Transaction) {
         let before = snap(&net);
         tx.apply(&mut net).expect("apply");
         let after = snap(&net);
