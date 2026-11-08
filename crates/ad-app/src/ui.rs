@@ -12,7 +12,8 @@ use ad_core::network::{ConnectionShape, Network, NodeFlag, NodeId};
 
 use crate::input::{self, Action};
 use crate::tools::align::{AlignTool, Axis};
-use crate::tools::bezier::{self, BezierTool, Curve};
+use crate::tools::arc::ArcTool;
+use crate::tools::bezier::{self, BezierTool, CurveSettings};
 use crate::tools::connect::ConnectTool;
 use crate::tools::delete::DeleteTool;
 use crate::tools::edit_location::{self, EditLocationTool};
@@ -74,7 +75,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
     let line = app.line();
-    let tools: [Box<dyn Tool>; 15] = [
+    let tools: [Box<dyn Tool>; 16] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
@@ -90,6 +91,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         Box::new(ConnectTool::new(ConnectionShape::Dual, continuous, line)),
         Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous, line)),
         Box::new(BezierTool::default()),
+        Box::new(ArcTool::default()),
     ];
     for tool in tools {
         let selected = active == Some(tool.name());
@@ -397,42 +399,64 @@ pub(crate) enum CurveChoice {
     Cancel,
 }
 
-/// The curve panel, a non-modal window shown while the Bézier tool previews a curve: it
-/// edits the curve directly (the preview follows), Commit applies it, Cancel drops it.
+/// The curve panel, a non-modal window shown while the Bézier tool previews a curve or the
+/// arc tool an arc: it edits the preview directly (the preview follows), Commit applies
+/// it, Cancel drops it. Only a Bézier curve has the control-point setting.
 pub(crate) fn curve_panel(app: &mut App, ctx: &egui::Context) {
-    let Some(curve) = app.tool.as_deref_mut().and_then(Tool::curve_mut) else {
+    let Some(tool) = app.tool.as_deref_mut() else {
         return;
     };
-    let mut choice = None;
-    egui::Window::new("Bézier curve")
-        .collapsible(false)
-        .resizable(false)
-        .show(ctx, |ui| choice = curve_controls(ui, curve));
+    let window = |title: &str| egui::Window::new(title).collapsible(false).resizable(false);
+    let (mut choice, mut swap) = (None, false);
+    if let Some(curve) = tool.curve_mut() {
+        window("Bézier curve").show(ctx, |ui| {
+            let controls = Some(&mut curve.controls);
+            choice = curve_controls(ui, &mut curve.settings, controls, &mut swap);
+        });
+        if swap {
+            curve.swap();
+        }
+    } else if let Some(arc) = tool.arc_mut() {
+        window("Arc").show(ctx, |ui| {
+            choice = curve_controls(ui, &mut arc.settings, None, &mut swap);
+        });
+        if swap {
+            arc.swap();
+        }
+    }
     if let Some(choice) = choice {
         app.finish_curve(choice);
     }
 }
 
-/// The curve panel's controls (Java `CurvePanel`); returns the button pressed, if any.
-fn curve_controls(ui: &mut egui::Ui, curve: &mut Curve) -> Option<CurveChoice> {
+/// The curve panel's controls (Java `CurvePanel`), with the control-point setting when
+/// `controls` is given; sets `swap` when "Swap direction" is pressed. Returns Commit or
+/// Cancel when pressed.
+fn curve_controls(
+    ui: &mut egui::Ui,
+    settings: &mut CurveSettings,
+    controls: Option<&mut usize>,
+    swap: &mut bool,
+) -> Option<CurveChoice> {
     ui.add(
-        egui::Slider::new(&mut curve.points, 1..=bezier::MAX_POINTS).text("Interpolation points"),
+        egui::Slider::new(&mut settings.points, 1..=bezier::MAX_POINTS)
+            .text("Interpolation points"),
     );
-    ui.add(egui::Slider::new(&mut curve.controls, 1..=bezier::MAX_CONTROLS).text("Control points"));
+    if let Some(controls) = controls {
+        ui.add(egui::Slider::new(controls, 1..=bezier::MAX_CONTROLS).text("Control points"));
+    }
     ui.horizontal(|ui| {
         ui.label("Priority");
-        ui.selectable_value(&mut curve.flag, NodeFlag::REGULAR, "Regular");
-        ui.selectable_value(&mut curve.flag, NodeFlag::SUB_PRIO, "Sub-priority");
+        ui.selectable_value(&mut settings.flag, NodeFlag::REGULAR, "Regular");
+        ui.selectable_value(&mut settings.flag, NodeFlag::SUB_PRIO, "Sub-priority");
     });
     ui.horizontal(|ui| {
         ui.label("Connection");
-        ui.selectable_value(&mut curve.shape, ConnectionShape::OneWay, "Regular");
-        ui.selectable_value(&mut curve.shape, ConnectionShape::Dual, "Dual");
-        ui.selectable_value(&mut curve.shape, ConnectionShape::Reverse, "Reverse");
+        ui.selectable_value(&mut settings.shape, ConnectionShape::OneWay, "Regular");
+        ui.selectable_value(&mut settings.shape, ConnectionShape::Dual, "Dual");
+        ui.selectable_value(&mut settings.shape, ConnectionShape::Reverse, "Reverse");
     });
-    if ui.button("Swap direction").clicked() {
-        curve.swap();
-    }
+    *swap = ui.button("Swap direction").clicked();
     let mut choice = None;
     ui.horizontal(|ui| {
         if ui.button("Commit").clicked() {

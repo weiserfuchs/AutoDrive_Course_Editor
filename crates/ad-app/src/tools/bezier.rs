@@ -76,6 +76,28 @@ pub fn curve_points(
         .collect()
 }
 
+/// The curve panel's settings the Bézier and the arc tool share; a new curve or arc starts
+/// with the defaults.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurveSettings {
+    /// Interpolation points, 1..=[`MAX_POINTS`].
+    pub points: usize,
+    /// The new nodes' flag (the panel's priority).
+    pub flag: NodeFlag,
+    /// The links' shape (the panel's connection type).
+    pub shape: ConnectionShape,
+}
+
+impl Default for CurveSettings {
+    fn default() -> Self {
+        Self {
+            points: DEFAULT_POINTS,
+            flag: NodeFlag::REGULAR,
+            shape: ConnectionShape::OneWay,
+        }
+    }
+}
+
 /// A previewed curve and its panel settings. All four control points exist; the first
 /// `controls` are used and shown.
 #[derive(Debug, Clone, PartialEq)]
@@ -86,14 +108,10 @@ pub struct Curve {
     handles: [(f64, f64); MAX_CONTROLS],
     /// The control points the curve is computed from (Java's virtual control points).
     controls_at: [(f64, f64); MAX_CONTROLS],
-    /// Interpolation points, 1..=[`MAX_POINTS`].
-    pub points: usize,
     /// Control points used, 1..=[`MAX_CONTROLS`].
     pub controls: usize,
-    /// The new nodes' flag (the panel's priority).
-    pub flag: NodeFlag,
-    /// The links' shape (the panel's connection type).
-    pub shape: ConnectionShape,
+    /// Interpolation points, priority and connection type.
+    pub settings: CurveSettings,
 }
 
 impl Curve {
@@ -106,10 +124,8 @@ impl Curve {
             end,
             handles: [mid; MAX_CONTROLS],
             controls_at: [mid; MAX_CONTROLS],
-            points: DEFAULT_POINTS,
             controls: DEFAULT_CONTROLS,
-            flag: NodeFlag::REGULAR,
-            shape: ConnectionShape::OneWay,
+            settings: CurveSettings::default(),
         }
     }
 
@@ -148,7 +164,7 @@ impl Curve {
 
     /// The curve's points between the start at `s` and the end at `e` (world x, z).
     pub fn points_between(&self, s: (f64, f64), e: (f64, f64)) -> Vec<(f64, f64, f64)> {
-        let n = self.points.clamp(1, MAX_POINTS);
+        let n = self.settings.points.clamp(1, MAX_POINTS);
         curve_points(s, self.control_points(), e, n)
     }
 }
@@ -165,8 +181,8 @@ pub fn plan(net: &Network, map: &MapContext, curve: &Curve) -> Option<Transactio
         curve.start,
         &points,
         Some(curve.end),
-        curve.shape,
-        curve.flag,
+        curve.settings.shape,
+        curve.settings.flag,
     )
 }
 
@@ -215,7 +231,7 @@ impl BezierTool {
 }
 
 /// The connection kind drawn for a curve link of `shape`.
-fn kind(shape: ConnectionShape) -> ConnectionKind {
+pub(crate) fn kind(shape: ConnectionShape) -> ConnectionKind {
     match shape {
         ConnectionShape::OneWay => ConnectionKind::Regular,
         ConnectionShape::Dual => ConnectionKind::Dual,
@@ -325,9 +341,10 @@ impl Tool for BezierTool {
             let (sx, sy) = t.map_to_screen(mx, my);
             egui::pos2(sx as f32, sy as f32)
         };
-        let colour = look::connection_colour(kind(curve.shape), curve.flag.0, curve.flag.0);
+        let flag = curve.settings.flag.0;
+        let colour = look::connection_colour(kind(curve.settings.shape), flag, flag);
         let stroke = egui::Stroke::new(STROKE_PX, colour);
-        let dot = look::node_colour(curve.flag.0);
+        let dot = look::node_colour(flag);
         let points = curve.points_between((s.x, s.z), (e.x, e.z));
         let mut prev = screen((s.x, s.z));
         for &(x, z, _) in &points {
@@ -668,10 +685,10 @@ mod tests {
         let map = no_heightmap();
         let mut tool = previewing(&net, &map, ids);
         let curve = tool.curve_mut().expect("curve");
-        curve.points = 10;
+        curve.settings.points = 10;
         curve.controls = 2;
-        curve.flag = NodeFlag::SUB_PRIO;
-        curve.shape = ConnectionShape::Dual;
+        curve.settings.flag = NodeFlag::SUB_PRIO;
+        curve.settings.shape = ConnectionShape::Dual;
         let tx = plan(&net, &map, curve).expect("tx");
         let (nodes, links) = committed(&tx);
         assert_eq!(nodes.len(), 10);
@@ -693,7 +710,7 @@ mod tests {
         let map = no_heightmap();
         let mut tool = previewing(&net, &map, ids);
         let curve = tool.curve_mut().expect("curve");
-        curve.points = 1;
+        curve.settings.points = 1;
         let (nodes, links) = committed(&plan(&net, &map, curve).expect("tx"));
         assert_eq!(nodes, [(50.0, 15.0, 0.0, NodeFlag::REGULAR)]);
         assert_eq!(links.len(), 2);
@@ -705,7 +722,7 @@ mod tests {
         let mut map = no_heightmap();
         let mut tool = previewing(&net, &map, ids);
         let curve = tool.curve_mut().expect("curve");
-        curve.points = 4;
+        curve.settings.points = 4;
         let (nodes, _) = committed(&plan(&net, &map, curve).expect("tx"));
         let ys: Vec<f64> = nodes.iter().map(|n| n.1).collect();
         for (y, want) in ys.iter().zip([12.0, 14.0, 16.0, 18.0]) {
@@ -759,8 +776,15 @@ mod tests {
         let tool = previewing(&net, &map, ids);
         let curve = tool.curve().expect("curve");
         assert_eq!(
-            (curve.points, curve.controls, curve.flag, curve.shape),
-            (6, 1, NodeFlag::REGULAR, ConnectionShape::OneWay)
+            (curve.controls, curve.settings),
+            (
+                1,
+                CurveSettings {
+                    points: 6,
+                    flag: NodeFlag::REGULAR,
+                    shape: ConnectionShape::OneWay
+                }
+            )
         );
     }
 }

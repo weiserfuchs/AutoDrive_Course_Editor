@@ -63,9 +63,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `tools/arc.rs` -- math, handles, plan; tests for Place, Points, Wrap, Centre/Angle/Radius handle, Swap, Heights
-- [ ] tool, panel and wiring -- tests for Commit/undo, Cancel, Read-only
-- [ ] golden -- arc round-trip
+- [x] `tools/arc.rs` -- math, handles, plan; tests for Place, Points, Wrap, Centre/Angle/Radius handle, Swap, Heights
+- [x] tool, panel and wiring -- tests for Commit/undo, Cancel, Read-only
+- [x] golden -- arc round-trip
 
 **Acceptance Criteria:**
 - Given the fixture, when the user places an arc, shapes it with its handles, commits it and presses Ctrl+Z, then the arc's nodes and links appear and disappear in one step.
@@ -79,6 +79,14 @@ context: []
 - `cargo test -p ad-app --release -- --ignored frame_time --nocapture` -- expected: every case under 16 ms
 
 ## Implementation Notes
+
+- Shared panel: `bezier::CurveSettings { points, flag, shape }` (with `Default`: 6, regular, one-way) replaces the three fields on `Curve`; `arc::Arc` holds one too. `ui::curve_controls(ui, settings, controls: Option<&mut usize>, swap: &mut bool)` draws the panel; the control-point slider shows only when `controls` is given (Bézier). `curve_panel` picks the window ("Bézier curve" or "Arc") from `Tool::curve_mut()` or the new sibling `Tool::arc_mut()`, and calls the matching `swap()` after the window. The Bézier tests and the frame-time case now set `curve.settings.points` etc.; no behaviour change.
+- `tools/arc.rs`: pure `span` (Java normalisation, end below start +360), `on_circle` (Java `angle - 90°`), `arc_points` (N + 2, even in angle), `angle_to` (Java `atan2(c - p) - 90°`, wrapped to [0, 360), rounded to whole degrees). `Arc { centre, radius, start_deg, end_deg, reversed, settings }`; handles are derived (`Arc::handle`), not stored: the radius handle is `on_circle(centre, r / 2, start)`. The centre and radius handles move by the pointer delta (as Bézier/Java); the radius move projects onto the centre-start line, clamped to [0, r] as Java's `clampNodeToLine` (so one move can at most double the radius) and to at least `MIN_RADIUS / 2`, radius = 2 x distance, at least 2. The angle handles take the pointer's absolute angle.
+- Commit: `arc::plan(map, arc)` builds the `PasteNodes` directly with `LinkEnd::New` links (smaller than extending `connect::chain`, which also could not reverse). Swapped links run last -> first in Java's order. Heights `sample_height(..).unwrap_or(-1.0)`. `App::finish_curve` plans with `bezier::plan` when the tool has a curve, else `arc::plan`; still one `Document::apply`.
+- Toolbar: "Arc" button after "Bézier", gated by `editable()` like every toolbar tool. No `Action`/shortcut was added (as Java, no shortcut); the read-only test therefore follows the toolbar-only tools' pattern (tool left active: a click places nothing, a held arc does not commit).
+- A click while an arc is previewed does nothing (Java creates only when no arc is active). Placement does not grid-snap (not in the spec).
+- Tests: `tools::arc::tests::{a_click_places_a_half_circle_of_eight_points, points_run_evenly_in_angle_with_both_ends, an_end_below_the_start_wraps_through_zero, the_centre_handle_moves_the_whole_arc, an_angle_handle_turns_to_the_pointers_whole_degree, the_radius_handle_sets_twice_its_distance_at_least_two, a_press_off_the_handles_is_not_claimed, the_commit_links_the_points_in_order_or_reversed_after_swap, heights_are_sampled_or_the_no_height_sentinel, cancel_drops_the_arc_and_the_next_starts_with_the_defaults}`; `tests::{an_arc_is_placed_shaped_by_its_handles_committed_and_undone_in_one_step, the_arc_is_dropped_by_cancel_a_tool_switch_and_a_new_file, read_only_document_ignores_the_arc_tool}` in `main.rs`; `committed_arc_saves_and_reloads` in `golden_edited.rs`.
+- Verification: `cargo fmt --all --check` ok; `cargo clippy --workspace --all-targets -- -D warnings` ok; `cargo test --workspace` all pass (ad-app 299, golden_edited 6). `frame_time` (release) all ok in two runs; worst best-round max "rotate: min zoom, whole network selected" 8.708 / 10.039 ms; curve cases 2.900 / 2.998 ms (min zoom) and 0.155 / 0.119 ms (max zoom). No frame-time case for the arc (not required).
 
 ## Plan Change Log
 
