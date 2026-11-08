@@ -3,7 +3,7 @@ title: 'PasteNodes links new nodes to existing ones'
 type: 'feature'
 ticket: '1'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '1841e1a'
 route: 'full'
 route_source: 'auto'
