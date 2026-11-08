@@ -3,7 +3,7 @@ title: 'Map image and heightmap load and save by hand'
 type: 'feature'
 ticket: '5'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: 'e0a118a'
 route: 'full'
 route_source: 'auto'
