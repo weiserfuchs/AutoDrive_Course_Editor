@@ -105,7 +105,9 @@ pub trait Tool {
 
     /// Draws the preview on top of the map view; `cursor` is the pointer over the view.
     /// `snap_grid` is the grid spacing when snap applies this frame (Shift already resolved).
+    /// `hovered_node` is the world (x, z) of the node under the pointer.
     /// `hovered_edge` is the drawn screen segment of the hovered connection.
+    #[allow(clippy::too_many_arguments)]
     fn paint(
         &self,
         painter: &egui::Painter,
@@ -113,8 +115,13 @@ pub trait Tool {
         geometry: MapGeometry,
         cursor: Option<egui::Pos2>,
         snap_grid: Option<(f64, f64)>,
+        hovered_node: Option<(f64, f64)>,
         hovered_edge: Option<(egui::Pos2, egui::Pos2)>,
     );
+
+    /// The transaction the last click returned was applied as `tx`; only the connect
+    /// tools use it, to start the next line at a node the line created.
+    fn committed(&mut self, _tx: &Transaction) {}
 
     /// Continuous connections were turned on or off; only the connect tools use it.
     fn set_continuous(&mut self, _on: bool) {}

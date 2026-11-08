@@ -38,6 +38,13 @@ pub struct GlobalSettings {
     pub history_cap: usize,
     /// Whether the grid starts switched on (Java `bShowGrid`).
     pub show_grid: bool,
+    /// Spacing of the nodes a connect line puts in, in world units; at least 1 (Java
+    /// `LinearLineNodeDistance`).
+    #[serde(deserialize_with = "at_least_one")]
+    pub line_node_distance: u32,
+    /// Whether a connect click on empty map ends the line at a new node (Java
+    /// `CreateLinearLineEndNode`).
+    pub create_line_end_node: bool,
 }
 
 impl Default for GlobalSettings {
@@ -45,8 +52,14 @@ impl Default for GlobalSettings {
         Self {
             history_cap: DEFAULT_CAP,
             show_grid: false,
+            line_node_distance: 12,
+            create_line_end_node: false,
         }
     }
+}
+
+fn at_least_one<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    Ok(u32::deserialize(d)?.max(1))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -211,6 +224,30 @@ node_size = 2.5
         )
         .expect("write");
         assert_eq!(load(&path).expect("load").maps["Y"].node_size, 2.5);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn line_options_default_and_keep_the_minimum() {
+        let g = GlobalSettings::default();
+        assert_eq!((g.line_node_distance, g.create_line_end_node), (12, false));
+        let dir = scratch_dir("line");
+        let path = dir.join("s.toml");
+        let line = |path: &Path| {
+            let g = load(path).expect("load").global;
+            (g.line_node_distance, g.create_line_end_node)
+        };
+        // A file from before the line options existed takes the defaults.
+        std::fs::write(&path, "[global]\nshow_grid = true\n").expect("write");
+        assert_eq!(line(&path), (12, false));
+        std::fs::write(
+            &path,
+            "[global]\nline_node_distance = 0\ncreate_line_end_node = true\n",
+        )
+        .expect("write");
+        assert_eq!(line(&path), (1, true), "0 is raised to the minimum");
+        std::fs::write(&path, "[global]\nline_node_distance = 5\n").expect("write");
+        assert_eq!(line(&path), (5, false));
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

@@ -224,6 +224,11 @@ impl App {
         self.tool = tool;
     }
 
+    /// The line options the connect tools start with.
+    fn line(&self) -> tools::connect::LineOptions {
+        tools::connect::LineOptions::from_settings(&self.settings.global)
+    }
+
     /// Whether the open document may be edited: tools, Undo and Redo need this.
     fn editable(&self) -> bool {
         self.doc.as_ref().is_some_and(document::Document::editable)
@@ -241,7 +246,8 @@ impl App {
                 }
             }
             Action::ConnectTool if self.editable() => {
-                let next = tools::connect::cycled(self.tool.as_deref(), self.continuous);
+                let next =
+                    tools::connect::cycled(self.tool.as_deref(), self.continuous, self.line());
                 self.set_tool(Some(Box::new(next)));
             }
             Action::NodeTool if self.editable() => {
@@ -439,8 +445,13 @@ impl App {
         let Some(tx) = tx else {
             return;
         };
-        if let Err(e) = doc.apply(tx) {
-            self.error = Some(e.to_string());
+        match doc.apply(tx) {
+            Ok(id) => {
+                if let Some(tx) = doc.history.transaction(id) {
+                    tool.committed(tx);
+                }
+            }
+            Err(e) => self.error = Some(e.to_string()),
         }
     }
 
@@ -1452,8 +1463,11 @@ mod tests {
         assert!(!app.continuous);
         app.view.hovered_node = Some(a);
         app.click(0.0, 0.0, false);
+        // c to a is about 20 units: a line through one new node.
         let net = &app.doc.as_ref().expect("doc").config.network;
-        assert_eq!(net.connection_kind(c, a), ConnectionKind::Regular);
+        let mid = net.order()[3];
+        assert_eq!(net.connection_kind(c, mid), ConnectionKind::Regular);
+        assert_eq!(net.connection_kind(mid, a), ConnectionKind::Regular);
         // Not continuous any more: the next click picks a new start, nothing commits.
         let before = snapshot(&app);
         app.view.hovered_node = Some(b);
@@ -1546,14 +1560,55 @@ mod tests {
         load(&mut app, "<markerID>1</markerID>");
         app.run(Action::ConnectTool);
         assert!(app.tool.is_none());
+        let line = tools::connect::LineOptions {
+            node_distance: 1.0,
+            end_node: true,
+        };
         app.tool = Some(Box::new(tools::connect::ConnectTool::new(
             ConnectionShape::OneWay,
             false,
+            line,
         )));
         app.view.hovered_node = Some(first(&app));
         app.click(0.0, 0.0, false);
+        // Not even a line to a new end node on empty map.
+        app.view.hovered_node = None;
+        app.click(500.0, 500.0, false);
         assert!(!app.doc.as_ref().expect("doc").history.can_undo());
         assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn a_continuous_line_to_a_new_end_node_starts_the_next_line_there() {
+        let mut settings = Settings::default();
+        settings.global.create_line_end_node = true;
+        let mut app = App::new(settings);
+        load(&mut app, "<version>3</version>");
+        app.run(Action::ToggleContinuous);
+        app.run(Action::ConnectTool);
+        let a = first(&app);
+        // The node is world (1, 2), map px (1025, 1026); each line runs 36 units: 3 nodes.
+        app.view.hovered_node = Some(a);
+        app.click(1025.0, 1026.0, false);
+        app.view.hovered_node = None;
+        app.click(1061.0, 1026.0, false);
+        app.click(1061.0, 1062.0, false);
+        assert!(app.error.is_none());
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        let order = net.order().to_vec();
+        assert_eq!(order.len(), 7);
+        for pair in order.windows(2) {
+            assert_eq!(
+                net.connection_kind(pair[0], pair[1]),
+                ConnectionKind::Regular
+            );
+        }
+        let end = net.node(order[6]).expect("end");
+        assert_eq!((end.x, end.z), (37.0, 38.0));
+        app.run(Action::Undo);
+        assert_eq!(nodes(&app), 4);
+        app.run(Action::Undo);
+        assert_eq!(nodes(&app), 1);
     }
 
     #[test]
