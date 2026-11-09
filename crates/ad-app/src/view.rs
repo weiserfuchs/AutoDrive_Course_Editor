@@ -3217,6 +3217,8 @@ mod tests {
             times.sort_by(|a, b| a.total_cmp(b));
             (times[times.len() / 2], times[times.len() - 1])
         };
+        // The view's highest zoom: the default, or the settings' maximum (epic 10 story 3).
+        let view_max = std::cell::Cell::new(MAX_ZOOM);
         // Runs ROUNDS rounds of FRAMES frames. `prepare` puts the view in its start state
         // before each round; `step` runs before every timed frame.
         let report = |name: &str,
@@ -3226,6 +3228,7 @@ mod tests {
                       hover: bool| {
             let mut view = MapView {
                 show_grid: grid,
+                max_zoom: view_max.get(),
                 show_marker_icons: true,
                 show_marker_names: true,
                 ..MapView::default()
@@ -3699,5 +3702,29 @@ mod tests {
         };
         curve_case("curve: min zoom, 50 points, dragging a handle", 0.0);
         curve_case("curve: max zoom, 50 points, dragging a handle", 100.0);
+
+        // Epic 10 story 3: the highest max zoom the settings allow. Centred on the dense node, as
+        // the dense cell's centre has no node within reach at this zoom.
+        view_max.set(*ad_io::settings::MAX_ZOOM_RANGE.end());
+        // The centre is set again after zooming, as the zoom anchor is not the panel centre.
+        let at_top = |v: &mut MapView| {
+            at(start_px, 100.0)(v);
+            v.transform.as_mut().expect("set").center = start_px;
+        };
+        report(
+            "static: zoom 250, dense, hovered node",
+            true,
+            &at_top,
+            &none,
+            true,
+        );
+        report("pan: zoom 250, dense node", true, &at_top, &pan_x, false);
+        report(
+            "drag: zoom 250, dense node",
+            true,
+            &begin_drag(100.0),
+            &drag_step,
+            false,
+        );
     }
 }
