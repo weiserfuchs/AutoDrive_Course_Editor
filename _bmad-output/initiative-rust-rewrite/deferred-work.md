@@ -89,3 +89,7 @@
 - source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-settings-ui-shell/tickets/story-a-menu-bar-carries-the-file-edit-scan-import-and-routes-commands-plan.md`
   summary: Resolved Retro R4: File ▸ Save writes in place (enabled only while dirty), Save As asks.
   evidence: main.rs `save`, `save_as`, test `file_save_writes_in_place_only_while_dirty`.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-settings-ui-shell/tickets/story-refactor-sweep-plan.md`
+  summary: Retro P2 checked in the epic-settings-ui-shell sweep: `AddNodes` is done; errors as `String` and no string table stay (localisation out by the user's decision). Open for a later epic if wanted.
+  evidence: `jobs.rs` `JobResult` results carry `String`; UI texts are literals in `ui.rs`.
