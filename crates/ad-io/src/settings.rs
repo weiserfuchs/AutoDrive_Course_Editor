@@ -30,6 +30,9 @@ pub enum SettingsError {
 pub struct Settings {
     pub global: GlobalSettings,
     pub maps: BTreeMap<String, MapSettings>,
+    /// Key bindings that differ from the defaults: action id → key text such as
+    /// "Ctrl+Shift+Z"; an empty text means no key.
+    pub shortcuts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

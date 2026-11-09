@@ -32,7 +32,8 @@ use crate::{App, Choice};
 /// A menu item showing the shortcut of `action`; runs it when clicked.
 fn action_item(app: &mut App, ui: &mut egui::Ui, action: Action, label: &str, enabled: bool) {
     let ctx = ui.ctx().clone();
-    let button = egui::Button::new(label).shortcut_text(input::shortcut_text(&ctx, action));
+    let button =
+        egui::Button::new(label).shortcut_text(input::shortcut_text(&ctx, &app.bindings, action));
     if ui.add_enabled(enabled, button).clicked() {
         input::perform(app, action, &ctx);
     }
@@ -129,8 +130,9 @@ fn edit_menu(app: &mut App, ui: &mut egui::Ui) {
 fn display_menu(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button("Display", |ui| {
         ui.checkbox(&mut app.view.show_grid, "Grid");
+        let key = input::shortcut_text(ui.ctx(), &app.bindings, Action::ToggleNodeId);
         ui.checkbox(&mut app.view.show_node_id, "Selected node id")
-            .on_hover_text(input::shortcut_text(ui.ctx(), Action::ToggleNodeId));
+            .on_hover_text(key);
     });
 }
 
@@ -1165,6 +1167,118 @@ pub(crate) enum SettingsTab {
     AutoSave,
     Curves,
     Connections,
+    KeyBindings,
+}
+
+/// The Key bindings tab waits for a key for `action`; `note` says why the last one was
+/// refused.
+pub(crate) struct Capture {
+    pub action: Action,
+    pub note: Option<String>,
+}
+
+/// While the Key bindings tab waits for a key: takes this frame's first key press (all key
+/// presses are consumed, so no shortcut and no Escape reaches anything else). Escape alone
+/// cancels; a key bound to another action is refused with a note; any other is stored.
+fn take_captured_key(app: &mut App, ctx: &egui::Context) {
+    let Some(capture) = &mut app.capturing else {
+        return;
+    };
+    let press = ctx.input_mut(|i| {
+        let mut first = None;
+        i.events.retain(|e| match e {
+            egui::Event::Key {
+                key,
+                pressed,
+                modifiers,
+                ..
+            } => {
+                if *pressed && first.is_none() {
+                    first = Some((*key, *modifiers));
+                }
+                false
+            }
+            _ => true,
+        });
+        first
+    });
+    let Some((key, modifiers)) = press else {
+        return;
+    };
+    if key == egui::Key::Escape && modifiers.is_none() {
+        app.capturing = None;
+        return;
+    }
+    let shortcut = input::captured(modifiers, key);
+    if let Some(other) = input::bound_elsewhere(&app.bindings, &shortcut, capture.action) {
+        capture.note = Some(format!(
+            "{} is used by {}",
+            ctx.format_shortcut(&shortcut),
+            input::action_label(other)
+        ));
+        return;
+    }
+    if let Some(id) = input::action_id(capture.action) {
+        app.settings
+            .shortcuts
+            .insert(id.to_owned(), input::shortcut_to_text(&shortcut));
+    }
+    app.capturing = None;
+}
+
+/// The Key bindings tab: each action with its key, Set… (waits for a key), Clear (no key)
+/// and Reset (the default); Reset all drops every change.
+fn key_bindings_tab(
+    ui: &mut egui::Ui,
+    shortcuts: &mut std::collections::BTreeMap<String, String>,
+    bindings: &[(Action, egui::KeyboardShortcut)],
+    capturing: &mut Option<Capture>,
+) {
+    egui::ScrollArea::vertical()
+        .max_height(360.0)
+        .show(ui, |ui| {
+            egui::Grid::new("key_bindings")
+                .striped(true)
+                .num_columns(5)
+                .show(ui, |ui| {
+                    for (action, id, label) in input::CONFIGURABLE {
+                        ui.label(label);
+                        let key = input::shortcut_text(ui.ctx(), bindings, action);
+                        ui.label(if key.is_empty() {
+                            "—".to_owned()
+                        } else {
+                            key
+                        });
+                        let waiting = capturing.as_ref().is_some_and(|c| c.action == action);
+                        let set = if waiting { "Press a key…" } else { "Set…" };
+                        if ui.selectable_label(waiting, set).clicked() {
+                            *capturing = (!waiting).then_some(Capture { action, note: None });
+                        }
+                        if ui.button("Clear").clicked() {
+                            shortcuts.insert(id.to_owned(), String::new());
+                        }
+                        if ui
+                            .add_enabled(shortcuts.contains_key(id), egui::Button::new("Reset"))
+                            .clicked()
+                        {
+                            shortcuts.remove(id);
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    if let Some(note) = capturing.as_ref().and_then(|c| c.note.as_deref()) {
+        ui.colored_label(ui.visuals().error_fg_color, note);
+    } else if capturing.is_some() {
+        ui.label("Press the new key; Escape cancels.");
+    }
+    if ui
+        .add_enabled(!shortcuts.is_empty(), egui::Button::new("Reset all"))
+        .clicked()
+    {
+        shortcuts.clear();
+        *capturing = None;
+    }
 }
 
 /// Edit ▸ Settings…: the editor, autosave, curve and connection settings. A change applies
@@ -1174,7 +1288,13 @@ pub(crate) fn settings_window(app: &mut App, ctx: &egui::Context) {
     let Some(mut tab) = app.settings_window else {
         return;
     };
+    take_captured_key(app, ctx);
     let g = &mut app.settings.global;
+    let (shortcuts, bindings, capturing) = (
+        &mut app.settings.shortcuts,
+        &app.bindings,
+        &mut app.capturing,
+    );
     let mut close = false;
     let modal = egui::Modal::new(egui::Id::unique("settings")).show(ctx, |ui| {
         ui.heading("Settings");
@@ -1184,11 +1304,15 @@ pub(crate) fn settings_window(app: &mut App, ctx: &egui::Context) {
                 (SettingsTab::AutoSave, "AutoSave"),
                 (SettingsTab::Curves, "Curves"),
                 (SettingsTab::Connections, "Connections"),
+                (SettingsTab::KeyBindings, "Key bindings"),
             ] {
                 ui.selectable_value(&mut tab, t, label);
             }
         });
         ui.separator();
+        if tab == SettingsTab::KeyBindings {
+            key_bindings_tab(ui, shortcuts, bindings, capturing);
+        }
         egui::Grid::new("settings_grid")
             .num_columns(2)
             .show(ui, |ui| match tab {
@@ -1267,6 +1391,7 @@ pub(crate) fn settings_window(app: &mut App, ctx: &egui::Context) {
                     ui.add(egui::Slider::new(&mut g.line_node_distance, 1..=50).suffix(" m"));
                     ui.end_row();
                 }
+                SettingsTab::KeyBindings => {}
             });
         ui.separator();
         close = ui.button("Close").clicked();
@@ -1274,6 +1399,9 @@ pub(crate) fn settings_window(app: &mut App, ctx: &egui::Context) {
     // Always asked, so Escape is consumed while the window is on top.
     let closed = modal.should_close();
     app.settings_window = (!close && !closed).then_some(tab);
+    if app.settings_window != Some(SettingsTab::KeyBindings) {
+        app.capturing = None;
+    }
 }
 
 /// The routes window: the routes of one `routes.xml`, sorted by name, and the row picked.
@@ -2137,6 +2265,59 @@ mod tests {
             })
             .collect();
         texts.join("|")
+    }
+
+    #[test]
+    fn the_key_bindings_tab_captures_a_key_refuses_one_in_use_and_resets() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        app.settings_window = Some(SettingsTab::KeyBindings);
+        settings_frame(&ctx, &mut app, vec![]);
+        let texts = settings_frame(&ctx, &mut app, vec![]);
+        assert!(texts.contains("Node tool|N|Set…|Clear|Reset"), "{texts}");
+        let shift_n = egui::Event::Key {
+            key: egui::Key::N,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        };
+        // Node tool takes Shift+N.
+        app.capturing = Some(Capture {
+            action: Action::NodeTool,
+            note: None,
+        });
+        settings_frame(&ctx, &mut app, vec![shift_n.clone()]);
+        assert!(app.capturing.is_none());
+        assert_eq!(
+            app.settings.shortcuts.get("node_tool").map(String::as_str),
+            Some("Shift+N")
+        );
+        app.apply_settings(&ctx);
+        assert!(app.bindings.contains(&(
+            Action::NodeTool,
+            egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::N)
+        )));
+        // Move tool cannot take it too; Escape then cancels without closing the window.
+        app.capturing = Some(Capture {
+            action: Action::MoveTool,
+            note: None,
+        });
+        settings_frame(&ctx, &mut app, vec![shift_n]);
+        let note = app.capturing.as_ref().and_then(|c| c.note.clone());
+        assert!(note.is_some_and(|n| n.ends_with("is used by Node tool")));
+        settings_frame(&ctx, &mut app, vec![key(egui::Key::Escape)]);
+        assert!(app.capturing.is_none());
+        assert_eq!(app.settings_window, Some(SettingsTab::KeyBindings));
+        assert!(!app.settings.shortcuts.contains_key("move_tool"));
+        // Leaving the tab stops a capture.
+        app.capturing = Some(Capture {
+            action: Action::MoveTool,
+            note: None,
+        });
+        app.settings_window = Some(SettingsTab::Editor);
+        settings_frame(&ctx, &mut app, vec![]);
+        assert!(app.capturing.is_none());
     }
 
     #[test]
