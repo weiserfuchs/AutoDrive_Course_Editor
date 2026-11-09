@@ -127,13 +127,182 @@ fn edit_menu(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+/// A menu item for an on/off `action`, marked while `on`, with its shortcut.
+fn toggle_item(app: &mut App, ui: &mut egui::Ui, action: Action, label: &str, on: bool) {
+    let ctx = ui.ctx().clone();
+    let button = egui::Button::selectable(on, label).shortcut_text(input::shortcut_text(
+        &ctx,
+        &app.bindings,
+        action,
+    ));
+    if ui.add(button).clicked() {
+        input::perform(app, action, &ctx);
+    }
+}
+
+/// The map widths Display ▸ Map scale offers: scale `k` is `2k` km (Java 1 to 24).
+const MAP_SCALES: std::ops::RangeInclusive<u32> = 1..=24;
+
 fn display_menu(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button("Display", |ui| {
-        ui.checkbox(&mut app.view.show_grid, "Grid");
-        let key = input::shortcut_text(ui.ctx(), &app.bindings, Action::ToggleNodeId);
-        ui.checkbox(&mut app.view.show_node_id, "Selected node id")
-            .on_hover_text(key);
+        let has_doc = app.doc.is_some();
+        let scale = app
+            .doc
+            .as_ref()
+            .map(|d| d.map.geometry.scale.round() as u32);
+        ui.add_enabled_ui(app.has_map_name(), |ui| {
+            ui.menu_button("Map scale", |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        for k in MAP_SCALES {
+                            let label = format!("{} km (×{k})", 2 * k);
+                            if ui
+                                .add(egui::Button::selectable(scale == Some(k), label))
+                                .clicked()
+                            {
+                                app.set_map_scale(k);
+                            }
+                        }
+                    });
+            });
+        })
+        .response
+        .on_disabled_hover_text("Needs an open map with a name: the scale is kept per map");
+        ui.separator();
+        let v = &app.view;
+        let flags = [
+            (Action::ToggleGrid, "Grid", v.show_grid),
+            (
+                Action::ToggleMarkerNames,
+                "Marker names",
+                v.show_marker_names,
+            ),
+            (
+                Action::ToggleMarkerIcons,
+                "Marker icons",
+                v.show_marker_icons,
+            ),
+            (
+                Action::ToggleParkingIcons,
+                "Parking icons",
+                v.show_parking_icons,
+            ),
+            (Action::ToggleNodeId, "Selected node id", v.show_node_id),
+        ];
+        for (action, label, on) in flags {
+            toggle_item(app, ui, action, label, on);
+        }
+        ui.separator();
+        action_item(app, ui, Action::NodeSizeUp, "Node size bigger", has_doc);
+        action_item(app, ui, Action::NodeSizeDown, "Node size smaller", has_doc);
+        ui.separator();
+        if ui
+            .add_enabled(has_doc, egui::Button::new("Go to node id…"))
+            .clicked()
+        {
+            app.goto_dialog = Some((String::new(), None));
+        }
+        if ui
+            .add_enabled(has_doc, egui::Button::new("Map info…"))
+            .clicked()
+        {
+            app.map_info = true;
+        }
     });
+}
+
+/// Display ▸ Go to node id…: a node's file id (1-based, as saved); OK or Enter centres the
+/// view on it, a bad id shows why. Cancel, Escape or a click beside it closes it.
+pub(crate) fn goto_dialog(app: &mut App, ctx: &egui::Context) {
+    let Some((text, note)) = &mut app.goto_dialog else {
+        return;
+    };
+    let (mut ok, mut cancel) = (false, false);
+    let field = egui::Id::unique("goto_node");
+    let modal = egui::Modal::new(egui::Id::unique("goto")).show(ctx, |ui| {
+        ui.heading("Go to node id");
+        let edit = ui.add(egui::TextEdit::singleline(text).id(field));
+        if !edit.has_focus() && note.is_none() {
+            edit.request_focus();
+        }
+        if let Some(note) = note {
+            ui.colored_label(ui.visuals().error_fg_color, note.as_str());
+        }
+        ui.horizontal(|ui| {
+            ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+            cancel = ui.button("Cancel").clicked();
+        });
+    });
+    let closed = modal.should_close();
+    if ok {
+        let text = text.clone();
+        match app.go_to_node(&text) {
+            Ok(()) => app.goto_dialog = None,
+            Err(why) => {
+                if let Some((_, note)) = &mut app.goto_dialog {
+                    *note = Some(why);
+                }
+            }
+        }
+    } else if cancel || closed {
+        app.goto_dialog = None;
+    }
+}
+
+/// Display ▸ Map info…: the open map's name, scale, node size, and whether a map image and
+/// a heightmap are shown. Closes with its window button.
+pub(crate) fn map_info_window(app: &mut App, ctx: &egui::Context) {
+    if !app.map_info {
+        return;
+    }
+    let Some(doc) = &app.doc else {
+        app.map_info = false;
+        return;
+    };
+    let map = &doc.map;
+    let mut open = true;
+    egui::Window::new("Map info")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            egui::Grid::new("map_info").num_columns(2).show(ui, |ui| {
+                let scale = map.geometry.scale.round() as u32;
+                let rows = [
+                    (
+                        "Map",
+                        map.name.clone().unwrap_or_else(|| "(no name)".to_owned()),
+                    ),
+                    ("Scale", format!("{} km (×{scale})", 2 * scale)),
+                    ("Node size", format!("{:.1}", map.node_size)),
+                    (
+                        "Map image",
+                        if doc.has_image {
+                            "shown"
+                        } else {
+                            "none (blank map)"
+                        }
+                        .to_owned(),
+                    ),
+                    (
+                        "Heightmap",
+                        if map.heightmap.is_some() {
+                            "loaded"
+                        } else {
+                            "none"
+                        }
+                        .to_owned(),
+                    ),
+                ];
+                for (label, value) in rows {
+                    ui.label(label);
+                    ui.label(value);
+                    ui.end_row();
+                }
+            });
+        });
+    app.map_info = open;
 }
 
 fn scan_menu(app: &mut App, ui: &mut egui::Ui) {
@@ -2265,6 +2434,39 @@ mod tests {
             })
             .collect();
         texts.join("|")
+    }
+
+    #[test]
+    fn go_to_node_id_centres_the_view_and_refuses_a_bad_id() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        frames(&ctx, &mut app, egui::PointerButton::Primary, &[&[]]);
+        app.view.transform_mut().expect("set").zoom = 4.0;
+        for bad in ["x", "0", "2"] {
+            assert!(app.go_to_node(bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            app.go_to_node("2"),
+            Err("No node 2: ids run from 1 to 1".to_owned())
+        );
+        app.go_to_node(" 1 ").expect("node 1");
+        let want = app.doc.as_ref().expect("doc").map.geometry.to_map(1.0, 2.0);
+        assert_eq!(app.view.centre(), want);
+        // The dialog keeps a refusal and closes on a good id.
+        app.goto_dialog = Some(("7".to_owned(), None));
+        let input = egui::RawInput {
+            events: vec![key(egui::Key::Enter)],
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(input.clone(), |ui| goto_dialog(&mut app, ui.ctx()));
+            out.textures_delta.clear();
+        }
+        assert!(app.goto_dialog.as_ref().is_some_and(|(_, n)| n.is_some()));
+        app.goto_dialog = Some(("1".to_owned(), None));
+        let mut out = ctx.run_ui(input, |ui| goto_dialog(&mut app, ui.ctx()));
+        out.textures_delta.clear();
+        assert!(app.goto_dialog.is_none());
     }
 
     #[test]

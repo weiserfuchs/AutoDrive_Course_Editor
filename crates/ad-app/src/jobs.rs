@@ -740,7 +740,7 @@ pub fn replace_document(
     path: PathBuf,
     settings: &Settings,
 ) {
-    let (config, image, heightmap, notice, vehicles, _) = loaded;
+    let (config, image, heightmap, notice, vehicles, found) = loaded;
     let map_settings = config
         .map_name()
         .and_then(|name| settings.maps.get(name))
@@ -767,6 +767,7 @@ pub fn replace_document(
         settings.global.history_cap,
     );
     new.vehicles = vehicles;
+    new.has_image = found;
     *doc = Some(new);
 }
 

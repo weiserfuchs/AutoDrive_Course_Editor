@@ -47,6 +47,14 @@ pub struct GlobalSettings {
     pub continuous: bool,
     /// Whether the right drag starts as a lasso instead of a rectangle.
     pub lasso: bool,
+    /// Marker names on the map (Java `ShowMarkerNames`, F1).
+    pub show_marker_names: bool,
+    /// Marker icons on the map (Java `ShowMarkerIcons`, F2).
+    pub show_marker_icons: bool,
+    /// Parking icons on markers with parked vehicles (Java `ShowParkingIcons`, F3).
+    pub show_parking_icons: bool,
+    /// The node id row of the hover info (Java `ShowSelectedNodeID`, F4).
+    pub show_node_id: bool,
     /// Spacing of the nodes a connect line puts in, in world units; at least 1 (Java
     /// `LinearLineNodeDistance`).
     #[serde(deserialize_with = "at_least_one")]
@@ -147,6 +155,10 @@ impl Default for GlobalSettings {
             snap: false,
             continuous: false,
             lasso: false,
+            show_marker_names: true,
+            show_marker_icons: true,
+            show_parking_icons: true,
+            show_node_id: false,
             line_node_distance: 12,
             create_line_end_node: false,
             online_map_images: true,
