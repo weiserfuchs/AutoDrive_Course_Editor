@@ -820,6 +820,10 @@ impl App {
                 self.view.show_parking_icons = !self.view.show_parking_icons;
             }
             Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
+            Action::ToggleSelectHidden => {
+                let g = &mut self.settings.global;
+                g.select_hidden = !g.select_hidden;
+            }
             Action::NodeSizeUp => self.change_node_size(0.1),
             Action::NodeSizeDown => self.change_node_size(-0.1),
             Action::FocusHovered => {
@@ -1105,6 +1109,8 @@ impl App {
             Some(tools::ToolRequest::NoMarker(_)) => {
                 self.tool_notice = Some(tools::marker::NO_MARKER);
             }
+            Some(tools::ToolRequest::ToggleHiddenNodes(ids)) => doc.hidden.toggle_nodes(ids),
+            Some(tools::ToolRequest::ToggleHiddenLink(a, b)) => doc.hidden.toggle_link(a, b),
             None => {}
         }
         let Some(tx) = tx else {

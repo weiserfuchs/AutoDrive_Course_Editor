@@ -55,6 +55,10 @@ pub struct GlobalSettings {
     pub show_parking_icons: bool,
     /// The node id row of the hover info (Java `ShowSelectedNodeID`, F4).
     pub show_node_id: bool,
+    /// Whether hidden nodes and connections can be hovered and selected (Java `SelectHidden`).
+    pub select_hidden: bool,
+    /// Opacity of hidden nodes and connections, 0 to 1 (Java `HiddenNodeTransparency`).
+    pub hidden_alpha: f32,
     /// Spacing of the nodes a connect line puts in, in world units; at least 1 (Java
     /// `LinearLineNodeDistance`).
     #[serde(deserialize_with = "at_least_one")]
@@ -159,6 +163,8 @@ impl Default for GlobalSettings {
             show_marker_icons: true,
             show_parking_icons: true,
             show_node_id: false,
+            select_hidden: false,
+            hidden_alpha: 0.25,
             line_node_distance: 12,
             create_line_end_node: false,
             online_map_images: true,
