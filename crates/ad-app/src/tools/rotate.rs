@@ -1,7 +1,7 @@
 //! The rotate tool (Java `RotationButton`, `RotationUtils`): for a non-empty selection it
 //! shows the centre of the selection's bounding box and a handle straight above it. Dragging
-//! the handle turns the selection about that centre, in whole degrees or, while grid snap
-//! applies, in 5° steps. The drag is a preview; the release commits one `MoveNodes` (AD-4,
+//! the handle turns the selection about that centre, in whole degrees or, while rotation
+//! snap is on, in its steps (5° by default). The drag is a preview; the release commits one `MoveNodes` (AD-4,
 //! AD-10).
 
 use std::cell::Cell;
@@ -20,8 +20,10 @@ use crate::view::{Preview, ViewTransform};
 
 pub const NAME: &str = "Rotate";
 
-/// The rotation step while grid snap applies (Java's default `rotationStep`).
+/// Java's default rotation step (`rotationStep`), and the range the settings offer.
+#[cfg(test)]
 pub const SNAP_STEP_DEG: f64 = 5.0;
+pub const STEP_RANGE: std::ops::RangeInclusive<f64> = 5.0..=90.0;
 /// A press this close to the handle, in screen px, grabs it.
 const HANDLE_HIT_PX: f64 = 8.0;
 /// The smallest circle radius in screen px, so the handle's hit area never covers the centre.
@@ -51,9 +53,9 @@ pub fn turned((x, z): (f64, f64), (cx, cz): (f64, f64), degrees: f64) -> (f64, f
     (cx + dx * cos - dz * sin, cz + dx * sin + dz * cos)
 }
 
-/// `degrees` rounded to whole degrees, or to [`SNAP_STEP_DEG`] steps with `snap`.
-pub fn snap_angle(degrees: f64, snap: bool) -> f64 {
-    let step = if snap { SNAP_STEP_DEG } else { 1.0 };
+/// `degrees` rounded to `step` degrees, or to whole degrees without one.
+pub fn snap_angle(degrees: f64, step: Option<f64>) -> f64 {
+    let step = step.filter(|s| *s >= 1.0).unwrap_or(1.0);
     (degrees / step).round() * step
 }
 
@@ -142,6 +144,9 @@ pub struct RotateTool {
     view: Cell<Option<ViewScale>>,
     /// The idle handle's centre and reach, so a large selection is not walked every frame.
     reach: Cell<Option<(CacheKey, Option<Reach>)>>,
+    /// The rotation snap step in degrees, or `None` for whole degrees (Java
+    /// `RotationSnapEnabled`, `RotationStep`); the app sets it every frame.
+    step: Option<f64>,
 }
 
 impl RotateTool {
@@ -164,6 +169,10 @@ impl RotateTool {
 impl Tool for RotateTool {
     fn name(&self) -> &'static str {
         NAME
+    }
+
+    fn set_rotation_step(&mut self, step: Option<f64>) {
+        self.step = step;
     }
 
     fn on_click(&mut self, _ctx: &ToolContext) -> Option<Transaction> {
@@ -207,7 +216,7 @@ impl Tool for RotateTool {
         };
         let turn = pointer_angle((ctx.x, ctx.z), d.circle.centre) - d.press_angle;
         // Into -180..180, so a turn across straight below stays small.
-        let angle = snap_angle((turn + 180.0).rem_euclid(360.0) - 180.0, ctx.snap);
+        let angle = snap_angle((turn + 180.0).rem_euclid(360.0) - 180.0, self.step);
         if angle == d.angle {
             return;
         }
@@ -379,6 +388,7 @@ mod tests {
     fn rotate(degrees: f64, snap: bool) -> Option<Vec<(NodeId, Position, Position)>> {
         let (net, _, selection, map) = setup();
         let mut tool = tool();
+        tool.set_rotation_step(snap.then_some(SNAP_STEP_DEG));
         let handle = tool.handle_at(&net, &selection).expect("handle");
         assert!(tool.on_drag_start(&ctx(&net, &map, &selection, handle, snap), None));
         let at = ctx(&net, &map, &selection, pointer(degrees), snap);
@@ -403,9 +413,10 @@ mod tests {
         // Clockwise on screen: above the centre goes to its right.
         assert!(close(turned((5.0, 0.0), (5.0, 10.0), 90.0), (15.0, 10.0)));
         assert!(close(turned((5.0, 0.0), (5.0, 10.0), -90.0), (-5.0, 10.0)));
-        assert_eq!(snap_angle(37.4, false), 37.0);
-        assert_eq!(snap_angle(37.4, true), 35.0);
-        assert_eq!(snap_angle(-37.6, true), -40.0);
+        assert_eq!(snap_angle(37.4, None), 37.0);
+        assert_eq!(snap_angle(37.4, Some(5.0)), 35.0);
+        assert_eq!(snap_angle(37.4, Some(15.0)), 30.0);
+        assert_eq!(snap_angle(-37.6, Some(5.0)), -40.0);
         assert!(close(
             (pointer_angle(pointer(37.4), (5.0, 10.0)), 0.0),
             (37.4, 0.0)

@@ -164,6 +164,9 @@ pub trait Tool {
     /// Continuous connections were turned on or off; only the connect tools use it.
     fn set_continuous(&mut self, _on: bool) {}
 
+    /// The rotation snap step (`None`: whole degrees); only the rotate tool uses it.
+    fn set_rotation_step(&mut self, _step: Option<f64>) {}
+
     /// Whether a click on the connection `(from, to)` would act on it; only such a hovered
     /// connection is highlighted.
     fn acts_on_edge(&self, _net: &Network, _edge: (NodeId, NodeId)) -> bool {

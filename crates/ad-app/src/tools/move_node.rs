@@ -132,7 +132,7 @@ impl Tool for MoveTool {
             d.grab_offset,
             d.target,
             half_extent(ctx.map.geometry),
-            ctx.snap.then_some(ctx.map.grid),
+            ctx.snap.then_some(ctx.map.snap_grid()),
         );
         let (x0, x1, z0, z1) = d.range;
         d.target = (x.max(x0).min(x1), z.max(z0).min(z1));

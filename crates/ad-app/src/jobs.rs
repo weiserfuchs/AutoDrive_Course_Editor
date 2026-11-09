@@ -752,6 +752,9 @@ pub fn replace_document(
         map_settings.node_size,
         (map_settings.grid_x, map_settings.grid_y),
     );
+    map.subdivisions = map_settings
+        .grid_subdivisions
+        .clamp(1, ad_core::map_context::MAX_SUBDIVISIONS);
     if let Some((heightmap, height_map_scale)) = heightmap {
         map.heightmap = Some(heightmap);
         map.height_map_scale = height_map_scale;
@@ -1375,6 +1378,7 @@ mod tests {
                 node_size: 3.0,
                 grid_x: 4.0,
                 grid_y: 0.0,
+                grid_subdivisions: 40,
             },
         );
         let config = config_xml::load(text.as_bytes()).expect("config loads");
@@ -1388,6 +1392,7 @@ mod tests {
         assert_eq!(d.map.geometry.scale, 2.0);
         assert_eq!(d.map.node_size, 3.0);
         assert_eq!(d.map.grid, (4.0, 0.1));
+        assert_eq!(d.map.subdivisions, 32, "clamped to the most");
         assert_eq!(d.map.name.as_deref(), Some("Marsch"));
         assert!(d.map_image.is_some() && d.map.heightmap.is_none());
         // A missing name uses scale 1.

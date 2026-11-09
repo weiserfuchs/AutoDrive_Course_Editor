@@ -67,11 +67,13 @@ pub(crate) enum Action {
     FocusHovered,
     /// Whether hidden nodes and connections can be hovered and selected (Java H).
     ToggleSelectHidden,
+    /// Whether grid snap uses the subdivisions (Java D).
+    ToggleSubdivisionSnap,
 }
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 35] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 36] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -215,6 +217,10 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 35] = [
         Action::ToggleSelectHidden,
         KeyboardShortcut::new(Modifiers::NONE, Key::H),
     ),
+    (
+        Action::ToggleSubdivisionSnap,
+        KeyboardShortcut::new(Modifiers::NONE, Key::D),
+    ),
 ];
 
 /// Whether grid snap applies this frame: the toggle, inverted while Shift is held.
@@ -285,7 +291,7 @@ pub(crate) fn handle_shortcuts(app: &mut App, ctx: &egui::Context) {
 
 /// The actions the Key bindings tab lists: (action, settings id, label). Copy, Cut and
 /// Paste are not listed: Ctrl+C, Ctrl+X and Ctrl+V reach the app as clipboard events.
-pub(crate) const CONFIGURABLE: [(Action, &str, &str); 31] = [
+pub(crate) const CONFIGURABLE: [(Action, &str, &str); 32] = [
     (Action::Open, "open", "Open…"),
     (Action::Save, "save", "Save"),
     (Action::SaveAs, "save_as", "Save As…"),
@@ -352,6 +358,11 @@ pub(crate) const CONFIGURABLE: [(Action, &str, &str); 31] = [
         Action::ToggleSelectHidden,
         "toggle_select_hidden",
         "Select hidden",
+    ),
+    (
+        Action::ToggleSubdivisionSnap,
+        "toggle_subdivision_snap",
+        "Snap to subdivisions",
     ),
 ];
 
@@ -726,7 +737,10 @@ mod tests {
         assert!(press(Modifiers::SHIFT, Key::E).is_empty());
         assert!(press(CTRL, Key::E).is_empty());
         assert!(press(Modifiers::ALT, Key::E).is_empty());
-        assert!(press(Modifiers::NONE, Key::D).is_empty());
+        assert_eq!(
+            press(Modifiers::NONE, Key::D),
+            [Action::ToggleSubdivisionSnap]
+        );
         assert!(press(CTRL.plus(Modifiers::SHIFT), Key::D).is_empty());
         assert!(press(Modifiers::SHIFT.plus(Modifiers::ALT), Key::D).is_empty());
     }

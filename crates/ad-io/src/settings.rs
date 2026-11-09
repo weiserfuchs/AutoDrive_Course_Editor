@@ -59,6 +59,12 @@ pub struct GlobalSettings {
     pub select_hidden: bool,
     /// Opacity of hidden nodes and connections, 0 to 1 (Java `HiddenNodeTransparency`).
     pub hidden_alpha: f32,
+    /// Whether grid snap uses the grid's subdivisions (Java `SnapSubDivision`, D).
+    pub snap_subdivisions: bool,
+    /// Whether the rotate tool turns in `rotation_step` steps (Java `RotationSnapEnabled`).
+    pub rotation_snap: bool,
+    /// The rotation snap step in degrees, 5 to 90 (Java `RotationStep`).
+    pub rotation_step: f64,
     /// Spacing of the nodes a connect line puts in, in world units; at least 1 (Java
     /// `LinearLineNodeDistance`).
     #[serde(deserialize_with = "at_least_one")]
@@ -165,6 +171,9 @@ impl Default for GlobalSettings {
             show_node_id: false,
             select_hidden: false,
             hidden_alpha: 0.25,
+            snap_subdivisions: false,
+            rotation_snap: true,
+            rotation_step: 5.0,
             line_node_distance: 12,
             create_line_end_node: false,
             online_map_images: true,
@@ -199,6 +208,8 @@ pub struct MapSettings {
     pub grid_x: f64,
     /// Grid spacing in world units (Java `gridSpacingY`).
     pub grid_y: f64,
+    /// Subdivisions of each grid cell, 1 to 32 (Java `GridSubDivisions`).
+    pub grid_subdivisions: u32,
 }
 
 impl Default for MapSettings {
@@ -208,6 +219,7 @@ impl Default for MapSettings {
             node_size: 2.0,
             grid_x: 2.0,
             grid_y: 2.0,
+            grid_subdivisions: 1,
         }
     }
 }
@@ -275,6 +287,7 @@ mod tests {
                 node_size: 3.0,
                 grid_x: 5.0,
                 grid_y: 0.5,
+                grid_subdivisions: 8,
             },
         );
         let path = dir.join("settings.toml");
@@ -349,6 +362,7 @@ mod tests {
                 node_size: 2.0,
                 grid_x: 2.0,
                 grid_y: 2.0,
+                grid_subdivisions: 1,
             })
         );
         assert_eq!(s.global.history_cap, 500);

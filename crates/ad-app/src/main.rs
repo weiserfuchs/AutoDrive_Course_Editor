@@ -174,6 +174,8 @@ struct App {
     goto_dialog: Option<(String, Option<String>)>,
     /// The Map info window is shown.
     map_info: bool,
+    /// The Grid and snap window's draft grid (x, z spacing, subdivisions), while shown.
+    grid_dialog: Option<((f64, f64), u32)>,
     /// The action that continues once the save started from the prompt has finished.
     pending: Option<Pending>,
     /// The action whose unsaved-changes prompt is shown.
@@ -262,6 +264,7 @@ impl App {
             settings_window: None,
             goto_dialog: None,
             map_info: false,
+            grid_dialog: None,
             pending: None,
             prompt: None,
             location: None,
@@ -313,6 +316,7 @@ impl App {
                     node_size: map.node_size,
                     grid_x: map.grid.0,
                     grid_y: map.grid.1,
+                    grid_subdivisions: map.subdivisions,
                 },
             );
         }
@@ -575,6 +579,17 @@ impl App {
             self.bindings = input::bindings(&self.settings.shortcuts);
             self.bindings_from = self.settings.shortcuts.clone();
         }
+        let g = &self.settings.global;
+        if let Some(doc) = &mut self.doc {
+            doc.map.snap_subdivisions = g.snap_subdivisions;
+        }
+        let range = tools::rotate::STEP_RANGE;
+        let step = g
+            .rotation_snap
+            .then(|| g.rotation_step.clamp(*range.start(), *range.end()));
+        if let Some(tool) = &mut self.tool {
+            tool.set_rotation_step(step);
+        }
         let theme = self.settings.global.theme;
         if self.theme_applied != Some(theme) {
             ctx.set_theme(match theme {
@@ -629,6 +644,7 @@ impl App {
             || self.routes.is_some()
             || self.settings_window.is_some()
             || self.goto_dialog.is_some()
+            || self.grid_dialog.is_some()
             || self.overlap_dialog.is_some()
             || self.merge_prompt.is_some()
             || self.fix_prompt.is_some()
@@ -752,11 +768,22 @@ impl App {
         entry.scale = map.geometry.scale.round().max(1.0) as u32;
         entry.node_size = map.node_size;
         (entry.grid_x, entry.grid_y) = map.grid;
+        entry.grid_subdivisions = map.subdivisions;
     }
 
     /// Whether the open document has a map name, so per-map values can be kept.
     fn has_map_name(&self) -> bool {
         self.doc.as_ref().is_some_and(|d| d.map.name.is_some())
+    }
+
+    /// Grid and snap ▸ Apply: the open map's grid spacing and subdivisions, kept per map.
+    fn set_grid(&mut self, (x, z): (f64, f64), subdivisions: u32) {
+        if let Some(doc) = &mut self.doc {
+            let min = ad_core::map_context::MIN_GRID_SPACING;
+            doc.map.grid = (x.max(min), z.max(min));
+            doc.map.subdivisions = subdivisions.clamp(1, ad_core::map_context::MAX_SUBDIVISIONS);
+            self.store_map_settings();
+        }
     }
 
     /// Display ▸ Map scale: the open map is `scale` × 2 km wide (Java 1 to 24).
@@ -820,6 +847,10 @@ impl App {
                 self.view.show_parking_icons = !self.view.show_parking_icons;
             }
             Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
+            Action::ToggleSubdivisionSnap => {
+                let g = &mut self.settings.global;
+                g.snap_subdivisions = !g.snap_subdivisions;
+            }
             Action::ToggleSelectHidden => {
                 let g = &mut self.settings.global;
                 g.select_hidden = !g.select_hidden;
@@ -1754,6 +1785,7 @@ impl eframe::App for App {
         ui::settings_window(self, &ctx);
         ui::goto_dialog(self, &ctx);
         ui::map_info_window(self, &ctx);
+        ui::grid_dialog(self, &ctx);
         ui::overlap_dialog(self, &ctx);
         ui::merge_prompt(self, &ctx);
         ui::fix_prompt(self, &ctx);
@@ -1930,6 +1962,40 @@ mod tests {
         assert_eq!(restored.inner_size, Some(egui::vec2(1200.0, 800.0)));
         assert_eq!(restored.position, Some(egui::pos2(10.0, 20.0)));
         assert_eq!(restored.maximized, Some(true));
+    }
+
+    #[test]
+    fn the_grid_is_kept_per_map_and_d_snaps_to_its_subdivisions() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<MapName>Neu</MapName><version>3</version>");
+        app.set_grid((4.0, 4.0), 4);
+        let entry = app.settings.maps.get("Neu").expect("entry");
+        assert_eq!(
+            (entry.grid_x, entry.grid_y, entry.grid_subdivisions),
+            (4.0, 4.0, 4)
+        );
+        app.set_grid((0.0, 3.0), 99);
+        let map = &app.doc.as_ref().expect("doc").map;
+        assert_eq!((map.grid, map.subdivisions), ((0.1, 3.0), 32), "clamped");
+        app.set_grid((4.0, 4.0), 4);
+        app.apply_settings(&ctx);
+        assert_eq!(app.doc.as_ref().expect("doc").map.snap_grid(), (4.0, 4.0));
+        app.run(Action::ToggleSubdivisionSnap);
+        assert!(app.settings.global.snap_subdivisions);
+        app.apply_settings(&ctx);
+        assert_eq!(app.doc.as_ref().expect("doc").map.snap_grid(), (1.0, 1.0));
+        // A new node with snap lands on a subdivision.
+        app.snap = true;
+        app.run(Action::NodeTool);
+        app.click(1024.0 + 1.3, 1024.0 + 2.6, true);
+        let net = &app.doc.as_ref().expect("doc").config.network;
+        let id = *net.order().last().expect("node");
+        let n = net.node(id).expect("node");
+        assert_eq!((n.x, n.z), (1.0, 3.0));
+        // The subdivisions come back with the map.
+        load(&mut app, "<MapName>Neu</MapName><version>3</version>");
+        assert_eq!(app.doc.as_ref().expect("doc").map.subdivisions, 4);
     }
 
     #[test]
