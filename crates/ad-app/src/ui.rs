@@ -224,7 +224,95 @@ fn display_menu(app: &mut App, ui: &mut egui::Ui) {
         {
             app.map_info = true;
         }
+        ui.separator();
+        let (snap, sub) = (app.snap, app.settings.global.snap_subdivisions);
+        toggle_item(app, ui, Action::ToggleSnap, "Snap to grid", snap);
+        toggle_item(
+            app,
+            ui,
+            Action::ToggleSubdivisionSnap,
+            "Snap to subdivisions",
+            sub,
+        );
+        ui.checkbox(&mut app.settings.global.rotation_snap, "Rotation snap");
+        if ui
+            .add_enabled(has_doc, egui::Button::new("Grid and snap…"))
+            .clicked()
+            && let Some(doc) = &app.doc
+        {
+            app.grid_dialog = Some((doc.map.grid, doc.map.subdivisions));
+        }
     });
+}
+
+/// Display ▸ Grid and snap…: the open map's grid spacing (presets 1×1, 2×2 and 4×4, or own
+/// values) and subdivisions, kept per map by Apply; and the rotation snap step, which
+/// applies at once. Close, Escape or a click beside it closes it.
+pub(crate) fn grid_dialog(app: &mut App, ctx: &egui::Context) {
+    let Some(((x, z), sub)) = &mut app.grid_dialog else {
+        return;
+    };
+    let g = &mut app.settings.global;
+    let (mut apply, mut close) = (false, false);
+    let modal = egui::Modal::new(egui::Id::unique("grid")).show(ctx, |ui| {
+        ui.heading("Grid and snap");
+        ui.horizontal(|ui| {
+            ui.label("Presets");
+            for spacing in [1.0, 2.0, 4.0] {
+                let label = format!("{spacing}×{spacing}");
+                let on = *x == spacing && *z == spacing && *sub == 1;
+                if ui.add(egui::Button::selectable(on, label)).clicked() {
+                    (*x, *z, *sub) = (spacing, spacing, 1);
+                }
+            }
+        });
+        egui::Grid::new("grid_values")
+            .num_columns(2)
+            .show(ui, |ui| {
+                let min = ad_core::map_context::MIN_GRID_SPACING;
+                ui.label("Spacing X");
+                ui.add(
+                    egui::DragValue::new(x)
+                        .range(min..=1000.0)
+                        .speed(0.1)
+                        .suffix(" m"),
+                );
+                ui.end_row();
+                ui.label("Spacing Z");
+                ui.add(
+                    egui::DragValue::new(z)
+                        .range(min..=1000.0)
+                        .speed(0.1)
+                        .suffix(" m"),
+                );
+                ui.end_row();
+                ui.label("Subdivisions");
+                ui.add(egui::Slider::new(
+                    sub,
+                    1..=ad_core::map_context::MAX_SUBDIVISIONS,
+                ));
+                ui.end_row();
+                ui.label("Rotation step");
+                ui.add_enabled(
+                    g.rotation_snap,
+                    egui::Slider::new(&mut g.rotation_step, crate::tools::rotate::STEP_RANGE)
+                        .suffix("°"),
+                );
+                ui.end_row();
+            });
+        ui.horizontal(|ui| {
+            apply = ui.button("Apply").clicked();
+            close = ui.button("Close").clicked();
+        });
+    });
+    let closed = modal.should_close();
+    let (spacing, subdivisions) = ((*x, *z), *sub);
+    if apply {
+        app.set_grid(spacing, subdivisions);
+    }
+    if close || closed {
+        app.grid_dialog = None;
+    }
 }
 
 /// Display ▸ Go to node id…: a node's file id (1-based, as saved); OK or Enter centres the
@@ -730,7 +818,7 @@ impl ViewHooks for ToolHooks<'_> {
                 hovered_node,
                 self.revision,
             );
-            let snap_grid = self.snap.then_some(self.map.grid);
+            let snap_grid = self.snap.then_some(self.map.snap_grid());
             let hovered_node = hovered_node
                 .and_then(|id| self.net.node(id))
                 .map(|n| (n.x, n.z));
@@ -2576,6 +2664,49 @@ mod tests {
         hidden.toggle_nodes([a, b]);
         hidden.toggle_nodes([a]);
         assert!(!hidden.node(a) && hidden.node(b));
+    }
+
+    #[test]
+    fn the_grid_dialog_shows_presets_and_values_and_closes_on_escape() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        app.grid_dialog = Some(((2.0, 2.0), 1));
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                time: Some(ctx.input(|i| i.time) + 0.016),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| grid_dialog(app, ui.ctx()));
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        frame(&mut app, vec![]);
+        let texts = frame(&mut app, vec![]);
+        assert!(texts.contains("Presets|1×1|2×2|4×4"), "{texts}");
+        assert!(
+            texts.contains("Subdivisions") && texts.contains("Rotation step"),
+            "{texts}"
+        );
+        frame(&mut app, vec![key(egui::Key::Escape)]);
+        assert!(app.grid_dialog.is_none());
+        let map = &app.doc.as_ref().expect("doc").map;
+        assert_eq!(
+            (map.grid, map.subdivisions),
+            ((2.0, 2.0), 1),
+            "nothing applied"
+        );
     }
 
     #[test]

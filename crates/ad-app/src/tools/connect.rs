@@ -258,7 +258,7 @@ impl Tool for ConnectTool {
             return None;
         }
         let end = if ctx.snap {
-            snap_to_grid((ctx.x, ctx.z), ctx.map.grid)
+            snap_to_grid((ctx.x, ctx.z), ctx.map.snap_grid())
         } else {
             (ctx.x, ctx.z)
         };

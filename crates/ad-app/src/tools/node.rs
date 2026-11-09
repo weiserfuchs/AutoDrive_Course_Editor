@@ -67,7 +67,7 @@ impl Tool for NodeTool {
 
     fn on_click(&mut self, ctx: &ToolContext) -> Option<Transaction> {
         let (x, z) = if ctx.snap {
-            snap_to_grid((ctx.x, ctx.z), ctx.map.grid)
+            snap_to_grid((ctx.x, ctx.z), ctx.map.snap_grid())
         } else {
             (ctx.x, ctx.z)
         };
