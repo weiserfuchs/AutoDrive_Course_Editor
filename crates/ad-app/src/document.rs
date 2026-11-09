@@ -65,6 +65,8 @@ pub struct Document {
     pub map_texture: Option<eframe::egui::TextureHandle>,
     /// Whether a real map image is shown; false while the blank stands in (Map info).
     pub has_image: bool,
+    /// Nodes and connections the hide tools hid; session only, a new document has none.
+    pub hidden: crate::view::Hidden,
     /// An imported map image, shown, whose save waits for "Replace the existing map image?".
     pub image_to_replace: Option<crate::jobs::ImageSave>,
     /// A warning about the map image, shown until the next document loads.
@@ -119,6 +121,7 @@ impl Document {
             map_image: Some(map_image),
             map_texture: None,
             has_image: false,
+            hidden: crate::view::Hidden::default(),
             image_to_replace: None,
             notice,
             selection: BTreeSet::new(),

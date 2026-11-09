@@ -8,6 +8,7 @@ pub mod connect;
 pub mod delete;
 pub mod edit_location;
 pub mod flip;
+pub mod hide;
 pub mod marker;
 pub mod move_node;
 pub mod node;
@@ -57,13 +58,17 @@ pub fn snap_to_grid((x, z): (f64, f64), (gx, gz): (f64, f64)) -> (f64, f64) {
 }
 
 /// A dialog a tool's click asks the app to open for a node, or a notice to show for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolRequest {
     EditLocation(NodeId),
     AddMarker(NodeId),
     EditMarker(NodeId),
     /// A Delete marker click on a node without a marker.
     NoMarker(NodeId),
+    /// A Hide node click: hide the shown and show the hidden of these nodes.
+    ToggleHiddenNodes(Vec<NodeId>),
+    /// A Hide connection click on this connection.
+    ToggleHiddenLink(NodeId, NodeId),
 }
 
 pub trait Tool {
@@ -163,6 +168,12 @@ pub trait Tool {
     /// connection is highlighted.
     fn acts_on_edge(&self, _net: &Network, _edge: (NodeId, NodeId)) -> bool {
         true
+    }
+
+    /// Whether the tool hovers and clicks hidden nodes and connections even without
+    /// Select hidden; only the hide tools do (Java `alwaysSelectHidden`).
+    fn picks_hidden(&self) -> bool {
+        false
     }
 
     /// Whether the tool holds an uncommitted preview or a pending start (a connect start,

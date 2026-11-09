@@ -26,7 +26,9 @@ use crate::tools::node::NodeTool;
 use crate::tools::priority::PriorityTool;
 use crate::tools::rotate::RotateTool;
 use crate::tools::{Tool, ToolContext};
-use crate::view::{DragEvent, MapPx, Preview, SelectEvent, ViewHooks, ViewTransform};
+use crate::view::{
+    DragEvent, Hidden, HiddenView, MapPx, Preview, SelectEvent, ViewHooks, ViewTransform,
+};
 use crate::{App, Choice};
 
 /// A menu item showing the shortcut of `action`; runs it when clicked.
@@ -189,6 +191,11 @@ fn display_menu(app: &mut App, ui: &mut egui::Ui) {
                 v.show_parking_icons,
             ),
             (Action::ToggleNodeId, "Selected node id", v.show_node_id),
+            (
+                Action::ToggleSelectHidden,
+                "Select hidden",
+                app.settings.global.select_hidden,
+            ),
         ];
         for (action, label, on) in flags {
             toggle_item(app, ui, action, label, on);
@@ -196,6 +203,14 @@ fn display_menu(app: &mut App, ui: &mut egui::Ui) {
         ui.separator();
         action_item(app, ui, Action::NodeSizeUp, "Node size bigger", has_doc);
         action_item(app, ui, Action::NodeSizeDown, "Node size smaller", has_doc);
+        let any_hidden = app.doc.as_ref().is_some_and(|d| !d.hidden.is_empty());
+        if ui
+            .add_enabled(any_hidden, egui::Button::new("Show all hidden"))
+            .clicked()
+            && let Some(doc) = &mut app.doc
+        {
+            doc.hidden = Hidden::default();
+        }
         ui.separator();
         if ui
             .add_enabled(has_doc, egui::Button::new("Go to node id…"))
@@ -460,7 +475,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let continuous = app.continuous;
     let line = app.line();
     let (curve, scaler) = (app.curve_defaults(), app.curve_scaler());
-    let tools: [Box<dyn Tool>; 19] = [
+    let tools: [Box<dyn Tool>; 21] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
         Box::new(MoveTool::default()),
@@ -480,6 +495,8 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         Box::new(AddMarkerTool::default()),
         Box::new(EditMarkerTool::default()),
         Box::new(DeleteMarkerTool::default()),
+        Box::new(crate::tools::hide::HideNodeTool::default()),
+        Box::new(crate::tools::hide::HideLinkTool::default()),
     ];
     for tool in tools {
         let selected = active == Some(tool.name());
@@ -545,6 +562,8 @@ pub(crate) struct ToolHooks<'a> {
     pub revision: u64,
     /// The nodes the overlap scan marks, handed to the view.
     pub overlap: Option<&'a BTreeSet<NodeId>>,
+    /// The hidden nodes and connections, handed to the view.
+    pub hidden: Option<HiddenView<'a>>,
     pub commit: Option<Transaction>,
     pub select_event: Option<SelectEvent>,
 }
@@ -566,6 +585,7 @@ impl<'a> ToolHooks<'a> {
             lasso: false,
             revision: 0,
             overlap: None,
+            hidden: None,
             commit: None,
             select_event: None,
         }
@@ -592,14 +612,16 @@ pub(crate) fn select(
     net: &Network,
     geometry: MapGeometry,
     event: SelectEvent,
+    skip: Option<&Hidden>,
 ) {
+    let shown = |id: &NodeId| skip.is_none_or(|h| !h.node(*id));
     match event {
         SelectEvent::Rect { a, b } => {
             let (ax, az) = geometry.to_world(a.0, a.1);
             let (bx, bz) = geometry.to_world(b.0, b.1);
             let mut ids = Vec::new();
             net.nodes_in_rect_into(ax.min(bx), az.min(bz), ax.max(bx), az.max(bz), &mut ids);
-            toggle(selection, ids);
+            toggle(selection, ids.into_iter().filter(shown));
         }
         SelectEvent::Lasso { points } => {
             // The point-in-polygon test costs nodes-in-box × outline length, so a long
@@ -611,7 +633,10 @@ pub(crate) fn select(
                 .map(|&(px, py)| geometry.to_world(px, py))
                 .collect();
             // Even-odd (AD-5); an outline of fewer than 3 points selects nothing.
-            toggle(selection, net.in_polygon(&outline));
+            toggle(
+                selection,
+                net.in_polygon(&outline).into_iter().filter(shown),
+            );
         }
         SelectEvent::Click { node: Some(id) } => toggle(selection, [id]),
         SelectEvent::Click { node: None } => selection.clear(),
@@ -636,6 +661,10 @@ impl ViewHooks for ToolHooks<'_> {
 
     fn overlap(&self) -> Option<&BTreeSet<NodeId>> {
         self.overlap
+    }
+
+    fn hidden(&self) -> Option<HiddenView<'_>> {
+        self.hidden
     }
 
     fn drag(&mut self, event: DragEvent) -> bool {
@@ -724,6 +753,9 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     // A node dialog is modal: the map takes no tool input or selection then.
     let modal = app.dialog_shown();
     let snap = input::snap(app.snap, ui.ctx());
+    let picks_hidden = app.tool.as_deref().is_some_and(Tool::picks_hidden);
+    let select_hidden = app.settings.global.select_hidden;
+    let hidden_alpha = app.settings.global.hidden_alpha.clamp(0.0, 1.0);
     let Some(doc) = &mut app.doc else {
         app.view.clear_hover();
         ui.allocate_space(ui.available_size());
@@ -750,6 +782,11 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     hooks.lasso = app.lasso;
     hooks.revision = doc.revision;
     hooks.overlap = doc.overlap.as_ref().map(|(_, marks)| marks);
+    hooks.hidden = Some(HiddenView {
+        set: &doc.hidden,
+        alpha: hidden_alpha,
+        pickable: select_hidden || picks_hidden,
+    });
     let clicked = app.view.show(
         ui,
         &doc.config.network,
@@ -766,11 +803,13 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
         app.error = Some(e.to_string());
     }
     if let Some(event) = select_event.filter(|_| !modal) {
+        let skip = (!select_hidden).then_some(&doc.hidden);
         select(
             &mut doc.selection,
             &doc.config.network,
             doc.map.geometry,
             event,
+            skip,
         );
         doc.revision += 1;
     }
@@ -1559,6 +1598,9 @@ pub(crate) fn settings_window(app: &mut App, ctx: &egui::Context) {
                     ui.label("Line node spacing");
                     ui.add(egui::Slider::new(&mut g.line_node_distance, 1..=50).suffix(" m"));
                     ui.end_row();
+                    ui.label("Hidden opacity");
+                    ui.add(egui::Slider::new(&mut g.hidden_alpha, 0.0..=1.0));
+                    ui.end_row();
                 }
                 SettingsTab::KeyBindings => {}
             });
@@ -1705,7 +1747,13 @@ mod tests {
         let g = MapGeometry::new(1.0);
         let mut selection = BTreeSet::new();
         // Dragged from bottom right to top left: the corners are normalised.
-        select(&mut selection, &net, g, rect((15.0, 2.0), (-1.0, -2.0)));
+        select(
+            &mut selection,
+            &net,
+            g,
+            rect((15.0, 2.0), (-1.0, -2.0)),
+            None,
+        );
         assert_eq!(sorted(&selection), [a, b]);
     }
 
@@ -1715,10 +1763,22 @@ mod tests {
         let g = MapGeometry::new(1.0);
         let mut selection = BTreeSet::new();
         // a on the left edge, b on the right edge, c on the bottom-right corner.
-        select(&mut selection, &net, g, rect((0.0, -3.0), (10.0, 0.0)));
+        select(
+            &mut selection,
+            &net,
+            g,
+            rect((0.0, -3.0), (10.0, 0.0)),
+            None,
+        );
         assert_eq!(sorted(&selection), [a, b]);
         let mut selection = BTreeSet::new();
-        select(&mut selection, &net, g, rect((20.0, 5.0), (12.0, 1.0)));
+        select(
+            &mut selection,
+            &net,
+            g,
+            rect((20.0, 5.0), (12.0, 1.0)),
+            None,
+        );
         assert_eq!(sorted(&selection), [c]);
     }
 
@@ -1727,7 +1787,13 @@ mod tests {
         let (net, [a, b, c]) = net3();
         let g = MapGeometry::new(1.0);
         let mut selection = BTreeSet::from([a, c]);
-        select(&mut selection, &net, g, rect((-1.0, -1.0), (11.0, 1.0)));
+        select(
+            &mut selection,
+            &net,
+            g,
+            rect((-1.0, -1.0), (11.0, 1.0)),
+            None,
+        );
         assert_eq!(sorted(&selection), [b, c]);
     }
 
@@ -1741,6 +1807,7 @@ mod tests {
             &net,
             g,
             SelectEvent::Click { node: Some(b) },
+            None,
         );
         assert_eq!(sorted(&selection), [a, b]);
         select(
@@ -1748,9 +1815,16 @@ mod tests {
             &net,
             g,
             SelectEvent::Click { node: Some(a) },
+            None,
         );
         assert_eq!(sorted(&selection), [b]);
-        select(&mut selection, &net, g, SelectEvent::Click { node: None });
+        select(
+            &mut selection,
+            &net,
+            g,
+            SelectEvent::Click { node: None },
+            None,
+        );
         assert!(selection.is_empty());
     }
 
@@ -1784,7 +1858,7 @@ mod tests {
         };
         let outline: Vec<_> = ring(60.0).chain(ring(40.0).rev()).collect();
         let mut selection = BTreeSet::from([centre, arc[0]]);
-        select(&mut selection, &net, g, lasso(&outline));
+        select(&mut selection, &net, g, lasso(&outline), None);
         // Every arc node flips (arc[0] off), the centre outside the band keeps its state.
         let mut want: Vec<NodeId> = arc[1..].to_vec();
         want.push(centre);
@@ -1811,7 +1885,7 @@ mod tests {
             (0.0, 20.0),
         ];
         let mut selection = BTreeSet::new();
-        select(&mut selection, &net, g, lasso(&c));
+        select(&mut selection, &net, g, lasso(&c), None);
         assert_eq!(sorted(&selection), [top, bottom]);
         assert!(!selection.contains(&notch));
     }
@@ -1828,7 +1902,7 @@ mod tests {
             vec![(-1.0, 0.0), (-1.0, 0.0), (11.0, 0.0)],
         ] {
             let mut selection = BTreeSet::from([a]);
-            select(&mut selection, &net, g, lasso(&outline));
+            select(&mut selection, &net, g, lasso(&outline), None);
             assert_eq!(sorted(&selection), [a], "{outline:?}");
         }
     }
@@ -2434,6 +2508,74 @@ mod tests {
             })
             .collect();
         texts.join("|")
+    }
+
+    #[test]
+    fn a_hidden_node_is_hovered_and_selected_only_with_select_hidden_or_a_hide_tool() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        let id = app.doc.as_ref().expect("doc").config.network.order()[0];
+        let primary = egui::PointerButton::Primary;
+        frames(&ctx, &mut app, primary, &[&[]]);
+        app.view.transform_mut().expect("set").zoom = 2.0;
+        // World (1, 2) is at screen (514, 516) at zoom 2.
+        let node = egui::pos2(514.0, 516.0);
+        let hover = |app: &mut App| {
+            frames(&ctx, app, primary, &[&[(node, None)], &[(node, None)]]);
+            app.view.hovered_node
+        };
+        assert_eq!(hover(&mut app), Some(id));
+        // The Hide node tool hides it with a click; then it is not hovered.
+        app.set_tool(Some(Box::new(crate::tools::hide::HideNodeTool::default())));
+        assert_eq!(
+            hover(&mut app),
+            Some(id),
+            "a hide tool picks hidden nodes too"
+        );
+        frames(
+            &ctx,
+            &mut app,
+            primary,
+            &[&[(node, Some(true))], &[(node, Some(false))], &[]],
+        );
+        assert!(app.doc.as_ref().expect("doc").hidden.node(id));
+        assert_eq!(hover(&mut app), Some(id));
+        app.set_tool(None);
+        assert_eq!(hover(&mut app), None);
+        // A rectangle over it selects nothing; with Select hidden (H) it is hovered and taken.
+        let net = app.doc.as_ref().expect("doc").config.network.clone();
+        let g = MapGeometry::new(1.0);
+        let all = SelectEvent::Rect {
+            a: (0.0, 0.0),
+            b: (2048.0, 2048.0),
+        };
+        let hidden = app.doc.as_ref().expect("doc").hidden.clone();
+        let mut selection = BTreeSet::new();
+        select(&mut selection, &net, g, all.clone(), Some(&hidden));
+        assert!(selection.is_empty());
+        select(&mut selection, &net, g, all, None);
+        assert_eq!(sorted(&selection), [id]);
+        app.run(Action::ToggleSelectHidden);
+        assert!(app.settings.global.select_hidden);
+        assert_eq!(hover(&mut app), Some(id));
+        // Display ▸ Show all hidden empties the set; a new document starts with none.
+        app.doc.as_mut().expect("doc").hidden = Hidden::default();
+        assert!(app.doc.as_ref().expect("doc").hidden.is_empty());
+    }
+
+    #[test]
+    fn a_hidden_connection_is_kept_as_one_pair_for_both_directions() {
+        let mut hidden = Hidden::default();
+        let mut net = Network::new();
+        let a = net.add_node(0.0, 0.0, 0.0, NodeFlag::REGULAR);
+        let b = net.add_node(1.0, 0.0, 0.0, NodeFlag::REGULAR);
+        hidden.toggle_link(b, a);
+        assert!(hidden.link(a, b) && hidden.link(b, a));
+        hidden.toggle_link(a, b);
+        assert!(hidden.is_empty());
+        hidden.toggle_nodes([a, b]);
+        hidden.toggle_nodes([a]);
+        assert!(!hidden.node(a) && hidden.node(b));
     }
 
     #[test]

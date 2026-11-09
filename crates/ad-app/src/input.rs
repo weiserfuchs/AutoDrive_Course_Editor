@@ -65,11 +65,13 @@ pub(crate) enum Action {
     NodeSizeDown,
     /// Centres the view on the hovered node (Java Shift+F).
     FocusHovered,
+    /// Whether hidden nodes and connections can be hovered and selected (Java H).
+    ToggleSelectHidden,
 }
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 34] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 35] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -209,6 +211,10 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 34] = [
         Action::FocusHovered,
         KeyboardShortcut::new(Modifiers::SHIFT, Key::F),
     ),
+    (
+        Action::ToggleSelectHidden,
+        KeyboardShortcut::new(Modifiers::NONE, Key::H),
+    ),
 ];
 
 /// Whether grid snap applies this frame: the toggle, inverted while Shift is held.
@@ -279,7 +285,7 @@ pub(crate) fn handle_shortcuts(app: &mut App, ctx: &egui::Context) {
 
 /// The actions the Key bindings tab lists: (action, settings id, label). Copy, Cut and
 /// Paste are not listed: Ctrl+C, Ctrl+X and Ctrl+V reach the app as clipboard events.
-pub(crate) const CONFIGURABLE: [(Action, &str, &str); 30] = [
+pub(crate) const CONFIGURABLE: [(Action, &str, &str); 31] = [
     (Action::Open, "open", "Open…"),
     (Action::Save, "save", "Save"),
     (Action::SaveAs, "save_as", "Save As…"),
@@ -341,6 +347,11 @@ pub(crate) const CONFIGURABLE: [(Action, &str, &str); 30] = [
         Action::FocusHovered,
         "focus_hovered",
         "Centre on hovered node",
+    ),
+    (
+        Action::ToggleSelectHidden,
+        "toggle_select_hidden",
+        "Select hidden",
     ),
 ];
 

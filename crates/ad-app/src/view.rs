@@ -167,6 +167,53 @@ pub enum DragEvent {
     Cancel,
 }
 
+/// Nodes and connections the user hid (Java's hide tools); session state of a document.
+/// A connection is kept as its sorted pair, so both directions are one entry.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Hidden {
+    pub nodes: BTreeSet<NodeId>,
+    pub links: BTreeSet<(NodeId, NodeId)>,
+}
+
+impl Hidden {
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.links.is_empty()
+    }
+
+    pub fn node(&self, id: NodeId) -> bool {
+        self.nodes.contains(&id)
+    }
+
+    pub fn link(&self, a: NodeId, b: NodeId) -> bool {
+        self.links.contains(&(a.min(b), a.max(b)))
+    }
+
+    /// Hides each of `ids` that is shown and shows each that is hidden.
+    pub fn toggle_nodes(&mut self, ids: impl IntoIterator<Item = NodeId>) {
+        for id in ids {
+            if !self.nodes.remove(&id) {
+                self.nodes.insert(id);
+            }
+        }
+    }
+
+    pub fn toggle_link(&mut self, a: NodeId, b: NodeId) {
+        let key = (a.min(b), a.max(b));
+        if !self.links.remove(&key) {
+            self.links.insert(key);
+        }
+    }
+}
+
+/// How the view treats hidden items this frame: drawn with `alpha`, and hovered and
+/// clicked only when `pickable` (Select hidden, or a hide tool).
+#[derive(Debug, Clone, Copy)]
+pub struct HiddenView<'a> {
+    pub set: &'a Hidden,
+    pub alpha: f32,
+    pub pickable: bool,
+}
+
 /// A secondary-button selection gesture on the view (AD-15), whichever tool is active.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectEvent {
@@ -317,6 +364,11 @@ pub trait ViewHooks {
     /// Nodes to draw, with their connections, at the given world (x, z) instead of their
     /// stored places.
     fn preview(&self) -> Option<&Preview> {
+        None
+    }
+
+    /// The hidden nodes and connections, if any are; see [`HiddenView`].
+    fn hidden(&self) -> Option<HiddenView<'_>> {
         None
     }
 
@@ -594,6 +646,12 @@ impl MapView {
             let ns = look::node_px(node_size, transform.zoom);
             let c = (f64::from(p.x), f64::from(p.y));
             let node = hover::node_at(net, geometry, transform, ns, c, &mut self.nodes);
+            // A hidden node is not picked unless hidden items are pickable.
+            let node = node.filter(|id| {
+                hooks
+                    .hidden()
+                    .is_none_or(|h| h.pickable || !h.set.node(*id))
+            });
             hooks.select(SelectEvent::Click { node });
         }
         if (response.dragged_by(primary) && !self.drag_claimed)
@@ -638,10 +696,14 @@ impl MapView {
             .map(|p| (f64::from(p.x), f64::from(p.y)));
         // A click on a selection mark acts on the selection, even when nodes are too small.
         let selection = hooks.selection().filter(|s| !s.is_empty());
+        let hidden = hooks.hidden().filter(|h| !h.set.is_empty());
+        let blocked = hidden.filter(|h| !h.pickable).map(|h| h.set);
         self.hovered_node = cursor
-            .and_then(|c| node_or_mark_at(net, geometry, &t, ns, selection, c, &mut self.nodes));
-        self.hovered_edge =
-            cursor.and_then(|c| hover::edge_at(net, geometry, &t, ns, self.hovered_node, c));
+            .and_then(|c| node_or_mark_at(net, geometry, &t, ns, selection, c, &mut self.nodes))
+            .filter(|id| blocked.is_none_or(|b| !b.node(*id)));
+        self.hovered_edge = cursor
+            .and_then(|c| hover::edge_at(net, geometry, &t, ns, self.hovered_node, c))
+            .filter(|&(a, b)| blocked.is_none_or(|h| !h.link(a, b)));
         self.paint(
             &painter,
             net,
@@ -652,6 +714,7 @@ impl MapView {
             preview,
             selection,
             hooks.overlap(),
+            hidden,
         );
         if let Some(id) = self.hovered_node {
             self.paint_info_box(&painter, net, geometry, &t, ns, id, rect, preview);
@@ -802,6 +865,7 @@ impl MapView {
         preview: Option<&Preview>,
         selection: Option<&BTreeSet<NodeId>>,
         overlap: Option<&BTreeSet<NodeId>>,
+        hidden: Option<HiddenView<'_>>,
     ) {
         if let Some(id) = map_texture {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -850,41 +914,48 @@ impl MapView {
         // instead of tens of thousands is what keeps the tessellation inside the frame budget.
         let half_width = 0.5_f32;
         let mut mesh = egui::Mesh::default();
-        let push_edge = |mesh: &mut egui::Mesh, a: [f64; 2], b: [f64; 2], link: LinkLook| {
-            let start = to_screen(a[0], a[1]);
-            let end = to_screen(b[0], b[1]);
-            let Some((from, to)) = look::line_ends(start, end, ns) else {
-                return;
-            };
-            let colour = look::connection_colour(link.kind, link.from_flag.0, link.to_flag.0);
-            // The normal comes from the full line; shortening can cross the ends on short lines.
-            let len = (end.0 - start.0).hypot(end.1 - start.1);
-            let nx = (-(end.1 - start.1) / len) as f32 * half_width;
-            let ny = ((end.0 - start.0) / len) as f32 * half_width;
-            let (a, b) = (
-                egui::pos2(from.0 as f32, from.1 as f32),
-                egui::pos2(to.0 as f32, to.1 as f32),
-            );
-            let i = mesh.vertices.len() as u32;
-            for p in [
-                egui::pos2(a.x + nx, a.y + ny),
-                egui::pos2(a.x - nx, a.y - ny),
-                egui::pos2(b.x - nx, b.y - ny),
-                egui::pos2(b.x + nx, b.y + ny),
-            ] {
-                mesh.colored_vertex(p, colour);
-            }
-            mesh.add_triangle(i, i + 1, i + 2);
-            mesh.add_triangle(i, i + 2, i + 3);
-            let dual = link.kind == ConnectionKind::Dual;
-            if let Some(tri) = look::arrow(start, end, ns, node_size, t.zoom, dual) {
+        let alpha_of = |e: &EdgeSegment| {
+            hidden
+                .filter(|h| h.set.link(e.from, e.to))
+                .map_or(1.0, |h| h.alpha)
+        };
+        let push_edge =
+            |mesh: &mut egui::Mesh, a: [f64; 2], b: [f64; 2], link: LinkLook, alpha: f32| {
+                let start = to_screen(a[0], a[1]);
+                let end = to_screen(b[0], b[1]);
+                let Some((from, to)) = look::line_ends(start, end, ns) else {
+                    return;
+                };
+                let colour = look::connection_colour(link.kind, link.from_flag.0, link.to_flag.0)
+                    .gamma_multiply(alpha);
+                // The normal comes from the full line; shortening can cross the ends on short lines.
+                let len = (end.0 - start.0).hypot(end.1 - start.1);
+                let nx = (-(end.1 - start.1) / len) as f32 * half_width;
+                let ny = ((end.0 - start.0) / len) as f32 * half_width;
+                let (a, b) = (
+                    egui::pos2(from.0 as f32, from.1 as f32),
+                    egui::pos2(to.0 as f32, to.1 as f32),
+                );
                 let i = mesh.vertices.len() as u32;
-                for p in tri {
-                    mesh.colored_vertex(egui::pos2(p.0 as f32, p.1 as f32), colour);
+                for p in [
+                    egui::pos2(a.x + nx, a.y + ny),
+                    egui::pos2(a.x - nx, a.y - ny),
+                    egui::pos2(b.x - nx, b.y - ny),
+                    egui::pos2(b.x + nx, b.y + ny),
+                ] {
+                    mesh.colored_vertex(p, colour);
                 }
                 mesh.add_triangle(i, i + 1, i + 2);
-            }
-        };
+                mesh.add_triangle(i, i + 2, i + 3);
+                let dual = link.kind == ConnectionKind::Dual;
+                if let Some(tri) = look::arrow(start, end, ns, node_size, t.zoom, dual) {
+                    let i = mesh.vertices.len() as u32;
+                    for p in tri {
+                        mesh.colored_vertex(egui::pos2(p.0 as f32, p.1 as f32), colour);
+                    }
+                    mesh.add_triangle(i, i + 1, i + 2);
+                }
+            };
         // Which connections a preview needs: every connection of a previewed node ends at its
         // stored position, and each end is placed at most `shift` (per axis) from where it is
         // stored. So the box of the previewed stored positions finds them all, and so does the
@@ -925,7 +996,7 @@ impl MapView {
             let a = from.map_or(e.a, |&(x, z)| [x, z]);
             let b = to.map_or(e.b, |&(x, z)| [x, z]);
             if in_view(a, b) {
-                push_edge(mesh, a, b, e.look);
+                push_edge(mesh, a, b, e.look, alpha_of(e));
             }
         };
         // The smallest of three ways to query: the widened view (a group moved a little, the
@@ -955,7 +1026,7 @@ impl MapView {
             // The view query alone: the R-tree already keeps only connections in view.
             None => {
                 for e in &self.edges {
-                    push_edge(&mut mesh, e.a, e.b, e.look);
+                    push_edge(&mut mesh, e.a, e.b, e.look, alpha_of(e));
                 }
             }
             Some(pv) => {
@@ -964,7 +1035,7 @@ impl MapView {
                     if from.is_none() && to.is_none() {
                         // A widened or joint query also finds connections outside the view.
                         if in_view(e.a, e.b) {
-                            push_edge(&mut mesh, e.a, e.b, e.look);
+                            push_edge(&mut mesh, e.a, e.b, e.look, alpha_of(e));
                         }
                     } else if apart.is_none() {
                         push_moved(&mut mesh, e, from, to);
@@ -998,7 +1069,12 @@ impl MapView {
             let dot = |id: NodeId, n: &Node| {
                 let (sx, sy) = screen_of(id, n);
                 let centre = egui::pos2(sx as f32, sy as f32);
-                painter.circle_filled(centre, radius, look::node_colour(n.flag.0));
+                let alpha = hidden.filter(|h| h.set.node(id)).map_or(1.0, |h| h.alpha);
+                painter.circle_filled(
+                    centre,
+                    radius,
+                    look::node_colour(n.flag.0).gamma_multiply(alpha),
+                );
                 centre
             };
             // The hover ring, also drawn around every selected node.
