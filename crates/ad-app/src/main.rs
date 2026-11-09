@@ -160,6 +160,12 @@ struct App {
     settings_path: Option<std::path::PathBuf>,
     /// The settings as last loaded or written; a difference is written back.
     settings_written: Settings,
+    /// The shortcut table in use, built from `settings.shortcuts` (story 9.5).
+    bindings: Vec<(Action, egui::KeyboardShortcut)>,
+    /// The overrides `bindings` was built from; a difference rebuilds it.
+    bindings_from: std::collections::BTreeMap<String, String>,
+    /// The Key bindings tab is waiting for a key for this action.
+    capturing: Option<ui::Capture>,
     /// The theme last handed to egui; a different setting is applied next frame.
     theme_applied: Option<ad_io::settings::Theme>,
     /// The settings window's tab, while it is shown.
@@ -214,6 +220,8 @@ impl App {
             settings.global.continuous,
             settings.global.lasso,
         );
+        let bindings = input::bindings(&settings.shortcuts);
+        let bindings_from = settings.shortcuts.clone();
         let settings_written = settings.clone();
         let (tx, rx) = mpsc::channel();
         Self {
@@ -240,6 +248,9 @@ impl App {
             settings_path: None,
             settings_written,
             theme_applied: None,
+            bindings_from,
+            bindings,
+            capturing: None,
             settings_window: None,
             pending: None,
             prompt: None,
@@ -546,6 +557,10 @@ impl App {
             .global
             .max_zoom
             .clamp(*range.start(), *range.end());
+        if self.bindings_from != self.settings.shortcuts {
+            self.bindings = input::bindings(&self.settings.shortcuts);
+            self.bindings_from = self.settings.shortcuts.clone();
+        }
         let theme = self.settings.global.theme;
         if self.theme_applied != Some(theme) {
             ctx.set_theme(match theme {

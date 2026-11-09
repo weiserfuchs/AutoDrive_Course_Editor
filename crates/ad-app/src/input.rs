@@ -1,4 +1,5 @@
-//! Keyboard shortcuts of the shell: the one fixed table (Java defaults, Redo per AD-13).
+//! Keyboard shortcuts of the shell: the default table (Java defaults, Redo per AD-13) and
+//! the overrides from the settings (story 9.5).
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 
@@ -208,11 +209,11 @@ fn clipboard_actions(i: &mut egui::InputState) -> Vec<Action> {
     actions
 }
 
-/// The actions pressed this frame, in table order, then the clipboard events; their key
+/// The actions pressed this frame, in `bindings` order, then the clipboard events; their key
 /// presses and events are consumed.
-pub(crate) fn pressed(ctx: &egui::Context) -> Vec<Action> {
+pub(crate) fn pressed(ctx: &egui::Context, bindings: &[(Action, KeyboardShortcut)]) -> Vec<Action> {
     ctx.input_mut(|i| {
-        let mut actions: Vec<Action> = SHORTCUTS
+        let mut actions: Vec<Action> = bindings
             .iter()
             .filter(|(_, shortcut)| consume_exact(i, shortcut))
             .map(|(action, _)| *action)
@@ -229,9 +230,165 @@ pub(crate) fn handle_shortcuts(app: &mut App, ctx: &egui::Context) {
     if app.prompt.is_some() || app.dialog_shown() {
         return;
     }
-    for action in pressed(ctx) {
+    for action in pressed(ctx, &app.bindings) {
         perform(app, action, ctx);
     }
+}
+
+/// The actions the Key bindings tab lists: (action, settings id, label). Copy, Cut and
+/// Paste are not listed: Ctrl+C, Ctrl+X and Ctrl+V reach the app as clipboard events.
+pub(crate) const CONFIGURABLE: [(Action, &str, &str); 23] = [
+    (Action::Open, "open", "Open…"),
+    (Action::Save, "save", "Save"),
+    (Action::SaveAs, "save_as", "Save As…"),
+    (Action::Exit, "exit", "Exit"),
+    (Action::Undo, "undo", "Undo"),
+    (Action::Redo, "redo", "Redo"),
+    (Action::PasteInPlace, "paste_in_place", "Paste in place"),
+    (Action::NodeTool, "node_tool", "Node tool"),
+    (Action::MoveTool, "move_tool", "Move tool"),
+    (Action::RotateTool, "rotate_tool", "Rotate tool"),
+    (
+        Action::AlignHorizontalTool,
+        "align_horizontal",
+        "Align horizontal",
+    ),
+    (
+        Action::AlignVerticalTool,
+        "align_vertical",
+        "Align vertical",
+    ),
+    (Action::ConnectTool, "connect_tool", "Connect tool"),
+    (Action::PriorityTool, "priority_tool", "Priority tool"),
+    (Action::FlipTool, "flip_tool", "Flip tool"),
+    (Action::BezierTool, "bezier_tool", "Bézier tool"),
+    (Action::ToggleSnap, "toggle_snap", "Grid snap"),
+    (
+        Action::ToggleContinuous,
+        "toggle_continuous",
+        "Continuous connections",
+    ),
+    (Action::ToggleNodeId, "toggle_node_id", "Selected node id"),
+    (
+        Action::DeleteHovered,
+        "delete_hovered",
+        "Delete hovered node",
+    ),
+    (Action::AddMarker, "add_marker", "Add marker"),
+    (Action::EditMarker, "edit_marker", "Edit marker"),
+    (Action::DeleteMarker, "delete_marker", "Delete marker"),
+];
+
+/// The settings id of `action`, if the Key bindings tab lists it.
+pub(crate) fn action_id(action: Action) -> Option<&'static str> {
+    CONFIGURABLE
+        .iter()
+        .find(|(a, ..)| *a == action)
+        .map(|(_, id, _)| *id)
+}
+
+/// The shortcut table in use: the defaults, with each action named in `overrides` (settings
+/// id → key text) bound to that key instead, or to none for an empty text. A text that is
+/// no key, or an unknown id, is ignored (logged), so the default stays.
+pub(crate) fn bindings(
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> Vec<(Action, KeyboardShortcut)> {
+    let mut replaced: Vec<(Action, Option<KeyboardShortcut>)> = Vec::new();
+    for (id, text) in overrides {
+        let Some((action, ..)) = CONFIGURABLE.iter().find(|(_, i, _)| i == id) else {
+            tracing::warn!("unknown shortcut action {id:?} in the settings; ignored");
+            continue;
+        };
+        match parse_shortcut(text) {
+            Some(shortcut) => replaced.push((*action, Some(shortcut))),
+            None if text.trim().is_empty() => replaced.push((*action, None)),
+            None => tracing::warn!("shortcut {text:?} for {id} is no key; the default stays"),
+        }
+    }
+    let mut out: Vec<(Action, KeyboardShortcut)> = SHORTCUTS
+        .iter()
+        .filter(|(a, _)| !replaced.iter().any(|(r, _)| r == a))
+        .copied()
+        .collect();
+    out.extend(replaced.into_iter().filter_map(|(a, s)| s.map(|s| (a, s))));
+    out
+}
+
+/// "Ctrl+Shift+Alt+Key" (each modifier only when set) as stored in the settings. Ctrl stands
+/// for the command modifier, as in the default table.
+pub(crate) fn shortcut_to_text(shortcut: &KeyboardShortcut) -> String {
+    let m = shortcut.modifiers;
+    let mut text = String::new();
+    if m.command || m.ctrl {
+        text.push_str("Ctrl+");
+    }
+    if m.shift {
+        text.push_str("Shift+");
+    }
+    if m.alt {
+        text.push_str("Alt+");
+    }
+    text.push_str(shortcut.logical_key.name());
+    text
+}
+
+/// The shortcut a settings text names, or `None` when it names no key.
+pub(crate) fn parse_shortcut(text: &str) -> Option<KeyboardShortcut> {
+    let mut parts: Vec<&str> = text.split('+').map(str::trim).collect();
+    // "Ctrl++" names the Plus key: an empty last part after a '+'.
+    if text.trim_end().ends_with("++") {
+        parts.pop();
+        if let Some(last) = parts.last_mut() {
+            *last = "+";
+        }
+    }
+    let key = Key::from_name(parts.pop()?)?;
+    let mut modifiers = Modifiers::NONE;
+    for part in parts {
+        modifiers = modifiers.plus(match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "cmd" | "command" => Modifiers::COMMAND,
+            "shift" => Modifiers::SHIFT,
+            "alt" => Modifiers::ALT,
+            _ => return None,
+        });
+    }
+    Some(KeyboardShortcut::new(modifiers, key))
+}
+
+/// The shortcut a captured key press gives: Ctrl (or the Mac command key) as the command
+/// modifier, Shift and Alt as pressed.
+pub(crate) fn captured(modifiers: Modifiers, key: Key) -> KeyboardShortcut {
+    let mut m = Modifiers::NONE;
+    if modifiers.command || modifiers.ctrl || modifiers.mac_cmd {
+        m = m.plus(Modifiers::COMMAND);
+    }
+    if modifiers.shift {
+        m = m.plus(Modifiers::SHIFT);
+    }
+    if modifiers.alt {
+        m = m.plus(Modifiers::ALT);
+    }
+    KeyboardShortcut::new(m, key)
+}
+
+/// The other action `shortcut` is bound to in `bindings`, if any.
+pub(crate) fn bound_elsewhere(
+    bindings: &[(Action, KeyboardShortcut)],
+    shortcut: &KeyboardShortcut,
+    action: Action,
+) -> Option<Action> {
+    bindings
+        .iter()
+        .find(|(a, s)| *a != action && s == shortcut)
+        .map(|(a, _)| *a)
+}
+
+/// The label of `action` in the Key bindings tab.
+pub(crate) fn action_label(action: Action) -> &'static str {
+    CONFIGURABLE
+        .iter()
+        .find(|(a, ..)| *a == action)
+        .map_or("", |(_, _, label)| *label)
 }
 
 /// Runs `action` from a shortcut or a menu item.
@@ -245,9 +402,14 @@ pub(crate) fn perform(app: &mut App, action: Action, ctx: &egui::Context) {
     }
 }
 
-/// The first shortcut of `action` as egui writes it (e.g. "Ctrl+S"), for menu items.
-pub(crate) fn shortcut_text(ctx: &egui::Context, action: Action) -> String {
-    SHORTCUTS
+/// The first shortcut of `action` in `bindings` as egui writes it (e.g. "Ctrl+S"), for menu
+/// items and the Key bindings tab; empty when it has none.
+pub(crate) fn shortcut_text(
+    ctx: &egui::Context,
+    bindings: &[(Action, KeyboardShortcut)],
+    action: Action,
+) -> String {
+    bindings
         .iter()
         .find(|(a, _)| *a == action)
         .map(|(_, shortcut)| ctx.format_shortcut(shortcut))
@@ -275,10 +437,89 @@ mod tests {
             ..Default::default()
         };
         let mut actions = Vec::new();
-        let mut out = ctx.run_ui(input, |ui| actions = pressed(ui.ctx()));
+        let mut out = ctx.run_ui(input, |ui| actions = pressed(ui.ctx(), &SHORTCUTS));
         // No renderer here, so there is nothing to upload.
         out.textures_delta.clear();
         actions
+    }
+
+    /// Like `press`, with the bindings built from `overrides`.
+    fn press_with(overrides: &[(&str, &str)], modifiers: Modifiers, key: Key) -> Vec<Action> {
+        let overrides = overrides
+            .iter()
+            .map(|(id, text)| ((*id).to_owned(), (*text).to_owned()))
+            .collect();
+        let table = bindings(&overrides);
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let mut actions = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| actions = pressed(ui.ctx(), &table));
+        out.textures_delta.clear();
+        actions
+    }
+
+    #[test]
+    fn every_default_shortcut_survives_its_settings_text() {
+        for (action, shortcut) in SHORTCUTS {
+            let text = shortcut_to_text(&shortcut);
+            assert_eq!(parse_shortcut(&text), Some(shortcut), "{action:?}: {text}");
+        }
+        assert_eq!(
+            parse_shortcut("ctrl + shift + Z"),
+            Some(KeyboardShortcut::new(
+                Modifiers::COMMAND.plus(Modifiers::SHIFT),
+                Key::Z
+            ))
+        );
+        for bad in ["", "Ctrl+", "Hyper+N", "Nope"] {
+            assert_eq!(parse_shortcut(bad), None, "{bad}");
+        }
+        assert_eq!(
+            captured(CTRL.plus(Modifiers::SHIFT), Key::S),
+            KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S)
+        );
+        // Every listed action has a distinct id and a default key.
+        for (action, id, _) in CONFIGURABLE {
+            assert_eq!(CONFIGURABLE.iter().filter(|(_, i, _)| *i == id).count(), 1);
+            assert!(SHORTCUTS.iter().any(|(a, _)| *a == action), "{id}");
+        }
+    }
+
+    #[test]
+    fn overrides_rebind_clear_or_are_ignored_when_they_name_no_key() {
+        let rebound = [("node_tool", "Shift+N")];
+        assert_eq!(
+            press_with(&rebound, Modifiers::SHIFT, Key::N),
+            [Action::NodeTool]
+        );
+        assert!(press_with(&rebound, Modifiers::NONE, Key::N).is_empty());
+        // An empty text clears both of the action's default keys.
+        let cleared = [("toggle_continuous", "")];
+        assert!(press_with(&cleared, Modifiers::NONE, Key::Semicolon).is_empty());
+        assert!(press_with(&cleared, Modifiers::SHIFT, Key::Semicolon).is_empty());
+        // No key, or an unknown action: the defaults stay.
+        let ignored = [("node_tool", "Ctrl+Nope"), ("no_such_action", "Q")];
+        assert_eq!(
+            press_with(&ignored, Modifiers::NONE, Key::N),
+            [Action::NodeTool]
+        );
+        assert!(press_with(&ignored, Modifiers::NONE, Key::Q).is_empty());
+        let table = bindings(&Default::default());
+        let save = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+        assert_eq!(
+            bound_elsewhere(&table, &save, Action::Open),
+            Some(Action::Save)
+        );
+        assert_eq!(bound_elsewhere(&table, &save, Action::Save), None);
     }
 
     #[test]
@@ -326,7 +567,7 @@ mod tests {
             ..Default::default()
         };
         let mut actions = Vec::new();
-        let mut out = ctx.run_ui(input, |ui| actions = pressed(ui.ctx()));
+        let mut out = ctx.run_ui(input, |ui| actions = pressed(ui.ctx(), &SHORTCUTS));
         out.textures_delta.clear();
         actions
     }
