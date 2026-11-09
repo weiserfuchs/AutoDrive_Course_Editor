@@ -1,0 +1,122 @@
+# Stories of epic-settings-ui-shell in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Settings changes are written back and survive a restart"
+description = "settings.toml is written atomically when a setting or per-map value changes (debounced) and on exit, not only when missing. Session toggles the inventory keeps (grid, snap, continuous, rectangle/lasso) persist; a map seen for the first time gets its [maps.<name>] entry with the current scale and grid. A broken settings.toml is still never overwritten. The person's step: change the map scale and toggles, restart, see them kept."
+verify = "Tests cover write on change, write on exit, no write for a broken file, a new map entry, toggles restored; the user restarts and sees the settings."
+covers = ["R1"]
+after = ["epic-route-manager"]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "A menu bar carries the file, edit, scan, import and routes commands"
+description = "egui menu bar above the tool bar: File (Open…, Routes…, Save, Save As…, Exit), Edit (Undo, Redo, Cut, Copy, Paste, Paste in place), Display (grows in later stories), Scan, Import, Help (grows in story 9). Save writes to the document's path without a dialog and is enabled only while dirty (deferred Retro R4); Save As asks. Shortcuts Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+Q. The tool bar keeps the tools. The person's step: use every menu item."
+verify = "Tests cover Save in place, Save As, Save disabled when clean, each menu item runs its action, the new shortcuts; the user walks the menus."
+covers = ["R2"]
+after = [1]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Recent files, the last folder and the window place are remembered"
+description = "File ▸ Open Recent lists the last 10 opened configs and routes (newest first, missing files greyed, Clear list); file dialogs start in the last used folder; window position and size are restored. All in settings.toml. The person's step: open files, restart, reopen one from the list."
+verify = "Tests cover the list order and cap, dedup, clear, a missing entry, the last folder; the user restarts and reopens."
+covers = ["R1", "R2"]
+after = [2]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 4
+type = "story"
+title = "A settings window edits the editor, autosave, curve and connection settings and the theme"
+description = "Edit ▸ Settings… opens a window with tabs Editor (online images, max zoom, theme light/dark/system), AutoSave (enabled, interval, slots), Curves (max and default points, default priority and type, control-point scaler), Connections (create end node, line spacing, hidden transparency). Fixed constants the inventory names become settings with the Java defaults. Changes apply at once and are written back (story 1). The person's step: change each setting and see it act."
+verify = "Tests cover each setting's effect and range checks, and the theme; the user changes settings and restarts."
+covers = ["R3"]
+after = [3]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "Key bindings are configurable"
+description = "The shortcut table becomes defaults plus a [shortcuts] table in settings.toml; a Key bindings tab lists every action with its key, captures a new key, refuses one in use, and has Clear and Reset per row and Reset all. Tooltips and menus show the current binding. The person's step: rebind a tool, restart, use it."
+verify = "Tests cover load and save of bindings, the in-use refusal, reset, an unknown key in the file; the user rebinds a key."
+covers = ["R3"]
+after = [4]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 6
+type = "story"
+title = "The display menu sets the map scale, labels, icons, node size and finds a node"
+description = "Display menu: Map scale (2 to 48 km, per map), Show marker names (F1), Show marker icons (F2), Show parking icons (F3), Show selected node id, Node size bigger and smaller (numpad + and -), Grid (G), Focus hovered node (Shift+F), Go to node id…; a map info window shows map name, image and heightmap state and scale. Toggles persist. The person's step: try each item."
+verify = "Tests cover each toggle's effect on the view, the per-map scale write, go to node id with a bad id; the user tries the menu."
+covers = ["R4"]
+after = [5]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 7
+type = "story"
+title = "Nodes and each connection kind can be hidden"
+description = "Display ▸ Show nodes and Show regular, dual, reverse and subprio connections; hidden items draw with the hidden transparency or not at all as in Java; Select hidden (H) decides whether selection takes hidden nodes. Persisted. The person's step: hide kinds, select, edit."
+verify = "Tests cover drawing and selection with each filter and Select hidden; the user hides kinds."
+covers = ["R4"]
+after = [6]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 8
+type = "story"
+title = "Grid spacing and rotation snap are set per map"
+description = "Grid settings per map: presets 1x1, 2x2, 4x4 and custom X/Y with subdivisions; subdivision snap (D); a separate rotation snap toggle with a step of 5 to 90 degrees. Persisted. The person's step: change the grid and snap, place and rotate nodes."
+verify = "Tests cover snapping to each grid and subdivision, the rotation step; the user places and rotates nodes."
+covers = ["R4"]
+after = [7]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 9
+type = "story"
+title = "The help menu and the update check use the fork"
+description = "At start, unless switched off in settings, a background check of api.github.com/repos/weiserfuchs/AutoDrive_Course_Editor/releases/latest compares with the app version and shows the release notes and a link once per new version. Help: About (version, fork, credits), Version history (link to the fork's releases), How to create map images (data repo link), Open log folder. The person's step: open each help item."
+verify = "Tests with a local server cover newer, same, older, offline and a malformed answer, the once-per-version rule and the switch; no KillBait/AutoDrive_Course_Editor URL in crates/; the user opens the help items."
+covers = ["R5"]
+after = [8]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 10
+type = "story"
+title = "The tool bar is grouped and shows each tool's shortcut"
+description = "Tool bar buttons grouped as in Java (nodes, connections, curves, markers, alignment, edit) with separators, tooltips naming the current shortcut, and Cut, Copy and Paste buttons. The person's step: hover the tools."
+verify = "Tests cover the tooltip text from the bindings and the new buttons; the narrow-window wrap still holds; the user looks at the tool bar."
+covers = ["R4"]
+after = [9]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 11
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred and checks every inventory row against the result; scope is set at its start and limited to cleanup."
+verify = "CI is green, the golden, round-trip and frame-time tests pass, and the inventory check is recorded."
+covers = []
+after = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+hitl = false
+risk = "low"
