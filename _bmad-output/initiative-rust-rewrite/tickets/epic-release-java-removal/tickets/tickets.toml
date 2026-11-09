@@ -1,0 +1,78 @@
+# Stories of epic-release-java-removal in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "The release build is a windowed AutoDriveCourseEditor.exe, version 0.9.0"
+description = "The ad-app binary is named AutoDriveCourseEditor; release builds use the Windows GUI subsystem (no console window; logs go to the log folder); a release profile (LTO, one codegen unit, stripped symbols); the workspace version is 0.9.0, which the About window and the update check use. The person's step: start the release exe and see no console window."
+verify = "cargo build --release yields target/release/AutoDriveCourseEditor.exe; tests pass; the user starts it."
+covers = ["R1"]
+after = ["epic-settings-ui-shell"]
+hitl = true
+risk = "low"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Pushing a v* tag builds the exe and attaches it to a draft release"
+description = "A release workflow on windows-latest runs on v* tags: checks that the tag matches the crate version, runs the CI checks, builds the release exe and creates a draft release on the fork with the exe attached. The user publishes the draft."
+verify = "The workflow is valid YAML and its version check is tested locally; the real run happens with story 7."
+covers = ["R2"]
+after = [1]
+hitl = false
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "The frame budget is re-measured at minimum and maximum zoom"
+description = "The ignored frame-time test covers pan, zoom and drag at minimum and maximum zoom on the fixture; the release numbers are recorded in the plan."
+verify = "cargo test -p ad-app --release -- --ignored frame_time --nocapture: every case under 16 ms."
+covers = ["R3"]
+after = [1]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Parity with R1-R16 is signed off on a checklist"
+description = "A checklist lists each initiative requirement R1-R16 and each kept inventory row with how to check it in the release exe on the fixture and its automated evidence. The user walks it and signs off; gaps become stories or are accepted."
+verify = "The checklist exists and the user signs it off."
+covers = ["R4"]
+after = [3]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 5
+type = "story"
+title = "The Java editor and the Maven build are removed and the readme describes the Rust editor"
+description = "Removes src/, pom.xml, AutoDriveCourseEditor.iml, the start .cmd, version.xml and history.xml; the readme explains download, start, logs and settings of the Rust exe; AGENTS.md drops the Java guidance. No Rust code depends on them."
+verify = "cargo build, test and clippy pass after the removal; no file references src/main."
+covers = ["R5"]
+after = [4]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 6
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred; scope is set at its start and limited to cleanup."
+verify = "CI is green and the sweep is recorded."
+covers = []
+after = [1, 2, 3, 4, 5]
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 7
+type = "story"
+title = "v0.9.0 is tagged and released"
+description = "With the user's go-ahead, master is tagged v0.9.0 and pushed; the workflow builds the draft; the user checks the attached exe and publishes the release."
+verify = "The release page shows AutoDriveCourseEditor.exe; the update check of a 0.8 build would find it."
+covers = ["R2"]
+after = [6]
+hitl = true
+risk = "medium"
