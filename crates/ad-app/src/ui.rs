@@ -644,83 +644,232 @@ pub(crate) fn download_label(app: &App) -> Option<&'static str> {
         .then_some("Downloading map image…")
 }
 
-/// The tool buttons, Undo and Redo; all disabled without an editable document (AD-11).
+/// What a tool-bar tool does, and the action whose key its tooltip names (Java's tool
+/// tooltips doubled as shortcut help).
+fn tool_hint(name: &str) -> (&'static str, Option<Action>) {
+    use crate::tools::{
+        arc, bezier, connect, delete, flip, hide, move_node, node, priority, rotate,
+    };
+    match name {
+        node::REGULAR_NAME => (
+            "Click to add a node; N switches to sub-prio",
+            Some(Action::NodeTool),
+        ),
+        node::SUB_PRIO_NAME => ("Click to add a sub-prio node", Some(Action::NodeTool)),
+        move_node::NAME => ("Drag nodes or the selection", Some(Action::MoveTool)),
+        rotate::NAME => (
+            "Drag the handle to turn the selection",
+            Some(Action::RotateTool),
+        ),
+        delete::NAME => (
+            "Click a node or a connection to delete it",
+            Some(Action::DeleteHovered),
+        ),
+        priority::NAME => (
+            "Click a node to switch regular and sub-prio",
+            Some(Action::PriorityTool),
+        ),
+        flip::NAME => (
+            "Click a connection to turn its direction",
+            Some(Action::FlipTool),
+        ),
+        "Edit location" => ("Click a node to type its position", None),
+        connect::REGULAR_NAME => (
+            "Click two nodes to connect them; L cycles",
+            Some(Action::ConnectTool),
+        ),
+        connect::DUAL_NAME => (
+            "Click two nodes for a dual connection",
+            Some(Action::ConnectTool),
+        ),
+        connect::REVERSE_NAME => (
+            "Click two nodes for a reverse connection",
+            Some(Action::ConnectTool),
+        ),
+        bezier::NAME => (
+            "Click start and end node, then shape the curve",
+            Some(Action::BezierTool),
+        ),
+        arc::NAME => ("Click to place an arc, then drag its handles", None),
+        "Add marker" => ("Click a node to give it a marker", Some(Action::AddMarker)),
+        "Edit marker" => ("Click a node to edit its marker", Some(Action::EditMarker)),
+        "Delete marker" => (
+            "Click a node to remove its marker",
+            Some(Action::DeleteMarker),
+        ),
+        "Align H" => (
+            "Click a node: the selection takes its z",
+            Some(Action::AlignHorizontalTool),
+        ),
+        "Align V" => (
+            "Click a node: the selection takes its x",
+            Some(Action::AlignVerticalTool),
+        ),
+        "Align depth" => ("Click a node: the selection takes its height", None),
+        hide::NODE_NAME => ("Click a node or the selection to hide or show it", None),
+        hide::LINK_NAME => ("Click a connection to hide or show it", None),
+        _ => ("", None),
+    }
+}
+
+/// `hint`, followed by the current key of `action` in brackets when it has one.
+fn hint_text(ctx: &egui::Context, app: &App, hint: &str, action: Option<Action>) -> String {
+    let key = action.map(|a| input::shortcut_text(ctx, &app.bindings, a));
+    match key.filter(|k| !k.is_empty()) {
+        Some(key) if hint.is_empty() => key,
+        Some(key) => format!("{hint} ({key})"),
+        None => hint.to_owned(),
+    }
+}
+
+/// A tool-bar button for `action` with its tooltip; runs it when clicked.
+fn action_button(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    action: Action,
+    label: &str,
+    hint: &str,
+    enabled: bool,
+) {
+    let ctx = ui.ctx().clone();
+    let tip = hint_text(&ctx, app, hint, Some(action));
+    if ui
+        .add_enabled(enabled, egui::Button::new(label))
+        .on_hover_text(tip)
+        .clicked()
+    {
+        input::perform(app, action, &ctx);
+    }
+}
+
+/// The tool bar, grouped as in Java (nodes, connections, curves, markers, alignment, hide),
+/// then the toggles and the edit buttons; each tooltip names the current key. Tools and
+/// edits are disabled without an editable document (AD-11).
 fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let editable = app.editable();
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
     let line = app.line();
     let (curve, scaler) = (app.curve_defaults(), app.curve_scaler());
-    let tools: [Box<dyn Tool>; 21] = [
-        Box::new(NodeTool::new(NodeFlag::REGULAR)),
-        Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
-        Box::new(MoveTool::default()),
-        Box::new(RotateTool::default()),
-        Box::new(AlignTool::new(Axis::Horizontal)),
-        Box::new(AlignTool::new(Axis::Vertical)),
-        Box::new(AlignTool::new(Axis::Depth)),
-        Box::new(EditLocationTool::default()),
-        Box::new(DeleteTool),
-        Box::new(PriorityTool),
-        Box::new(FlipTool),
-        Box::new(ConnectTool::new(ConnectionShape::OneWay, continuous, line)),
-        Box::new(ConnectTool::new(ConnectionShape::Dual, continuous, line)),
-        Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous, line)),
-        Box::new(BezierTool::with_defaults(curve, scaler)),
-        Box::new(ArcTool::with_defaults(curve)),
-        Box::new(AddMarkerTool::default()),
-        Box::new(EditMarkerTool::default()),
-        Box::new(DeleteMarkerTool::default()),
-        Box::new(crate::tools::hide::HideNodeTool::default()),
-        Box::new(crate::tools::hide::HideLinkTool::default()),
+    let groups: [Vec<Box<dyn Tool>>; 6] = [
+        vec![
+            Box::new(NodeTool::new(NodeFlag::REGULAR)),
+            Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
+            Box::new(MoveTool::default()),
+            Box::new(RotateTool::default()),
+            Box::new(DeleteTool),
+            Box::new(PriorityTool),
+            Box::new(FlipTool),
+            Box::new(EditLocationTool::default()),
+        ],
+        vec![
+            Box::new(ConnectTool::new(ConnectionShape::OneWay, continuous, line)),
+            Box::new(ConnectTool::new(ConnectionShape::Dual, continuous, line)),
+            Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous, line)),
+        ],
+        vec![
+            Box::new(BezierTool::with_defaults(curve, scaler)),
+            Box::new(ArcTool::with_defaults(curve)),
+        ],
+        vec![
+            Box::new(AddMarkerTool::default()),
+            Box::new(EditMarkerTool::default()),
+            Box::new(DeleteMarkerTool::default()),
+        ],
+        vec![
+            Box::new(AlignTool::new(Axis::Horizontal)),
+            Box::new(AlignTool::new(Axis::Vertical)),
+            Box::new(AlignTool::new(Axis::Depth)),
+        ],
+        vec![
+            Box::new(crate::tools::hide::HideNodeTool::default()),
+            Box::new(crate::tools::hide::HideLinkTool::default()),
+        ],
     ];
-    for tool in tools {
-        let selected = active == Some(tool.name());
-        let button = egui::Button::selectable(selected, tool.name());
-        if ui.add_enabled(editable, button).clicked() {
-            // A click on the active tool turns it off.
-            app.set_tool((!selected).then_some(tool));
+    let ctx = ui.ctx().clone();
+    for (i, group) in groups.into_iter().enumerate() {
+        if i > 0 {
+            ui.separator();
+        }
+        for tool in group {
+            let selected = active == Some(tool.name());
+            let (hint, action) = tool_hint(tool.name());
+            let tip = hint_text(&ctx, app, hint, action);
+            let button = egui::Button::selectable(selected, tool.name());
+            if ui
+                .add_enabled(editable, button)
+                .on_hover_text(tip)
+                .clicked()
+            {
+                // A click on the active tool turns it off.
+                app.set_tool((!selected).then_some(tool));
+            }
+        }
+        // The groups window belongs to the markers.
+        if i == 3
+            && ui
+                .add_enabled(editable, egui::Button::new("Groups"))
+                .on_hover_text("Rename or delete marker groups")
+                .clicked()
+        {
+            app.open_groups();
         }
     }
-    if ui
-        .add_enabled(editable, egui::Button::new("Groups"))
-        .on_hover_text("Rename or delete marker groups")
-        .clicked()
-    {
-        app.open_groups();
-    }
+    ui.separator();
     let mut continuous = app.continuous;
+    let tip = hint_text(
+        &ctx,
+        app,
+        "After a connection, its end starts the next one",
+        Some(Action::ToggleContinuous),
+    );
     if ui
         .checkbox(&mut continuous, "Continuous")
-        .on_hover_text("; (L cycles the connect tools)")
+        .on_hover_text(tip)
         .changed()
     {
         app.run(Action::ToggleContinuous);
     }
-    ui.checkbox(&mut app.snap, "Snap")
-        .on_hover_text("S; hold Shift to invert");
+    let tip = hint_text(
+        &ctx,
+        app,
+        "Snap to the grid; hold Shift to invert",
+        Some(Action::ToggleSnap),
+    );
+    ui.checkbox(&mut app.snap, "Snap").on_hover_text(tip);
     // The shape of the right-drag selection; selection works without an editable document.
     ui.selectable_value(&mut app.lasso, false, "Rect")
         .on_hover_text("Right drag selects a rectangle");
     ui.selectable_value(&mut app.lasso, true, "Lasso")
         .on_hover_text("Right drag selects inside a drawn outline");
+    ui.separator();
     let history = app.doc.as_ref().map(|d| &d.history);
     let can_undo = editable && history.is_some_and(History::can_undo);
     let can_redo = editable && history.is_some_and(History::can_redo);
-    if ui
-        .add_enabled(can_undo, egui::Button::new("Undo"))
-        .on_hover_text("Ctrl+Z")
-        .clicked()
-    {
-        app.run(Action::Undo);
-    }
-    if ui
-        .add_enabled(can_redo, egui::Button::new("Redo"))
-        .on_hover_text("Ctrl+Shift+Z")
-        .clicked()
-    {
-        app.run(Action::Redo);
-    }
+    action_button(
+        app,
+        ui,
+        Action::Undo,
+        "Undo",
+        "Undo the last edit",
+        can_undo,
+    );
+    action_button(
+        app,
+        ui,
+        Action::Redo,
+        "Redo",
+        "Redo the undone edit",
+        can_redo,
+    );
+    let has_selection = app.doc.as_ref().is_some_and(|d| !d.selection.is_empty());
+    let can_paste = editable && app.clipboard.is_some();
+    let cut = "Copy the selection, then delete it";
+    action_button(app, ui, Action::Cut, "Cut", cut, editable && has_selection);
+    let copy = "Copy the selection";
+    action_button(app, ui, Action::Copy, "Copy", copy, has_selection);
+    let paste = "Paste in the middle of the view";
+    action_button(app, ui, Action::Paste, "Paste", paste, can_paste);
 }
 
 /// Connects the active tool to the map view: drags go to the tool, its preview and paint
@@ -2594,6 +2743,64 @@ mod tests {
     }
 
     #[test]
+    fn every_tool_has_a_hint_and_its_tooltip_names_the_current_key() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        let names = [
+            crate::tools::node::REGULAR_NAME,
+            crate::tools::node::SUB_PRIO_NAME,
+            crate::tools::move_node::NAME,
+            crate::tools::rotate::NAME,
+            crate::tools::delete::NAME,
+            crate::tools::priority::NAME,
+            crate::tools::flip::NAME,
+            "Edit location",
+            crate::tools::connect::REGULAR_NAME,
+            crate::tools::connect::DUAL_NAME,
+            crate::tools::connect::REVERSE_NAME,
+            crate::tools::bezier::NAME,
+            crate::tools::arc::NAME,
+            "Add marker",
+            "Edit marker",
+            "Delete marker",
+            "Align H",
+            "Align V",
+            "Align depth",
+            crate::tools::hide::NODE_NAME,
+            crate::tools::hide::LINK_NAME,
+        ];
+        for name in names {
+            assert!(!tool_hint(name).0.is_empty(), "{name}");
+        }
+        let (hint, action) = tool_hint(crate::tools::move_node::NAME);
+        assert_eq!(
+            hint_text(&ctx, &app, hint, action),
+            "Drag nodes or the selection (M)"
+        );
+        // A rebound key shows in the tooltip; a cleared one leaves the hint alone.
+        app.settings
+            .shortcuts
+            .insert("move_tool".to_owned(), "Shift+M".to_owned());
+        app.apply_settings(&ctx);
+        let shift_m = ctx.format_shortcut(&egui::KeyboardShortcut::new(
+            egui::Modifiers::SHIFT,
+            egui::Key::M,
+        ));
+        assert_eq!(
+            hint_text(&ctx, &app, hint, action),
+            format!("Drag nodes or the selection ({shift_m})")
+        );
+        app.settings
+            .shortcuts
+            .insert("move_tool".to_owned(), String::new());
+        app.apply_settings(&ctx);
+        assert_eq!(
+            hint_text(&ctx, &app, hint, action),
+            "Drag nodes or the selection"
+        );
+    }
+
+    #[test]
     fn the_menu_bar_and_the_wrapping_tool_bar_stay_inside_a_narrow_window() {
         let ctx = egui::Context::default();
         let mut app = app("<version>3</version>");
@@ -2628,9 +2835,15 @@ mod tests {
             "Display",
             "Scan",
             "Import",
+            "Help",
             "Node",
             "Delete marker",
             "Groups",
+            "Hide connection",
+            "Undo",
+            "Cut",
+            "Copy",
+            "Paste",
         ];
         for name in names {
             let (_, x) = texts
