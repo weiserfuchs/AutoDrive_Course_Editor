@@ -23,7 +23,7 @@ use eframe::egui;
 
 use ad_core::command::{Command, DeleteNodes, Transaction};
 use ad_core::geometry::MAP_PIXELS;
-use ad_io::settings::Settings;
+use ad_io::settings::{Settings, WindowPlace};
 use document::{Document, Fix};
 use input::Action;
 use jobs::JobResult;
@@ -35,8 +35,8 @@ use view::MapView;
 enum Pending {
     Close,
     Open,
-    /// Opens this route file, picked in the routes window.
-    OpenRoute(std::path::PathBuf),
+    /// Opens this file, picked in the routes window or the recent files.
+    OpenPath(std::path::PathBuf),
 }
 
 /// The user's answer to the unsaved-changes prompt.
@@ -54,6 +54,47 @@ const OVERLAP_DEFAULT: &str = "0.1";
 /// as the decimal point.
 fn overlap_distance(text: &str) -> Result<f64, tools::edit_location::Note> {
     tools::edit_location::parse(text, 0.001, 100.0)
+}
+
+/// The window's place to remember at exit: its outer position and inner size, or, while
+/// maximized, the place it had before with `maximized` set (the restored size stays).
+/// `previous` when the viewport reports nothing.
+fn window_place(
+    outer: Option<egui::Rect>,
+    inner: Option<egui::Rect>,
+    maximized: Option<bool>,
+    previous: Option<WindowPlace>,
+) -> Option<WindowPlace> {
+    let maximized = maximized.unwrap_or(false);
+    match (previous, outer, inner) {
+        (Some(previous), ..) if maximized => Some(WindowPlace {
+            maximized,
+            ..previous
+        }),
+        (_, Some(outer), Some(inner)) => Some(WindowPlace {
+            x: outer.min.x,
+            y: outer.min.y,
+            width: inner.width(),
+            height: inner.height(),
+            maximized,
+        }),
+        (previous, ..) => previous,
+    }
+}
+
+/// The smallest remembered window size that is restored; a smaller one is ignored.
+const MIN_WINDOW: egui::Vec2 = egui::vec2(400.0, 300.0);
+
+/// The start viewport: the remembered place, when there is one of a usable size.
+fn start_viewport(place: Option<WindowPlace>) -> egui::ViewportBuilder {
+    let viewport = egui::ViewportBuilder::default();
+    match place {
+        Some(p) if p.width >= MIN_WINDOW.x && p.height >= MIN_WINDOW.y => viewport
+            .with_position([p.x, p.y])
+            .with_inner_size([p.width, p.height])
+            .with_maximized(p.maximized),
+        _ => viewport,
+    }
 }
 
 /// The window title: the open file's path, and ` *` while the document is dirty.
@@ -323,7 +364,7 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Pending::Open => self.open(ctx),
-            Pending::OpenRoute(path) => self.load(path, ctx),
+            Pending::OpenPath(path) => self.load(path, ctx),
         }
     }
 
@@ -332,8 +373,11 @@ impl App {
         while let Ok(result) = self.rx.try_recv() {
             let mut download = None;
             match &result {
-                JobResult::Loaded { result, .. } => {
+                JobResult::Loaded { path, result } => {
                     self.loading = false;
+                    if result.is_ok() {
+                        self.settings.global.add_recent(path);
+                    }
                     download = result
                         .as_ref()
                         .ok()
@@ -346,9 +390,15 @@ impl App {
                     }
                 }
                 JobResult::Saved {
-                    result, warning, ..
+                    result,
+                    warning,
+                    target,
+                    ..
                 } => {
                     self.saving = false;
+                    if result.is_ok() {
+                        self.settings.global.add_recent(target);
+                    }
                     // A failed save keeps the document and the window; so does a failed
                     // vehicles.xml save, so its message is seen.
                     if result.is_err() || warning.is_some() {
@@ -1128,11 +1178,34 @@ impl App {
         }
     }
 
+    /// Shows `dialog` in the last used folder and remembers the folder of the picked file.
+    fn pick(&mut self, dialog: rfd::FileDialog) -> Option<PathBuf> {
+        let dialog = match &self.settings.global.last_folder {
+            Some(dir) if dir.is_dir() => dialog.set_directory(dir),
+            _ => dialog,
+        };
+        let path = dialog.pick_file()?;
+        self.remember_folder(&path);
+        Some(path)
+    }
+
+    /// The next open or import dialog starts in the folder of `path`.
+    fn remember_folder(&mut self, path: &Path) {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            self.settings.global.last_folder = Some(dir.to_path_buf());
+        }
+    }
+
+    /// File ▸ Open Recent: opens `path` after the unsaved-changes prompt. A file gone since
+    /// fails the load with an error and keeps the document (AD-12).
+    fn open_recent(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if !self.loading && !self.saving {
+            self.request(Pending::OpenPath(path), ctx);
+        }
+    }
+
     fn open(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("XML", &["xml"])
-            .pick_file()
-        else {
+        let Some(path) = self.pick(rfd::FileDialog::new().add_filter("XML", &["xml"])) else {
             return;
         };
         self.load(path, ctx);
@@ -1155,11 +1228,11 @@ impl App {
 
     /// Asks for a `routes.xml` and reads it for the routes window.
     fn pick_routes_list(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("routes.xml", &["xml"])
-            .set_file_name("routes.xml")
-            .pick_file()
-        else {
+        let Some(path) = self.pick(
+            rfd::FileDialog::new()
+                .add_filter("routes.xml", &["xml"])
+                .set_file_name("routes.xml"),
+        ) else {
             return;
         };
         let ctx = ctx.clone();
@@ -1187,7 +1260,7 @@ impl App {
             return;
         };
         let path = jobs::route_file(&window.list, entry);
-        self.request(Pending::OpenRoute(path), ctx);
+        self.request(Pending::OpenPath(path), ctx);
     }
 
     /// Asks for a DDS and imports it as the open document's map image, cropped for
@@ -1203,10 +1276,7 @@ impl App {
                 return;
             }
         };
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("DDS", &["dds"])
-            .pick_file()
-        else {
+        let Some(path) = self.pick(rfd::FileDialog::new().add_filter("DDS", &["dds"])) else {
             return;
         };
         let ctx = ctx.clone();
@@ -1244,7 +1314,7 @@ impl App {
         if self.doc.is_none() {
             return;
         }
-        let Some(path) = png_dialog().pick_file() else {
+        let Some(path) = self.pick(png_dialog()) else {
             return;
         };
         let ctx = ctx.clone();
@@ -1264,7 +1334,7 @@ impl App {
         if self.doc.is_none() {
             return;
         }
-        let Some(path) = png_dialog().pick_file() else {
+        let Some(path) = self.pick(png_dialog()) else {
             return;
         };
         let ctx = ctx.clone();
@@ -1323,10 +1393,7 @@ impl App {
 
     /// Asks for a map mod zip and reads it for the preview; no document is needed.
     fn import_zip(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Zip", &["zip"])
-            .pick_file()
-        else {
+        let Some(path) = self.pick(rfd::FileDialog::new().add_filter("Zip", &["zip"])) else {
             return;
         };
         let ctx = ctx.clone();
@@ -1474,6 +1541,18 @@ impl eframe::App for App {
         self.poll_jobs();
         self.resume(&ctx);
         self.intercept_close(&ctx);
+        // Kept even when the close is cancelled; `persist_settings` writes it this frame.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.settings.global.window = ctx.input(|i| {
+                let v = i.viewport();
+                window_place(
+                    v.outer_rect,
+                    v.inner_rect,
+                    v.maximized,
+                    self.settings.global.window,
+                )
+            });
+        }
         let title = window_title(self.doc.as_ref());
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -1510,9 +1589,13 @@ impl eframe::App for App {
 fn main() -> eframe::Result {
     let startup = startup::init();
     let settings = startup.settings.clone();
+    let options = eframe::NativeOptions {
+        viewport: start_viewport(settings.global.window),
+        ..Default::default()
+    };
     eframe::run_native(
         "AutoDrive Course Editor",
-        eframe::NativeOptions::default(),
+        options,
         Box::new(move |_cc| {
             let mut app = App::new(settings);
             app.settings_path = startup.settings_path;
@@ -1567,6 +1650,101 @@ mod tests {
 
     fn nodes(app: &App) -> usize {
         app.doc.as_ref().expect("doc").config.network.len()
+    }
+
+    #[test]
+    fn loads_and_saves_go_into_the_recent_files_and_a_gone_one_keeps_the_document() {
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        assert_eq!(app.settings.global.recent_files, [PathBuf::from("a.xml")]);
+        let failed = JobResult::Loaded {
+            path: PathBuf::from("broken.xml"),
+            result: Err("no".to_owned()),
+        };
+        app.tx.send(failed).expect("send");
+        app.poll_jobs();
+        assert_eq!(app.settings.global.recent_files, [PathBuf::from("a.xml")]);
+        let doc = app.doc.as_ref().expect("doc");
+        let saved = JobResult::Saved {
+            epoch: doc.epoch,
+            point: doc.history.save_point(),
+            target: PathBuf::from("b.xml"),
+            result: Ok(()),
+            warning: None,
+        };
+        app.tx.send(saved).expect("send");
+        app.poll_jobs();
+        assert_eq!(
+            app.settings.global.recent_files,
+            [PathBuf::from("b.xml"), PathBuf::from("a.xml")]
+        );
+        // Opening an entry whose file is gone: an error, the document stays.
+        app.error = None;
+        let before = snapshot(&app);
+        let gone = std::env::temp_dir().join("ad_app_recent_gone.xml");
+        app.open_recent(gone, &egui::Context::default());
+        assert!(app.loading);
+        wait_for_load(&mut app);
+        assert!(
+            app.error
+                .as_ref()
+                .is_some_and(|e| e.contains("ad_app_recent_gone.xml"))
+        );
+        assert_eq!(snapshot(&app), before);
+    }
+
+    #[test]
+    fn the_folder_of_a_picked_file_is_remembered() {
+        let mut app = App::new(Settings::default());
+        app.remember_folder(Path::new("bare.xml"));
+        assert_eq!(app.settings.global.last_folder, None);
+        let file = std::env::temp_dir().join("x.xml");
+        app.remember_folder(&file);
+        assert_eq!(app.settings.global.last_folder, Some(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn the_window_place_keeps_the_restored_size_while_maximized() {
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+        };
+        let place = window_place(
+            Some(rect(10.0, 20.0, 1216.0, 839.0)),
+            Some(rect(18.0, 51.0, 1200.0, 800.0)),
+            Some(false),
+            None,
+        )
+        .expect("place");
+        assert_eq!(
+            place,
+            WindowPlace {
+                x: 10.0,
+                y: 20.0,
+                width: 1200.0,
+                height: 800.0,
+                maximized: false
+            }
+        );
+        let full = Some(rect(0.0, 0.0, 2560.0, 1400.0));
+        let max = window_place(full, full, Some(true), Some(place)).expect("place");
+        assert_eq!(
+            max,
+            WindowPlace {
+                maximized: true,
+                ..place
+            }
+        );
+        assert_eq!(window_place(None, None, None, Some(place)), Some(place));
+        // A tiny remembered size is ignored at start.
+        let tiny = WindowPlace {
+            width: 100.0,
+            ..place
+        };
+        assert_eq!(start_viewport(Some(tiny)).inner_size, None);
+        let restored = start_viewport(Some(max));
+        assert_eq!(restored.inner_size, Some(egui::vec2(1200.0, 800.0)));
+        assert_eq!(restored.position, Some(egui::pos2(10.0, 20.0)));
+        assert_eq!(restored.maximized, Some(true));
     }
 
     #[test]
@@ -4003,7 +4181,7 @@ mod tests {
         select_route(&mut app, "A route");
         app.open_route(&ctx);
         let missing = list.with_file_name("routes").join("Missing00000001.xml");
-        assert_eq!(app.prompt, Some(Pending::OpenRoute(missing)));
+        assert_eq!(app.prompt, Some(Pending::OpenPath(missing)));
         assert!(app.routes.is_none() && !app.loading);
         app.choose(Choice::Discard, &ctx);
         assert!(app.loading);

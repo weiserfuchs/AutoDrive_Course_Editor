@@ -62,6 +62,36 @@ pub struct GlobalSettings {
     /// How many autosave files rotate; at least 1 (Java `maxAutoSaveSlots`).
     #[serde(deserialize_with = "at_least_one")]
     pub autosave_slots: u32,
+    /// The last opened or saved files, newest first, at most `RECENT_MAX` (Java recent
+    /// files).
+    pub recent_files: Vec<PathBuf>,
+    /// The folder open and import dialogs start in (Java `lastUsedLocation`).
+    pub last_folder: Option<PathBuf>,
+    /// The window's place at the last exit.
+    pub window: Option<WindowPlace>,
+}
+
+/// How many files File ▸ Open Recent keeps (Java keeps 10).
+pub const RECENT_MAX: usize = 10;
+
+impl GlobalSettings {
+    /// Puts `path` first in the recent files, dropping an older entry of it and any beyond
+    /// `RECENT_MAX`.
+    pub fn add_recent(&mut self, path: &Path) {
+        self.recent_files.retain(|p| p != path);
+        self.recent_files.insert(0, path.to_path_buf());
+        self.recent_files.truncate(RECENT_MAX);
+    }
+}
+
+/// The window's outer position and inner size in points, and whether it was maximized.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowPlace {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub maximized: bool,
 }
 
 impl Default for GlobalSettings {
@@ -78,6 +108,9 @@ impl Default for GlobalSettings {
             autosave: true,
             autosave_minutes: 10,
             autosave_slots: 10,
+            recent_files: Vec::new(),
+            last_folder: None,
+            window: None,
         }
     }
 }
@@ -174,6 +207,48 @@ mod tests {
                 grid_y: 0.5,
             },
         );
+        let path = dir.join("settings.toml");
+        save(&s, &path).expect("save");
+        assert_eq!(load(&path).expect("load"), s);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn recent_files_keep_the_newest_first_without_duplicates_up_to_ten() {
+        let mut g = GlobalSettings::default();
+        for i in 0..12 {
+            g.add_recent(Path::new(&format!("f{i}.xml")));
+        }
+        g.add_recent(Path::new("f5.xml"));
+        let names: Vec<_> = g
+            .recent_files
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "f5.xml", "f11.xml", "f10.xml", "f9.xml", "f8.xml", "f7.xml", "f6.xml", "f4.xml",
+                "f3.xml", "f2.xml"
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_files_folder_and_window_round_trip() {
+        let dir = scratch_dir("recent");
+        let mut s = Settings::default();
+        s.global
+            .add_recent(Path::new("C:\\maps\\AutoDrive_config.xml"));
+        s.global.last_folder = Some(PathBuf::from("C:\\maps"));
+        s.global.window = Some(WindowPlace {
+            x: 10.0,
+            y: -4.0,
+            width: 1600.0,
+            height: 900.0,
+            maximized: true,
+        });
+        s.maps.insert("Marsch".to_owned(), MapSettings::default());
         let path = dir.join("settings.toml");
         save(&s, &path).expect("save");
         assert_eq!(load(&path).expect("load"), s);
