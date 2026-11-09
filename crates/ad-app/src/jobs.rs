@@ -138,6 +138,10 @@ pub enum JobResult {
         point: SavePoint,
         result: Result<PathBuf, String>,
     },
+    /// The update check's answer: the latest release, or why there is none.
+    UpdateChecked {
+        result: Result<ad_io::update::Release, String>,
+    },
     /// A `routes.xml` read for the routes window: its routes sorted by name.
     RoutesRead {
         path: PathBuf,
@@ -163,6 +167,19 @@ pub fn spawn_routes_read(
     thread::spawn(move || {
         let result = read_routes_list(&path);
         let _ = tx.send(JobResult::RoutesRead { path, result });
+        notify();
+    });
+}
+
+/// Asks `url` for the latest release on a background thread, then calls `notify`.
+pub fn spawn_update_check(
+    url: String,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        let result = ad_io::update::fetch_latest(&url);
+        let _ = tx.send(JobResult::UpdateChecked { result });
         notify();
     });
 }
@@ -879,7 +896,9 @@ pub fn apply_result(
             Err(message) => Some(message),
         },
         // Taken by `App::poll_jobs` before this is called.
-        JobResult::ZipRead { .. } | JobResult::RoutesRead { .. } => None,
+        JobResult::ZipRead { .. }
+        | JobResult::RoutesRead { .. }
+        | JobResult::UpdateChecked { .. } => None,
         // The merge runs only after its backup was written, on the document, revision and
         // marks the backup was taken of (AD-18).
         JobResult::MergeBackup { start, result } => {

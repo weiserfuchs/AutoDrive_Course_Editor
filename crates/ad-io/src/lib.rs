@@ -9,4 +9,5 @@ pub mod map_image;
 pub mod mod_zip;
 pub mod routes_xml;
 pub mod settings;
+pub mod update;
 pub mod vehicles;
