@@ -138,6 +138,38 @@ pub enum JobResult {
         point: SavePoint,
         result: Result<PathBuf, String>,
     },
+    /// A `routes.xml` read for the routes window: its routes sorted by name.
+    RoutesRead {
+        path: PathBuf,
+        result: Result<Vec<routes_xml::RouteEntry>, String>,
+    },
+}
+
+/// Reads the routes of the `routes.xml` at `path`, sorted by name ignoring case.
+pub fn read_routes_list(path: &Path) -> Result<Vec<routes_xml::RouteEntry>, String> {
+    let cannot = |e: &dyn std::fmt::Display| format!("Cannot read {}: {e}", path.display());
+    let bytes = std::fs::read(path).map_err(|e| cannot(&e))?;
+    let mut routes = routes_xml::load_list(&bytes).map_err(|e| cannot(&e))?;
+    routes.sort_by_cached_key(|r| r.name.to_lowercase());
+    Ok(routes)
+}
+
+/// Reads the `routes.xml` at `path` on a background thread, then calls `notify`.
+pub fn spawn_routes_read(
+    path: PathBuf,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        let result = read_routes_list(&path);
+        let _ = tx.send(JobResult::RoutesRead { path, result });
+        notify();
+    });
+}
+
+/// The route file a `routes.xml` entry names: `<list folder>/routes/<fileName>`.
+pub fn route_file(list: &Path, entry: &routes_xml::RouteEntry) -> PathBuf {
+    list.with_file_name("routes").join(&entry.file_name)
 }
 
 /// The document state a merge's backup was written from: the merge applies only while it
@@ -843,7 +875,7 @@ pub fn apply_result(
             Err(message) => Some(message),
         },
         // Taken by `App::poll_jobs` before this is called.
-        JobResult::ZipRead { .. } => None,
+        JobResult::ZipRead { .. } | JobResult::RoutesRead { .. } => None,
         // The merge runs only after its backup was written, on the document, revision and
         // marks the backup was taken of (AD-18).
         JobResult::MergeBackup { start, result } => {
