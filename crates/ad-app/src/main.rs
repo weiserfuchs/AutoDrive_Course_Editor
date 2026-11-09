@@ -1,5 +1,8 @@
 //! Shell layer: the eframe application.
 
+// Release builds open no console window; logs go to the log folder.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod clipboard;
 mod document;
 mod hover;
