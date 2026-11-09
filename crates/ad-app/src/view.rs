@@ -3090,7 +3090,8 @@ mod tests {
             };
             let mut out = ctx.run_ui(input, |ui| {
                 let mut app = app.borrow_mut();
-                crate::ui::top_bar(&mut app, ui, &ctx);
+                crate::ui::menu_bar(&mut app, ui, &ctx);
+                crate::ui::top_bar(&mut app, ui);
                 let selection = if let Some(group) = group_selected.get() {
                     group
                 } else if all_selected.get() {

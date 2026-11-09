@@ -85,3 +85,7 @@
 - source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-route-manager/tickets/story-a-route-document-saves-back-in-the-routeexport-format-plan.md`
   summary: Resolved the two 11.1 entries above: route autosave and merge backup write route files (11.2); the writer keeps group ids as read and does not apply the mod's "All is id 1" renumbering, which the mod applies itself on load.
   evidence: config_xml.rs `save` hands a route to `routes_xml::save`; main.rs tests `save_and_autosave_of_a_route_write_route_files_and_nothing_else`, `a_merge_on_a_route_writes_a_route_backup_first`.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-settings-ui-shell/tickets/story-a-menu-bar-carries-the-file-edit-scan-import-and-routes-commands-plan.md`
+  summary: Resolved Retro R4: File ▸ Save writes in place (enabled only while dirty), Save As asks.
+  evidence: main.rs `save`, `save_as`, test `file_save_writes_in_place_only_while_dirty`.

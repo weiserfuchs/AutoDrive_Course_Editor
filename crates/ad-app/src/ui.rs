@@ -27,133 +27,177 @@ use crate::tools::priority::PriorityTool;
 use crate::tools::rotate::RotateTool;
 use crate::tools::{Tool, ToolContext};
 use crate::view::{DragEvent, MapPx, Preview, SelectEvent, ViewHooks, ViewTransform};
-use crate::{App, Choice, Pending};
+use crate::{App, Choice};
 
-/// The top bar: Open, Save, the Import menu, the Grid toggle and the status labels.
-pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
+/// A menu item showing the shortcut of `action`; runs it when clicked.
+fn action_item(app: &mut App, ui: &mut egui::Ui, action: Action, label: &str, enabled: bool) {
+    let ctx = ui.ctx().clone();
+    let button = egui::Button::new(label).shortcut_text(input::shortcut_text(&ctx, action));
+    if ui.add_enabled(enabled, button).clicked() {
+        input::perform(app, action, &ctx);
+    }
+}
+
+/// The menu bar: File, Edit, Display, Scan and Import (R2).
+pub(crate) fn menu_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
+    egui::Panel::top("menu_bar").show(ui, |ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
+            file_menu(app, ui, ctx);
+            edit_menu(app, ui);
+            display_menu(app, ui);
+            scan_menu(app, ui);
+            import_menu(app, ui, ctx);
+        });
+    });
+}
+
+fn file_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
+    ui.menu_button("File", |ui| {
+        let idle = !app.loading && !app.saving;
+        action_item(app, ui, Action::Open, "Open…", idle);
+        if ui
+            .add_enabled(idle && !app.reading_routes, egui::Button::new("Routes…"))
+            .on_hover_text("Open a route from an AutoDrive routes.xml")
+            .clicked()
+        {
+            app.pick_routes_list(ctx);
+        }
+        ui.separator();
+        let (can_save, can_save_as) = (app.can_save(), app.can_save_as());
+        action_item(app, ui, Action::Save, "Save", can_save);
+        action_item(app, ui, Action::SaveAs, "Save As…", can_save_as);
+        ui.separator();
+        action_item(app, ui, Action::Exit, "Exit", true);
+    });
+}
+
+fn edit_menu(app: &mut App, ui: &mut egui::Ui) {
+    ui.menu_button("Edit", |ui| {
+        let editable = app.editable();
+        let (can_undo, can_redo) = app.doc.as_ref().map_or((false, false), |d| {
+            (d.history.can_undo(), d.history.can_redo())
+        });
+        action_item(app, ui, Action::Undo, "Undo", editable && can_undo);
+        action_item(app, ui, Action::Redo, "Redo", editable && can_redo);
+        ui.separator();
+        let has_doc = app.doc.is_some();
+        action_item(app, ui, Action::Cut, "Cut", editable);
+        action_item(app, ui, Action::Copy, "Copy", has_doc);
+        let can_paste = editable && app.clipboard.is_some();
+        action_item(app, ui, Action::Paste, "Paste", can_paste);
+        action_item(app, ui, Action::PasteInPlace, "Paste in place", can_paste);
+    });
+}
+
+fn display_menu(app: &mut App, ui: &mut egui::Ui) {
+    ui.menu_button("Display", |ui| {
+        ui.checkbox(&mut app.view.show_grid, "Grid");
+        ui.checkbox(&mut app.view.show_node_id, "Selected node id")
+            .on_hover_text(input::shortcut_text(ui.ctx(), Action::ToggleNodeId));
+    });
+}
+
+fn scan_menu(app: &mut App, ui: &mut egui::Ui) {
+    let has_doc = app.doc.is_some();
+    let has_marks = app.doc.as_ref().is_some_and(|d| d.overlap.is_some());
+    ui.add_enabled_ui(has_doc, |ui| {
+        ui.menu_button("Scan", |ui| {
+            if ui.button("Find overlapping nodes…").clicked() {
+                app.overlap_dialog = Some(crate::OVERLAP_DEFAULT.to_owned());
+            }
+            if ui
+                .add_enabled(has_marks, egui::Button::new("Clear overlap marks"))
+                .clicked()
+                && let Some(doc) = &mut app.doc
+            {
+                doc.clear_overlaps();
+            }
+            if ui
+                .add_enabled(
+                    app.can_merge(),
+                    egui::Button::new("Merge overlapping nodes…"),
+                )
+                .clicked()
+            {
+                app.ask_merge();
+            }
+            ui.separator();
+            for (fix, label) in [
+                (Fix::OutOfBounds, "Fix nodes outside the map…"),
+                (Fix::MissingHeights, "Fix missing node heights…"),
+            ] {
+                if ui
+                    .add_enabled(app.can_fix(fix), egui::Button::new(label))
+                    .clicked()
+                {
+                    app.ask_fix(fix);
+                }
+            }
+            ui.separator();
+            if ui.button("Check connections…").clicked() {
+                app.check_connections();
+            }
+        });
+    });
+}
+
+fn import_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
+    // Not while downloading either: the download would replace the imported image.
+    let can_import = !app.loading && !app.importing && !app.downloading_for_doc();
+    let has_doc = app.doc.is_some();
+    let has_heightmap = can_export_heightmap(app);
+    ui.add_enabled_ui(can_import, |ui| {
+        ui.menu_button("Import", |ui| {
+            if ui
+                .add_enabled(has_doc, egui::Button::new("DDS for FS19…"))
+                .clicked()
+            {
+                app.import(GameVersion::FS19, ctx);
+            }
+            if ui
+                .add_enabled(has_doc, egui::Button::new("DDS for FS22/FS25…"))
+                .clicked()
+            {
+                app.import(GameVersion::FS25, ctx);
+            }
+            if ui.button("Map mod zip…").clicked() {
+                app.import_zip(ctx);
+            }
+            ui.separator();
+            if ui
+                .add_enabled(has_doc, egui::Button::new("Load map image…"))
+                .clicked()
+            {
+                app.load_image(ctx);
+            }
+            if ui
+                .add_enabled(has_doc, egui::Button::new("Save map image…"))
+                .clicked()
+            {
+                app.save_image(ctx);
+            }
+            if ui
+                .add_enabled(has_doc, egui::Button::new("Import heightmap…"))
+                .clicked()
+            {
+                app.import_heightmap(ctx);
+            }
+            if ui
+                .add_enabled(has_heightmap, egui::Button::new("Export heightmap…"))
+                .clicked()
+            {
+                app.export_heightmap(ctx);
+            }
+        });
+    });
+}
+
+/// The tool bar: the tools and the status labels.
+pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     egui::Panel::top("top_bar").show(ui, |ui| {
         // Wraps onto further rows when the window is narrower than all the buttons, so no
         // tool or notice is cut off at the right edge.
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(!app.loading && !app.saving, egui::Button::new("Open…"))
-                .clicked()
-            {
-                app.request(Pending::Open, ctx);
-            }
-            if ui
-                .add_enabled(
-                    !app.loading && !app.saving && !app.reading_routes,
-                    egui::Button::new("Routes…"),
-                )
-                .on_hover_text("Open a route from an AutoDrive routes.xml")
-                .clicked()
-            {
-                app.pick_routes_list(ctx);
-            }
-            // Load and save never overlap: either could read or replace the same file.
-            let editable = !app.saving
-                && !app.loading
-                && app
-                    .doc
-                    .as_ref()
-                    .is_some_and(|d| d.config.read_only().is_none());
-            if ui
-                .add_enabled(editable, egui::Button::new("Save"))
-                .clicked()
-            {
-                app.save(ctx);
-            }
-            // Not while downloading either: the download would replace the imported image.
-            let can_import = !app.loading && !app.importing && !app.downloading_for_doc();
-            let has_doc = app.doc.is_some();
-            let has_heightmap = can_export_heightmap(app);
-            ui.add_enabled_ui(can_import, |ui| {
-                ui.menu_button("Import", |ui| {
-                    if ui
-                        .add_enabled(has_doc, egui::Button::new("DDS for FS19…"))
-                        .clicked()
-                    {
-                        app.import(GameVersion::FS19, ctx);
-                    }
-                    if ui
-                        .add_enabled(has_doc, egui::Button::new("DDS for FS22/FS25…"))
-                        .clicked()
-                    {
-                        app.import(GameVersion::FS25, ctx);
-                    }
-                    if ui.button("Map mod zip…").clicked() {
-                        app.import_zip(ctx);
-                    }
-                    ui.separator();
-                    if ui
-                        .add_enabled(has_doc, egui::Button::new("Load map image…"))
-                        .clicked()
-                    {
-                        app.load_image(ctx);
-                    }
-                    if ui
-                        .add_enabled(has_doc, egui::Button::new("Save map image…"))
-                        .clicked()
-                    {
-                        app.save_image(ctx);
-                    }
-                    if ui
-                        .add_enabled(has_doc, egui::Button::new("Import heightmap…"))
-                        .clicked()
-                    {
-                        app.import_heightmap(ctx);
-                    }
-                    if ui
-                        .add_enabled(has_heightmap, egui::Button::new("Export heightmap…"))
-                        .clicked()
-                    {
-                        app.export_heightmap(ctx);
-                    }
-                });
-            });
-            let has_marks = app.doc.as_ref().is_some_and(|d| d.overlap.is_some());
-            ui.add_enabled_ui(has_doc, |ui| {
-                ui.menu_button("Scan", |ui| {
-                    if ui.button("Find overlapping nodes…").clicked() {
-                        app.overlap_dialog = Some(crate::OVERLAP_DEFAULT.to_owned());
-                    }
-                    if ui
-                        .add_enabled(has_marks, egui::Button::new("Clear overlap marks"))
-                        .clicked()
-                        && let Some(doc) = &mut app.doc
-                    {
-                        doc.clear_overlaps();
-                    }
-                    if ui
-                        .add_enabled(
-                            app.can_merge(),
-                            egui::Button::new("Merge overlapping nodes…"),
-                        )
-                        .clicked()
-                    {
-                        app.ask_merge();
-                    }
-                    ui.separator();
-                    for (fix, label) in [
-                        (Fix::OutOfBounds, "Fix nodes outside the map…"),
-                        (Fix::MissingHeights, "Fix missing node heights…"),
-                    ] {
-                        if ui
-                            .add_enabled(app.can_fix(fix), egui::Button::new(label))
-                            .clicked()
-                        {
-                            app.ask_fix(fix);
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Check connections…").clicked() {
-                        app.check_connections();
-                    }
-                });
-            });
-            ui.checkbox(&mut app.view.show_grid, "Grid");
-            ui.separator();
             toolbar(app, ui);
             ui.separator();
             if app.loading {
@@ -1841,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn the_top_bar_wraps_so_every_button_stays_inside_a_narrow_window() {
+    fn the_menu_bar_and_the_wrapping_tool_bar_stay_inside_a_narrow_window() {
         let ctx = egui::Context::default();
         let mut app = app("<version>3</version>");
         let width = 800.0;
@@ -1855,7 +1899,10 @@ mod tests {
                 time: Some(ctx.input(|i| i.time) + 0.016),
                 ..Default::default()
             };
-            let mut out = ctx.run_ui(input, |ui| top_bar(&mut app, ui, &ctx.clone()));
+            let mut out = ctx.run_ui(input, |ui| {
+                menu_bar(&mut app, ui, &ctx.clone());
+                top_bar(&mut app, ui);
+            });
             out.textures_delta.clear();
             texts = out
                 .shapes
@@ -1866,7 +1913,17 @@ mod tests {
                 })
                 .collect();
         }
-        for name in ["Open…", "Routes…", "Node", "Delete marker", "Groups"] {
+        let names = [
+            "File",
+            "Edit",
+            "Display",
+            "Scan",
+            "Import",
+            "Node",
+            "Delete marker",
+            "Groups",
+        ];
+        for name in names {
             let (_, x) = texts
                 .iter()
                 .find(|(t, _)| t == name)

@@ -281,7 +281,8 @@ impl App {
         match choice {
             // The action continues only after this save has succeeded (see `resume`).
             Choice::Save => {
-                if self.save(ctx) {
+                let ctx = ctx.clone();
+                if self.save(move || ctx.request_repaint()) {
                     self.pending = Some(action);
                 }
             }
@@ -576,6 +577,32 @@ impl App {
         Some(end - now)
     }
 
+    /// Runs a File action, which needs the egui context for its dialogs and the window.
+    /// Returns false for any other action. Each does nothing while it is not available.
+    fn run_file(&mut self, action: Action, ctx: &egui::Context) -> bool {
+        match action {
+            Action::Open => {
+                if !self.loading && !self.saving {
+                    self.request(Pending::Open, ctx);
+                }
+            }
+            Action::Save => {
+                if self.can_save() {
+                    let ctx = ctx.clone();
+                    self.save(move || ctx.request_repaint());
+                }
+            }
+            Action::SaveAs => {
+                if self.can_save_as() {
+                    self.save_as(ctx);
+                }
+            }
+            Action::Exit => self.request(Pending::Close, ctx),
+            _ => return false,
+        }
+        true
+    }
+
     /// Runs a toolbar or shortcut action.
     fn run(&mut self, action: Action) {
         match action {
@@ -678,6 +705,8 @@ impl App {
             | Action::AddMarker
             | Action::EditMarker
             | Action::DeleteMarker => {}
+            // Run by `run_file`, which has the egui context.
+            Action::Open | Action::Save | Action::SaveAs | Action::Exit => {}
         }
     }
 
@@ -1351,9 +1380,28 @@ impl App {
         );
     }
 
-    /// Asks for a target and starts the save. Returns false when no save started.
-    fn save(&mut self, ctx: &egui::Context) -> bool {
-        let Some(doc) = &mut self.doc else {
+    /// Whether File ▸ Save may run: an editable document with unsaved changes, and no load
+    /// or save running (either could read or replace the same file).
+    fn can_save(&self) -> bool {
+        !self.saving && !self.loading && self.editable() && self.dirty()
+    }
+
+    /// Whether File ▸ Save As may run: an editable document, and no load or save running.
+    fn can_save_as(&self) -> bool {
+        !self.saving && !self.loading && self.editable()
+    }
+
+    /// Saves to the document's own path without asking. Returns false when no save started.
+    fn save(&mut self, notify: impl FnOnce() + Send + 'static) -> bool {
+        let Some(target) = self.doc.as_ref().map(|d| d.path.clone()) else {
+            return false;
+        };
+        self.start_save(target, notify)
+    }
+
+    /// Asks for a target and saves there. Returns false when no save started.
+    fn save_as(&mut self, ctx: &egui::Context) -> bool {
+        let Some(doc) = &self.doc else {
             return false;
         };
         if doc.config.read_only().is_some() {
@@ -1369,8 +1417,19 @@ impl App {
         let Some(target) = dialog.save_file() else {
             return false;
         };
-        self.saving = true;
         let ctx = ctx.clone();
+        self.start_save(target, move || ctx.request_repaint())
+    }
+
+    /// Starts the save of the document to `target`; not for a read-only document.
+    fn start_save(&mut self, target: PathBuf, notify: impl FnOnce() + Send + 'static) -> bool {
+        let Some(doc) = &self.doc else {
+            return false;
+        };
+        if doc.config.read_only().is_some() {
+            return false;
+        }
+        self.saving = true;
         jobs::spawn_save(
             doc.config.clone(),
             jobs::vehicles_to_patch(doc, &target),
@@ -1378,7 +1437,7 @@ impl App {
             doc.history.save_point(),
             target,
             self.tx.clone(),
-            move || ctx.request_repaint(),
+            notify,
         );
         true
     }
@@ -1421,7 +1480,8 @@ impl eframe::App for App {
             self.title = title;
         }
         input::handle_shortcuts(self, &ctx);
-        ui::top_bar(self, ui, &ctx);
+        ui::menu_bar(self, ui, &ctx);
+        ui::top_bar(self, ui);
         egui::CentralPanel::default().show(ui, |ui| ui::map_panel(self, ui));
         ui::curve_panel(self, &ctx);
         ui::error_window(self, &ctx);
@@ -4973,6 +5033,64 @@ mod tests {
         assert!(tick(&mut app, t0, 22 * MINUTE).0);
         assert!(autosave_file(&path, 2).exists());
         cleanup(&path);
+    }
+
+    /// Polls until the save started by the app has finished.
+    fn wait_for_save(app: &mut App) {
+        for _ in 0..3000 {
+            app.poll_jobs();
+            if !app.saving {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("save did not finish");
+    }
+
+    #[test]
+    fn file_save_writes_in_place_only_while_dirty() {
+        let (mut app, path, _) = autosave_case("save_in_place", "<version>3</version>", {
+            let mut settings = Settings::default();
+            settings.global.autosave = false;
+            settings
+        });
+        let ctx = egui::Context::default();
+        // Clean: Save is off and does nothing; Save As stays available.
+        assert!(!app.can_save() && app.can_save_as());
+        assert!(app.run_file(Action::Save, &ctx));
+        assert!(!app.saving && !path.exists());
+        edit(&mut app);
+        assert!(app.can_save());
+        assert!(app.run_file(Action::Save, &ctx));
+        assert!(app.saving, "no dialog: the save starts at once");
+        wait_for_save(&mut app);
+        assert_eq!(app.error, None);
+        assert!(!app.dirty() && !app.can_save());
+        let saved = config_xml::load(&std::fs::read(&path).expect("written")).expect("loads");
+        assert_eq!(saved.network.len(), 2);
+        // Other actions are not File actions.
+        assert!(!app.run_file(Action::ToggleSnap, &ctx));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn open_and_exit_ask_first_while_dirty_and_a_read_only_document_cannot_be_saved() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        edit(&mut app);
+        app.run_file(Action::Exit, &ctx);
+        assert_eq!(app.prompt, Some(Pending::Close));
+        app.choose(Choice::Cancel, &ctx);
+        app.run_file(Action::Open, &ctx);
+        assert_eq!(app.prompt, Some(Pending::Open));
+        app.choose(Choice::Cancel, &ctx);
+        assert!(!app.loading && !app.allow_close);
+        load(&mut app, "<markerID>1</markerID>");
+        app.doc.as_mut().expect("doc").history.mark_unsaved();
+        assert!(!app.can_save() && !app.can_save_as());
+        app.run_file(Action::Save, &ctx);
+        assert!(!app.saving);
     }
 
     #[test]

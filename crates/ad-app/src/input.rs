@@ -42,11 +42,19 @@ pub(crate) enum Action {
     Paste,
     /// Pastes the clipboard at the place it was copied from.
     PasteInPlace,
+    /// File ▸ Open…, after the unsaved-changes prompt.
+    Open,
+    /// File ▸ Save: writes to the document's own path.
+    Save,
+    /// File ▸ Save As…: asks for the target.
+    SaveAs,
+    /// File ▸ Exit, after the unsaved-changes prompt.
+    Exit,
 }
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 23] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 27] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -142,6 +150,22 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 23] = [
         Action::PasteInPlace,
         KeyboardShortcut::new(Modifiers::SHIFT, Key::V),
     ),
+    (
+        Action::SaveAs,
+        KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S),
+    ),
+    (
+        Action::Save,
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::S),
+    ),
+    (
+        Action::Open,
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::O),
+    ),
+    (
+        Action::Exit,
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::Q),
+    ),
 ];
 
 /// Whether grid snap applies this frame: the toggle, inverted while Shift is held.
@@ -206,12 +230,28 @@ pub(crate) fn handle_shortcuts(app: &mut App, ctx: &egui::Context) {
         return;
     }
     for action in pressed(ctx) {
-        app.run(action);
-        // Text on the OS clipboard, so the next Ctrl+V reaches the app as a paste event.
-        if let Some(text) = app.copied.take() {
-            ctx.copy_text(text);
-        }
+        perform(app, action, ctx);
     }
+}
+
+/// Runs `action` from a shortcut or a menu item.
+pub(crate) fn perform(app: &mut App, action: Action, ctx: &egui::Context) {
+    if !app.run_file(action, ctx) {
+        app.run(action);
+    }
+    // Text on the OS clipboard, so the next Ctrl+V reaches the app as a paste event.
+    if let Some(text) = app.copied.take() {
+        ctx.copy_text(text);
+    }
+}
+
+/// The first shortcut of `action` as egui writes it (e.g. "Ctrl+S"), for menu items.
+pub(crate) fn shortcut_text(ctx: &egui::Context, action: Action) -> String {
+    SHORTCUTS
+        .iter()
+        .find(|(a, _)| *a == action)
+        .map(|(_, shortcut)| ctx.format_shortcut(shortcut))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -239,6 +279,16 @@ mod tests {
         // No renderer here, so there is nothing to upload.
         out.textures_delta.clear();
         actions
+    }
+
+    #[test]
+    fn file_shortcuts_use_ctrl_and_leave_the_plain_keys_alone() {
+        assert_eq!(press(CTRL, Key::O), [Action::Open]);
+        assert_eq!(press(CTRL, Key::S), [Action::Save]);
+        assert_eq!(press(CTRL.plus(Modifiers::SHIFT), Key::S), [Action::SaveAs]);
+        assert_eq!(press(CTRL, Key::Q), [Action::Exit]);
+        assert_eq!(press(Modifiers::NONE, Key::S), [Action::ToggleSnap]);
+        assert!(press(Modifiers::NONE, Key::O).is_empty());
     }
 
     #[test]
@@ -327,8 +377,8 @@ mod tests {
         assert!(press(Modifiers::ALT, Key::N).is_empty());
         assert!(press(CTRL, Key::N).is_empty());
         assert!(press(Modifiers::SHIFT, Key::F4).is_empty());
-        // Ctrl+S stays free for saving.
-        assert!(press(CTRL, Key::S).is_empty());
+        // Ctrl+S saves; it never toggles snap.
+        assert_eq!(press(CTRL, Key::S), [Action::Save]);
         assert!(press(Modifiers::SHIFT, Key::M).is_empty());
         assert!(press(CTRL, Key::R).is_empty());
         assert!(press(CTRL, Key::Delete).is_empty());
