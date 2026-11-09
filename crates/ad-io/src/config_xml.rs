@@ -43,8 +43,6 @@ pub enum ConfigError {
     Network(#[from] NetworkError),
     #[error("config is read-only: {0}")]
     ReadOnly(ReadOnlyReason),
-    #[error("a route is never written as a config")]
-    Route,
     #[error("cannot write {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -124,7 +122,7 @@ pub struct LoadedConfig {
 
 impl LoadedConfig {
     /// A document of a route-manager file: its network, group list and the map name from
-    /// `routes.xml`. It is editable, has no game version and is never written by `save`.
+    /// `routes.xml`. It is editable, has no game version, and `save` writes it as a route.
     pub fn for_route(route: crate::routes_xml::LoadedRoute, map_name: Option<String>) -> Self {
         Self {
             original: Vec::new(),
@@ -648,10 +646,11 @@ fn mapmarker_block(cfg: &LoadedConfig, file_ids: &SaveIdMap) -> String {
     out
 }
 
-/// Regenerates the two modelled blocks and splices them into the original bytes.
+/// Regenerates the two modelled blocks and splices them into the original bytes; a route
+/// document is written whole in the `routeExport` format instead.
 pub fn save(cfg: &LoadedConfig) -> Result<Vec<u8>, ConfigError> {
-    if cfg.is_route() {
-        return Err(ConfigError::Route);
+    if let Some(groups) = cfg.route_groups() {
+        return Ok(crate::routes_xml::save(&cfg.network, groups));
     }
     if let Some(reason) = &cfg.read_only {
         return Err(ConfigError::ReadOnly(reason.clone()));
@@ -899,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn a_route_is_never_written_as_a_config() {
+    fn a_route_document_is_written_as_a_route() {
         let dir = scratch_dir("route");
         let target = dir.join("route.xml");
         let route = crate::routes_xml::LoadedRoute {
@@ -910,8 +909,10 @@ mod tests {
         let cfg = LoadedConfig::for_route(route, Some("M".to_owned()));
         assert!(cfg.is_route() && cfg.read_only().is_none());
         assert_eq!(cfg.map_name(), Some("M"));
-        assert!(matches!(save_to(&cfg, &target), Err(ConfigError::Route)));
-        assert_eq!(std::fs::read_dir(&dir).expect("ls").count(), 0);
+        save_to(&cfg, &target).expect("saves");
+        let back = crate::routes_xml::load(&std::fs::read(&target).expect("read")).expect("route");
+        assert_eq!(back.groups, vec![("All".to_owned(), 1)]);
+        assert!(load(&std::fs::read(&target).expect("read")).is_err());
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

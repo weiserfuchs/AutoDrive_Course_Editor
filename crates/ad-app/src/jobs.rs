@@ -265,13 +265,6 @@ pub const NOT_SAVED: &str = "Map image loaded, not saved — use Save map image 
 /// How the load's notice for a route without a map name starts; the reason follows.
 pub const NO_ROUTE_MAP_NAME: &str = "No map name for this route";
 
-/// The notice of Save on a route document (story 11.2 adds the route writer).
-pub const ROUTE_SAVE_LATER: &str = "Saving routes comes with story 11.2";
-
-/// The notice of a merge on a route document: its backup needs the route writer (11.2).
-pub const ROUTE_MERGE_NO_BACKUP: &str =
-    "Not merged: a merge needs a backup, and route backups come with story 11.2";
-
 /// How the load's notice for a missing heightmap starts; an attached heightmap drops it.
 pub const NO_HEIGHTMAP: &str = "No heightmap found";
 
@@ -910,96 +903,17 @@ pub fn apply_result(
     }
 }
 
-/// `network` as a `routeExport` file the way the mod's `writeGraphToXml` writes it (2
-/// decimals, ids 1-based by order), with the groups of its markers (first use order, "All"
-/// first with id 1 when a marker uses it). Test only: story 11.2 adds the real writer.
+/// `network` as a `routeExport` file written by the route writer, with "All" first as id 1
+/// when a marker uses it (the other groups follow in marker order). Test only.
 #[cfg(test)]
-pub(crate) fn test_route_text(network: &ad_core::network::Network) -> String {
-    let esc = |s: &str| {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
+pub(crate) fn test_route_text(network: &ad_core::network::Network) -> Vec<u8> {
+    let all = network.markers().iter().any(|m| m.group == "All");
+    let groups = if all {
+        vec![("All".to_owned(), 1)]
+    } else {
+        Vec::new()
     };
-    let index: std::collections::HashMap<NodeId, usize> = network
-        .order()
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (*id, i + 1))
-        .collect();
-    let nodes: Vec<_> = network
-        .order()
-        .iter()
-        .filter_map(|id| network.node(*id))
-        .collect();
-    let join = |f: &dyn Fn(&ad_core::network::Node) -> String| {
-        nodes.iter().map(|n| f(n)).collect::<Vec<_>>().join(";")
-    };
-    let links = |list: &[NodeId]| {
-        let ids: Vec<String> = list
-            .iter()
-            .filter_map(|t| index.get(t).map(usize::to_string))
-            .collect();
-        if ids.is_empty() {
-            "-1".to_owned()
-        } else {
-            ids.join(",")
-        }
-    };
-    let mut groups: Vec<&str> = Vec::new();
-    for m in network.markers() {
-        if !groups.contains(&m.group.as_str()) {
-            groups.push(&m.group);
-        }
-    }
-    if let Some(at) = groups.iter().position(|g| *g == "All") {
-        groups.remove(at);
-        groups.insert(0, "All");
-    }
-    let mut out = String::from(
-        "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<routeExport>\n",
-    );
-    out.push_str(&format!("    <waypoints c=\"{}\">\n", nodes.len()));
-    out.push_str(&format!(
-        "        <x>{}</x>\n",
-        join(&|n| format!("{:.2}", n.x))
-    ));
-    out.push_str(&format!(
-        "        <y>{}</y>\n",
-        join(&|n| format!("{:.2}", n.y))
-    ));
-    out.push_str(&format!(
-        "        <z>{}</z>\n",
-        join(&|n| format!("{:.2}", n.z))
-    ));
-    out.push_str(&format!(
-        "        <out>{}</out>\n",
-        join(&|n| links(n.outgoing()))
-    ));
-    out.push_str(&format!(
-        "        <in>{}</in>\n",
-        join(&|n| links(n.incoming()))
-    ));
-    out.push_str(&format!(
-        "        <flags>{}</flags>\n",
-        join(&|n| n.flag.0.to_string())
-    ));
-    out.push_str("    </waypoints>\n    <markers>\n");
-    for m in network.markers() {
-        if let Some(i) = index.get(&m.node) {
-            out.push_str(&format!(
-                "        <m i=\"{i}\" n=\"{}\" g=\"{}\"/>\n",
-                esc(&m.name),
-                esc(&m.group)
-            ));
-        }
-    }
-    out.push_str("    </markers>\n    <groups>\n");
-    for (i, g) in groups.iter().enumerate() {
-        out.push_str(&format!("        <g n=\"{}\" i=\"{}\"/>\n", esc(g), i + 1));
-    }
-    out.push_str("    </groups>\n</routeExport>\n");
-    out
+    routes_xml::save(network, &groups)
 }
 
 /// Writes `<dir>/routesManager/routes.xml`, listing `TestRoute0000001.xml` with `map`, and
@@ -2038,11 +1952,11 @@ mod route_tests {
         )
         .expect("write");
         let doc = open(&config);
-        assert!(!doc.is_route());
+        assert!(!doc.config.is_route());
         assert_eq!(doc.config.network.len(), 1);
         let route = test_route_manager(&dir, &two_nodes(), "M").expect("route");
         let doc = open(&route);
-        assert!(doc.is_route() && doc.editable());
+        assert!(doc.config.is_route() && doc.editable());
         assert_eq!(doc.config.network.len(), 2);
         assert_eq!(doc.config.route_groups(), Some(&[][..]));
         // A broken route fails like a broken config, naming the file and the element.
@@ -2091,7 +2005,7 @@ mod route_tests {
         let route = test_route_manager(&dir, &source.network, "NF_Marsch_4fach").expect("route");
         let doc = open(&route);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(doc.is_route() && doc.editable());
+        assert!(doc.config.is_route() && doc.editable());
         assert_eq!(doc.config.map_name(), Some("NF_Marsch_4fach"));
         assert_eq!(doc.map.name.as_deref(), Some("NF_Marsch_4fach"));
         let (a, b) = (&source.network, &doc.config.network);

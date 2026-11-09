@@ -1,10 +1,11 @@
-//! Loading of AutoDrive route-manager files: a route (`routeExport`) and the routes list
-//! (`routes.xml`, root `autoDriveRoutesManager`), as the mod's `readGraphFromXml` and
-//! `RoutesManager` read them.
+//! AutoDrive route-manager files: a route (`routeExport`), loaded and saved as the mod's
+//! `readGraphFromXml` and `writeGraphToXml` do, and the routes list (`routes.xml`, root
+//! `autoDriveRoutesManager`), read as `RoutesManager` does.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use ad_core::network::{LoadedNode, Marker, Network, NetworkError, NodeFlag};
+use ad_core::network::{LoadedNode, Marker, Network, NetworkError, Node, NodeFlag, NodeId};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use thiserror::Error;
@@ -256,6 +257,91 @@ fn adjacency(waypoints: &Elem, element: &str, count: usize) -> Result<Vec<Vec<us
         .collect()
 }
 
+fn escape_attr(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+}
+
+/// The groups a route save writes: `groups` as read (names and ids kept, also when no
+/// marker uses them), then each marker group not in it, in marker order, with fresh ids
+/// after the highest one.
+pub fn groups_to_write(network: &Network, groups: &[(String, u32)]) -> Vec<(String, u32)> {
+    let mut out = groups.to_vec();
+    let mut next = groups.iter().map(|(_, id)| *id).max().unwrap_or(0);
+    for m in network.markers() {
+        if !out.iter().any(|(name, _)| *name == m.group) {
+            next += 1;
+            out.push((m.group.clone(), next));
+        }
+    }
+    out
+}
+
+/// Writes `network` as a `routeExport` file the way the mod's `writeGraphToXml` does:
+/// `waypoints#c`; `x`, `y`, `z` with 2 decimals, `out` and `in` as comma lists (`-1` for
+/// none) and `flags`, each joined by `;`; markers with the 1-based node id, name and
+/// group; the groups of `groups_to_write`. Node ids follow `Network::order` (AD-2).
+pub fn save(network: &Network, groups: &[(String, u32)]) -> Vec<u8> {
+    let ids = crate::config_xml::SaveIdMap::from_network(network);
+    let nodes: Vec<_> = network
+        .order()
+        .iter()
+        .filter_map(|id| network.node(*id))
+        .collect();
+    let join =
+        |f: &dyn Fn(&Node) -> String| nodes.iter().map(|n| f(n)).collect::<Vec<_>>().join(";");
+    let links = |list: &[NodeId]| {
+        let list: Vec<String> = list
+            .iter()
+            .filter_map(|t| ids.get(*t).map(|i| i.to_string()))
+            .collect();
+        if list.is_empty() {
+            "-1".to_owned()
+        } else {
+            list.join(",")
+        }
+    };
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<routeExport>\n",
+    );
+    let _ = writeln!(out, "    <waypoints c=\"{}\">", nodes.len());
+    let _ = writeln!(out, "        <x>{}</x>", join(&|n| format!("{:.2}", n.x)));
+    let _ = writeln!(out, "        <y>{}</y>", join(&|n| format!("{:.2}", n.y)));
+    let _ = writeln!(out, "        <z>{}</z>", join(&|n| format!("{:.2}", n.z)));
+    let _ = writeln!(out, "        <out>{}</out>", join(&|n| links(n.outgoing())));
+    let _ = writeln!(out, "        <in>{}</in>", join(&|n| links(n.incoming())));
+    let _ = writeln!(
+        out,
+        "        <flags>{}</flags>",
+        join(&|n| n.flag.0.to_string())
+    );
+    out.push_str("    </waypoints>\n    <markers>\n");
+    for m in network.markers() {
+        if let Some(i) = ids.get(m.node) {
+            let _ = write!(out, "        <m i=\"{i}\" n=\"");
+            escape_attr(&m.name, &mut out);
+            out.push_str("\" g=\"");
+            escape_attr(&m.group, &mut out);
+            out.push_str("\"/>\n");
+        }
+    }
+    out.push_str("    </markers>\n    <groups>\n");
+    for (name, id) in groups_to_write(network, groups) {
+        out.push_str("        <g n=\"");
+        escape_attr(&name, &mut out);
+        let _ = writeln!(out, "\" i=\"{id}\"/>");
+    }
+    out.push_str("    </groups>\n</routeExport>\n");
+    out.into_bytes()
+}
+
 /// Parses a `routeExport` file (the mod's `readGraphFromXml`). Flags 2 and 4 are reset to 0
 /// as for FS22/FS25 configs (AD-11); a missing or empty `<flags>` means all 0.
 pub fn load(bytes: &[u8]) -> Result<LoadedRoute, RouteError> {
@@ -464,6 +550,103 @@ mod tests {
         assert!(markers[0].parked_vehicles.is_empty());
         assert_eq!(r.groups, [("All".to_owned(), 1), ("Felder".to_owned(), 2)]);
         assert!(!r.flags_reset);
+    }
+
+    /// Nodes (position, flag, links by order index) and markers of `net`, for comparing.
+    type Shape = (
+        Vec<(f64, f64, f64, u8, Vec<usize>, Vec<usize>)>,
+        Vec<(usize, String, String)>,
+    );
+
+    fn shape(net: &Network) -> Shape {
+        let order = net.order();
+        let at = |id: &NodeId| order.iter().position(|o| o == id).expect("in order");
+        let nodes = order
+            .iter()
+            .map(|id| {
+                let n = net.node(*id).expect("node");
+                let links = |l: &[NodeId]| l.iter().map(at).collect::<Vec<_>>();
+                (
+                    n.x,
+                    n.y,
+                    n.z,
+                    n.flag.0,
+                    links(n.outgoing()),
+                    links(n.incoming()),
+                )
+            })
+            .collect();
+        let markers = net
+            .markers()
+            .iter()
+            .map(|m| (at(&m.node), m.name.clone(), m.group.clone()))
+            .collect();
+        (nodes, markers)
+    }
+
+    #[test]
+    fn save_then_load_equals_the_edited_model() {
+        let mut r = load(three("<flags>0;1;0</flags>").as_bytes()).expect("loads");
+        let ids = r.network.order().to_vec();
+        r.network
+            .move_node(ids[0], 10.004, -1.5, 7.0)
+            .expect("move");
+        r.network.remove_node(ids[2]).expect("remove");
+        let added = r.network.add_node(-4.0, 3.0, 2.0, NodeFlag(1));
+        r.network
+            .connect(ids[1], added, ad_core::network::ConnectionShape::Dual)
+            .expect("connect");
+        r.network
+            .set_marker(added, "Say \"<hi>\"".to_owned(), "Höfe & Co".to_owned())
+            .expect("marker");
+        let text = save(&r.network, &r.groups);
+        let back = load(&text).expect("loads back");
+        let (mut want_nodes, want_markers) = shape(&r.network);
+        want_nodes[0].0 = 10.0;
+        assert_eq!(shape(&back.network), (want_nodes, want_markers));
+        assert_eq!(
+            back.groups,
+            [
+                ("All".to_owned(), 1),
+                ("Felder".to_owned(), 2),
+                ("Höfe & Co".to_owned(), 3)
+            ]
+        );
+        let text = String::from_utf8(text).expect("utf-8");
+        assert!(text.contains("<x>10.00;2.50;-4.00</x>"), "{text}");
+        assert!(text.contains("<out>2;1,3;2</out>"), "{text}");
+        assert!(text.contains("<flags>0;1;1</flags>"), "{text}");
+        assert!(text.contains("n=\"Say &quot;&lt;hi&gt;&quot;\""), "{text}");
+    }
+
+    #[test]
+    fn groups_without_markers_are_kept_and_new_ones_get_fresh_ids() {
+        let mut r = load(three("").as_bytes()).expect("loads");
+        r.groups = vec![
+            ("Felder".to_owned(), 2),
+            ("Leer".to_owned(), 7),
+            ("All".to_owned(), 1),
+        ];
+        let ids = r.network.order().to_vec();
+        r.network
+            .set_marker(ids[0], "A".to_owned(), "Neu".to_owned())
+            .expect("marker");
+        r.network
+            .set_marker(ids[2], "B".to_owned(), "Neu".to_owned())
+            .expect("marker");
+        let back = load(&save(&r.network, &r.groups)).expect("loads back");
+        assert_eq!(
+            back.groups,
+            [
+                ("Felder".to_owned(), 2),
+                ("Leer".to_owned(), 7),
+                ("All".to_owned(), 1),
+                ("Neu".to_owned(), 8)
+            ]
+        );
+        let empty = save(&Network::default(), &[]);
+        let back = load(&empty).expect("an empty route loads");
+        assert!(back.network.is_empty() && back.groups.is_empty());
     }
 
     #[test]
