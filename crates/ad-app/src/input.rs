@@ -51,11 +51,25 @@ pub(crate) enum Action {
     SaveAs,
     /// File ▸ Exit, after the unsaved-changes prompt.
     Exit,
+    /// Display: marker names on or off (Java F1).
+    ToggleMarkerNames,
+    /// Display: marker icons on or off (Java F2).
+    ToggleMarkerIcons,
+    /// Display: parking icons on or off (Java F3).
+    ToggleParkingIcons,
+    /// Display: the grid on or off (Java G).
+    ToggleGrid,
+    /// Display: the map's node size 0.1 bigger (Java numpad +).
+    NodeSizeUp,
+    /// Display: the map's node size 0.1 smaller (Java numpad -).
+    NodeSizeDown,
+    /// Centres the view on the hovered node (Java Shift+F).
+    FocusHovered,
 }
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 27] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 34] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -167,6 +181,34 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 27] = [
         Action::Exit,
         KeyboardShortcut::new(Modifiers::COMMAND, Key::Q),
     ),
+    (
+        Action::ToggleMarkerNames,
+        KeyboardShortcut::new(Modifiers::NONE, Key::F1),
+    ),
+    (
+        Action::ToggleMarkerIcons,
+        KeyboardShortcut::new(Modifiers::NONE, Key::F2),
+    ),
+    (
+        Action::ToggleParkingIcons,
+        KeyboardShortcut::new(Modifiers::NONE, Key::F3),
+    ),
+    (
+        Action::ToggleGrid,
+        KeyboardShortcut::new(Modifiers::NONE, Key::G),
+    ),
+    (
+        Action::NodeSizeUp,
+        KeyboardShortcut::new(Modifiers::NONE, Key::Plus),
+    ),
+    (
+        Action::NodeSizeDown,
+        KeyboardShortcut::new(Modifiers::NONE, Key::Minus),
+    ),
+    (
+        Action::FocusHovered,
+        KeyboardShortcut::new(Modifiers::SHIFT, Key::F),
+    ),
 ];
 
 /// Whether grid snap applies this frame: the toggle, inverted while Shift is held.
@@ -237,7 +279,7 @@ pub(crate) fn handle_shortcuts(app: &mut App, ctx: &egui::Context) {
 
 /// The actions the Key bindings tab lists: (action, settings id, label). Copy, Cut and
 /// Paste are not listed: Ctrl+C, Ctrl+X and Ctrl+V reach the app as clipboard events.
-pub(crate) const CONFIGURABLE: [(Action, &str, &str); 23] = [
+pub(crate) const CONFIGURABLE: [(Action, &str, &str); 30] = [
     (Action::Open, "open", "Open…"),
     (Action::Save, "save", "Save"),
     (Action::SaveAs, "save_as", "Save As…"),
@@ -277,6 +319,29 @@ pub(crate) const CONFIGURABLE: [(Action, &str, &str); 23] = [
     (Action::AddMarker, "add_marker", "Add marker"),
     (Action::EditMarker, "edit_marker", "Edit marker"),
     (Action::DeleteMarker, "delete_marker", "Delete marker"),
+    (
+        Action::ToggleMarkerNames,
+        "toggle_marker_names",
+        "Marker names",
+    ),
+    (
+        Action::ToggleMarkerIcons,
+        "toggle_marker_icons",
+        "Marker icons",
+    ),
+    (
+        Action::ToggleParkingIcons,
+        "toggle_parking_icons",
+        "Parking icons",
+    ),
+    (Action::ToggleGrid, "toggle_grid", "Grid"),
+    (Action::NodeSizeUp, "node_size_up", "Node size bigger"),
+    (Action::NodeSizeDown, "node_size_down", "Node size smaller"),
+    (
+        Action::FocusHovered,
+        "focus_hovered",
+        "Centre on hovered node",
+    ),
 ];
 
 /// The settings id of `action`, if the Key bindings tab lists it.
@@ -520,6 +585,21 @@ mod tests {
             Some(Action::Save)
         );
         assert_eq!(bound_elsewhere(&table, &save, Action::Save), None);
+    }
+
+    #[test]
+    fn display_shortcuts_use_the_java_keys() {
+        assert_eq!(press(Modifiers::NONE, Key::F1), [Action::ToggleMarkerNames]);
+        assert_eq!(press(Modifiers::NONE, Key::F2), [Action::ToggleMarkerIcons]);
+        assert_eq!(
+            press(Modifiers::NONE, Key::F3),
+            [Action::ToggleParkingIcons]
+        );
+        assert_eq!(press(Modifiers::NONE, Key::G), [Action::ToggleGrid]);
+        assert_eq!(press(Modifiers::NONE, Key::Plus), [Action::NodeSizeUp]);
+        assert_eq!(press(Modifiers::NONE, Key::Minus), [Action::NodeSizeDown]);
+        assert_eq!(press(Modifiers::SHIFT, Key::F), [Action::FocusHovered]);
+        assert_eq!(press(Modifiers::NONE, Key::F), [Action::FlipTool]);
     }
 
     #[test]

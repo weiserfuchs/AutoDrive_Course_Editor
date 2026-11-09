@@ -170,6 +170,10 @@ struct App {
     theme_applied: Option<ad_io::settings::Theme>,
     /// The settings window's tab, while it is shown.
     settings_window: Option<ui::SettingsTab>,
+    /// The Go to node id dialog's text and its last refusal, while it is shown.
+    goto_dialog: Option<(String, Option<String>)>,
+    /// The Map info window is shown.
+    map_info: bool,
     /// The action that continues once the save started from the prompt has finished.
     pending: Option<Pending>,
     /// The action whose unsaved-changes prompt is shown.
@@ -215,6 +219,10 @@ impl App {
     fn new(settings: Settings) -> Self {
         let mut view = MapView::default();
         view.show_grid = settings.global.show_grid;
+        view.show_marker_names = settings.global.show_marker_names;
+        view.show_marker_icons = settings.global.show_marker_icons;
+        view.show_parking_icons = settings.global.show_parking_icons;
+        view.show_node_id = settings.global.show_node_id;
         let (snap, continuous, lasso) = (
             settings.global.snap,
             settings.global.continuous,
@@ -252,6 +260,8 @@ impl App {
             bindings,
             capturing: None,
             settings_window: None,
+            goto_dialog: None,
+            map_info: false,
             pending: None,
             prompt: None,
             location: None,
@@ -283,6 +293,10 @@ impl App {
     fn sync_settings(&mut self) {
         let global = &mut self.settings.global;
         global.show_grid = self.view.show_grid;
+        global.show_marker_names = self.view.show_marker_names;
+        global.show_marker_icons = self.view.show_marker_icons;
+        global.show_parking_icons = self.view.show_parking_icons;
+        global.show_node_id = self.view.show_node_id;
         global.snap = self.snap;
         global.continuous = self.continuous;
         global.lasso = self.lasso;
@@ -614,6 +628,7 @@ impl App {
             || self.groups.is_some()
             || self.routes.is_some()
             || self.settings_window.is_some()
+            || self.goto_dialog.is_some()
             || self.overlap_dialog.is_some()
             || self.merge_prompt.is_some()
             || self.fix_prompt.is_some()
@@ -724,9 +739,94 @@ impl App {
         true
     }
 
+    /// Writes the open map's scale, node size and grid into its `[maps.<name>]` entry, so a
+    /// change made in the Display menu is kept (AD-14).
+    fn store_map_settings(&mut self) {
+        let Some(map) = self.doc.as_ref().map(|d| &d.map) else {
+            return;
+        };
+        let Some(name) = &map.name else {
+            return;
+        };
+        let entry = self.settings.maps.entry(name.clone()).or_default();
+        entry.scale = map.geometry.scale.round().max(1.0) as u32;
+        entry.node_size = map.node_size;
+        (entry.grid_x, entry.grid_y) = map.grid;
+    }
+
+    /// Whether the open document has a map name, so per-map values can be kept.
+    fn has_map_name(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| d.map.name.is_some())
+    }
+
+    /// Display ▸ Map scale: the open map is `scale` × 2 km wide (Java 1 to 24).
+    fn set_map_scale(&mut self, scale: u32) {
+        if let Some(doc) = &mut self.doc {
+            doc.map.geometry = ad_core::geometry::MapGeometry::new(f64::from(scale.clamp(1, 24)));
+            self.store_map_settings();
+        }
+    }
+
+    /// Changes the open map's node size by `delta`, to one decimal, at least the minimum.
+    fn change_node_size(&mut self, delta: f64) {
+        if let Some(doc) = &mut self.doc {
+            let size = ((doc.map.node_size + delta) * 10.0).round() / 10.0;
+            doc.map.node_size = size.max(ad_core::map_context::MIN_NODE_SIZE);
+            self.store_map_settings();
+        }
+    }
+
+    /// Centres the view on `id`; nothing for a node that is gone.
+    fn centre_on_node(&mut self, id: ad_core::network::NodeId) {
+        let Some(doc) = &self.doc else {
+            return;
+        };
+        if let Some(n) = doc.config.network.node(id) {
+            let at = doc.map.geometry.to_map(n.x, n.z);
+            self.view.centre_on(at);
+        }
+    }
+
+    /// Display ▸ Go to node id: centres the view on the node with that file id (1-based, as
+    /// saved). Returns why not for an id that is no number or no node.
+    fn go_to_node(&mut self, text: &str) -> Result<(), String> {
+        let order = self
+            .doc
+            .as_ref()
+            .map_or(&[][..], |d| d.config.network.order());
+        let n: usize = text
+            .trim()
+            .parse()
+            .map_err(|_| format!("{:?} is no node id", text.trim()))?;
+        let id = n
+            .checked_sub(1)
+            .and_then(|i| order.get(i))
+            .copied()
+            .ok_or_else(|| format!("No node {n}: ids run from 1 to {}", order.len()))?;
+        self.centre_on_node(id);
+        Ok(())
+    }
+
     /// Runs a toolbar or shortcut action.
     fn run(&mut self, action: Action) {
         match action {
+            Action::ToggleMarkerNames => {
+                self.view.show_marker_names = !self.view.show_marker_names;
+            }
+            Action::ToggleMarkerIcons => {
+                self.view.show_marker_icons = !self.view.show_marker_icons;
+            }
+            Action::ToggleParkingIcons => {
+                self.view.show_parking_icons = !self.view.show_parking_icons;
+            }
+            Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
+            Action::NodeSizeUp => self.change_node_size(0.1),
+            Action::NodeSizeDown => self.change_node_size(-0.1),
+            Action::FocusHovered => {
+                if let Some(id) = self.view.hovered_node {
+                    self.centre_on_node(id);
+                }
+            }
             Action::ToggleNodeId => self.view.show_node_id = !self.view.show_node_id,
             Action::ToggleSnap => self.snap = !self.snap,
             Action::ToggleContinuous => {
@@ -1646,6 +1746,8 @@ impl eframe::App for App {
         ui::groups_window(self, &ctx);
         ui::routes_window(self, &ctx);
         ui::settings_window(self, &ctx);
+        ui::goto_dialog(self, &ctx);
+        ui::map_info_window(self, &ctx);
         ui::overlap_dialog(self, &ctx);
         ui::merge_prompt(self, &ctx);
         ui::fix_prompt(self, &ctx);
@@ -1822,6 +1924,45 @@ mod tests {
         assert_eq!(restored.inner_size, Some(egui::vec2(1200.0, 800.0)));
         assert_eq!(restored.position, Some(egui::pos2(10.0, 20.0)));
         assert_eq!(restored.maximized, Some(true));
+    }
+
+    #[test]
+    fn display_toggles_persist_and_scale_and_node_size_go_into_the_map_entry() {
+        let mut app = App::new(Settings::default());
+        for action in [
+            Action::ToggleMarkerNames,
+            Action::ToggleMarkerIcons,
+            Action::ToggleParkingIcons,
+            Action::ToggleGrid,
+            Action::ToggleNodeId,
+        ] {
+            app.run(action);
+        }
+        app.sync_settings();
+        let g = &app.settings.global;
+        assert!(!g.show_marker_names && !g.show_marker_icons && !g.show_parking_icons);
+        assert!(g.show_grid && g.show_node_id);
+        let next = App::new(app.settings.clone());
+        let v = &next.view;
+        assert!(!v.show_marker_names && !v.show_marker_icons && !v.show_parking_icons);
+        assert!(v.show_grid && v.show_node_id);
+        // Node size and scale of a named map are kept in its entry.
+        load(&mut app, "<MapName>Neu</MapName><version>3</version>");
+        assert!(app.has_map_name());
+        app.run(Action::NodeSizeUp);
+        app.run(Action::NodeSizeUp);
+        app.set_map_scale(4);
+        let entry = app.settings.maps.get("Neu").expect("entry");
+        assert_eq!((entry.node_size, entry.scale), (2.2, 4));
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!((doc.map.node_size, doc.map.geometry.scale), (2.2, 4.0));
+        for _ in 0..40 {
+            app.run(Action::NodeSizeDown);
+        }
+        app.set_map_scale(99);
+        let doc = app.doc.as_ref().expect("doc");
+        assert_eq!((doc.map.node_size, doc.map.geometry.scale), (0.1, 24.0));
+        assert!(!doc.history.is_dirty(), "display changes are no edits");
     }
 
     #[test]

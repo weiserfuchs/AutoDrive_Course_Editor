@@ -63,6 +63,8 @@ pub struct Document {
     /// PNG bytes of the shown image, kept after the upload so it can be saved (AD-8).
     pub map_png: Arc<[u8]>,
     pub map_texture: Option<eframe::egui::TextureHandle>,
+    /// Whether a real map image is shown; false while the blank stands in (Map info).
+    pub has_image: bool,
     /// An imported map image, shown, whose save waits for "Replace the existing map image?".
     pub image_to_replace: Option<crate::jobs::ImageSave>,
     /// A warning about the map image, shown until the next document loads.
@@ -116,6 +118,7 @@ impl Document {
             map_png: map_image.png.clone(),
             map_image: Some(map_image),
             map_texture: None,
+            has_image: false,
             image_to_replace: None,
             notice,
             selection: BTreeSet::new(),
@@ -197,6 +200,7 @@ impl Document {
     pub fn show(&mut self, image: MapImage) {
         self.map_png = image.png.clone();
         self.map_image = Some(image);
+        self.has_image = true;
     }
 
     /// Adds `line` below the notice.

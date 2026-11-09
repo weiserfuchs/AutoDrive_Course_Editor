@@ -397,6 +397,8 @@ pub struct MapView {
     pub show_grid: bool,
     pub show_marker_icons: bool,
     pub show_marker_names: bool,
+    /// Parking icons on markers with parked vehicles (F3).
+    pub show_parking_icons: bool,
     /// Session toggle for the "Node ID" row of the info box.
     pub show_node_id: bool,
     /// The node under the pointer, recomputed every frame.
@@ -423,6 +425,7 @@ impl Default for MapView {
             show_grid: false,
             show_marker_icons: true,
             show_marker_names: true,
+            show_parking_icons: true,
             show_node_id: false,
             hovered_node: None,
             hovered_edge: None,
@@ -446,6 +449,15 @@ impl MapView {
     #[cfg(test)]
     pub fn transform_mut(&mut self) -> Option<&mut ViewTransform> {
         self.transform.as_mut()
+    }
+
+    /// Centres the view on map px `at`, as far as the map edge allows; nothing before the
+    /// first frame.
+    pub fn centre_on(&mut self, at: (f64, f64)) {
+        if let Some(t) = &mut self.transform {
+            t.center = at;
+            t.clamp();
+        }
     }
 
     /// The map pixel at the centre of the view; the map's centre before the first frame.
@@ -1111,7 +1123,8 @@ impl MapView {
         }
         // A marker with parked vehicles shows the parking icon on its node (Java
         // `NodeDrawThread` 120-122).
-        if let Some(tex) = self.icons.as_ref().and_then(|i| i.parking.as_ref()) {
+        let parking = self.icons.as_ref().and_then(|i| i.parking.as_ref());
+        if let Some(tex) = parking.filter(|_| self.show_parking_icons) {
             let mut mesh = egui::Mesh::with_texture(tex.id());
             for m in net
                 .markers()
