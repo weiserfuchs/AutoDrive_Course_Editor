@@ -198,6 +198,8 @@ struct Drag {
 
 #[derive(Default)]
 pub struct ArcTool {
+    /// The settings a new arc starts with.
+    defaults: CurveSettings,
     arc: Option<Arc>,
     drag: Option<Drag>,
     /// World units per screen px of the last painted view; a press is tested against it.
@@ -205,6 +207,14 @@ pub struct ArcTool {
 }
 
 impl ArcTool {
+    /// A tool whose new arcs start with `defaults`.
+    pub fn with_defaults(defaults: CurveSettings) -> Self {
+        Self {
+            defaults,
+            ..Self::default()
+        }
+    }
+
     /// Remembers the view the handles are drawn in; [`Tool::paint_selection`] calls it every
     /// frame. A handle drag can start only after it.
     pub fn see(&self, t: &ViewTransform, geometry: MapGeometry) {
@@ -227,7 +237,9 @@ impl Tool for ArcTool {
     /// click does nothing.
     fn on_click(&mut self, ctx: &ToolContext) -> Option<Transaction> {
         if self.arc.is_none() {
-            self.arc = Some(Arc::new((ctx.x, ctx.z)));
+            let mut arc = Arc::new((ctx.x, ctx.z));
+            arc.settings = self.defaults;
+            self.arc = Some(arc);
         }
         None
     }
@@ -624,5 +636,19 @@ mod tests {
         tool.on_click(&ctx(&net, &map, (5.0, 5.0)));
         assert_eq!(tool.arc(), Some(&Arc::new((5.0, 5.0))));
         assert_eq!(tool.arc().expect("arc").settings, CurveSettings::default());
+    }
+
+    #[test]
+    fn a_tool_with_defaults_starts_its_arcs_with_them() {
+        let net = Network::new();
+        let map = no_heightmap();
+        let defaults = CurveSettings {
+            points: 9,
+            flag: NodeFlag::SUB_PRIO,
+            shape: ConnectionShape::Reverse,
+        };
+        let mut tool = ArcTool::with_defaults(defaults);
+        tool.on_click(&ctx(&net, &map, (5.0, 5.0)));
+        assert_eq!(tool.arc().expect("arc").settings, defaults);
     }
 }

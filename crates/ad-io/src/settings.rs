@@ -62,6 +62,22 @@ pub struct GlobalSettings {
     /// How many autosave files rotate; at least 1 (Java `maxAutoSaveSlots`).
     #[serde(deserialize_with = "at_least_one")]
     pub autosave_slots: u32,
+    /// The highest zoom factor of the map view, 1 to 250 (Java `MaxZoomLevel`).
+    pub max_zoom: f64,
+    /// Light, dark or the system's look.
+    pub theme: Theme,
+    /// The highest number of interpolation points the curve panel offers, 2 to 50 (Java
+    /// `CurveSliderMaximum`).
+    pub curve_max_points: usize,
+    /// Interpolation points a new curve or arc starts with (Java `CurveSliderDefault`).
+    pub curve_default_points: usize,
+    /// Whether a new curve's nodes are subprio (Java `CurveNodeDefaultPriority`).
+    pub curve_default_subprio: bool,
+    /// A new curve's connection type (Java `CurveDefaultConnection`).
+    pub curve_default_kind: CurveKind,
+    /// A handle drag moves its control point this many times as far, 1 to 10 (Java
+    /// `ControlPointMoveScaler`).
+    pub control_point_scaler: f64,
     /// The last opened or saved files, newest first, at most `RECENT_MAX` (Java recent
     /// files).
     pub recent_files: Vec<PathBuf>,
@@ -83,6 +99,32 @@ impl GlobalSettings {
         self.recent_files.truncate(RECENT_MAX);
     }
 }
+
+/// The look of the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Follows the system's light or dark mode.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// A new curve's connection type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CurveKind {
+    #[default]
+    Regular,
+    Dual,
+    Reverse,
+}
+
+/// The ranges the settings window offers; values outside are clamped where they are used.
+pub const MAX_ZOOM_RANGE: std::ops::RangeInclusive<f64> = 1.0..=250.0;
+pub const CURVE_MAX_POINTS_RANGE: std::ops::RangeInclusive<usize> = 2..=50;
+pub const SCALER_RANGE: std::ops::RangeInclusive<f64> = 1.0..=10.0;
 
 /// The window's outer position and inner size in points, and whether it was maximized.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -108,6 +150,13 @@ impl Default for GlobalSettings {
             autosave: true,
             autosave_minutes: 10,
             autosave_slots: 10,
+            max_zoom: 30.0,
+            theme: Theme::System,
+            curve_max_points: 50,
+            curve_default_points: 6,
+            curve_default_subprio: false,
+            curve_default_kind: CurveKind::Regular,
+            control_point_scaler: 3.0,
             recent_files: Vec::new(),
             last_folder: None,
             window: None,

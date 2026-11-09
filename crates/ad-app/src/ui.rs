@@ -119,6 +119,10 @@ fn edit_menu(app: &mut App, ui: &mut egui::Ui) {
         let can_paste = editable && app.clipboard.is_some();
         action_item(app, ui, Action::Paste, "Paste", can_paste);
         action_item(app, ui, Action::PasteInPlace, "Paste in place", can_paste);
+        ui.separator();
+        if ui.button("Settings…").clicked() {
+            app.settings_window = Some(SettingsTab::Editor);
+        }
     });
 }
 
@@ -284,6 +288,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let active = app.tool.as_ref().map(|t| t.name());
     let continuous = app.continuous;
     let line = app.line();
+    let (curve, scaler) = (app.curve_defaults(), app.curve_scaler());
     let tools: [Box<dyn Tool>; 19] = [
         Box::new(NodeTool::new(NodeFlag::REGULAR)),
         Box::new(NodeTool::new(NodeFlag::SUB_PRIO)),
@@ -299,8 +304,8 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         Box::new(ConnectTool::new(ConnectionShape::OneWay, continuous, line)),
         Box::new(ConnectTool::new(ConnectionShape::Dual, continuous, line)),
         Box::new(ConnectTool::new(ConnectionShape::Reverse, continuous, line)),
-        Box::new(BezierTool::default()),
-        Box::new(ArcTool::default()),
+        Box::new(BezierTool::with_defaults(curve, scaler)),
+        Box::new(ArcTool::with_defaults(curve)),
         Box::new(AddMarkerTool::default()),
         Box::new(EditMarkerTool::default()),
         Box::new(DeleteMarkerTool::default()),
@@ -630,6 +635,11 @@ pub(crate) enum CurveChoice {
 /// arc tool an arc: it edits the preview directly (the preview follows), Commit applies
 /// it, Cancel drops it. Only a Bézier curve has the control-point setting.
 pub(crate) fn curve_panel(app: &mut App, ctx: &egui::Context) {
+    let max_points = app
+        .settings
+        .global
+        .curve_max_points
+        .clamp(2, bezier::MAX_POINTS);
     let Some(tool) = app.tool.as_deref_mut() else {
         return;
     };
@@ -638,14 +648,14 @@ pub(crate) fn curve_panel(app: &mut App, ctx: &egui::Context) {
     if let Some(curve) = tool.curve_mut() {
         window("Bézier curve").show(ctx, |ui| {
             let controls = Some(&mut curve.controls);
-            choice = curve_controls(ui, &mut curve.settings, controls, &mut swap);
+            choice = curve_controls(ui, &mut curve.settings, max_points, controls, &mut swap);
         });
         if swap {
             curve.swap();
         }
     } else if let Some(arc) = tool.arc_mut() {
         window("Arc").show(ctx, |ui| {
-            choice = curve_controls(ui, &mut arc.settings, None, &mut swap);
+            choice = curve_controls(ui, &mut arc.settings, max_points, None, &mut swap);
         });
         if swap {
             arc.swap();
@@ -662,13 +672,11 @@ pub(crate) fn curve_panel(app: &mut App, ctx: &egui::Context) {
 fn curve_controls(
     ui: &mut egui::Ui,
     settings: &mut CurveSettings,
+    max_points: usize,
     controls: Option<&mut usize>,
     swap: &mut bool,
 ) -> Option<CurveChoice> {
-    ui.add(
-        egui::Slider::new(&mut settings.points, 1..=bezier::MAX_POINTS)
-            .text("Interpolation points"),
-    );
+    ui.add(egui::Slider::new(&mut settings.points, 1..=max_points).text("Interpolation points"));
     if let Some(controls) = controls {
         ui.add(egui::Slider::new(controls, 1..=bezier::MAX_CONTROLS).text("Control points"));
     }
@@ -1148,6 +1156,124 @@ pub(crate) fn zip_preview_window(app: &mut App, ctx: &egui::Context) {
         Some(ZipChoice::Cancel) => app.zip_preview = None,
         None => {}
     }
+}
+
+/// The tabs of the settings window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsTab {
+    Editor,
+    AutoSave,
+    Curves,
+    Connections,
+}
+
+/// Edit ▸ Settings…: the editor, autosave, curve and connection settings. A change applies
+/// at once and is written back at the end of the frame (story 9.1). Close, Escape or a
+/// click beside the window closes it.
+pub(crate) fn settings_window(app: &mut App, ctx: &egui::Context) {
+    let Some(mut tab) = app.settings_window else {
+        return;
+    };
+    let g = &mut app.settings.global;
+    let mut close = false;
+    let modal = egui::Modal::new(egui::Id::unique("settings")).show(ctx, |ui| {
+        ui.heading("Settings");
+        ui.horizontal(|ui| {
+            for (t, label) in [
+                (SettingsTab::Editor, "Editor"),
+                (SettingsTab::AutoSave, "AutoSave"),
+                (SettingsTab::Curves, "Curves"),
+                (SettingsTab::Connections, "Connections"),
+            ] {
+                ui.selectable_value(&mut tab, t, label);
+            }
+        });
+        ui.separator();
+        egui::Grid::new("settings_grid")
+            .num_columns(2)
+            .show(ui, |ui| match tab {
+                SettingsTab::Editor => {
+                    ui.label("Online map images");
+                    ui.checkbox(&mut g.online_map_images, "Download a missing map image");
+                    ui.end_row();
+                    ui.label("Max zoom");
+                    ui.add(egui::Slider::new(
+                        &mut g.max_zoom,
+                        ad_io::settings::MAX_ZOOM_RANGE,
+                    ));
+                    ui.end_row();
+                    ui.label("Theme");
+                    ui.horizontal(|ui| {
+                        use ad_io::settings::Theme;
+                        ui.selectable_value(&mut g.theme, Theme::System, "System");
+                        ui.selectable_value(&mut g.theme, Theme::Light, "Light");
+                        ui.selectable_value(&mut g.theme, Theme::Dark, "Dark");
+                    });
+                    ui.end_row();
+                }
+                SettingsTab::AutoSave => {
+                    ui.label("AutoSave");
+                    ui.checkbox(&mut g.autosave, "Write unsaved edits to autosave files");
+                    ui.end_row();
+                    ui.label("Interval (minutes)");
+                    ui.add(egui::Slider::new(&mut g.autosave_minutes, 1..=60));
+                    ui.end_row();
+                    ui.label("Autosave files");
+                    ui.add(egui::Slider::new(&mut g.autosave_slots, 1..=10));
+                    ui.end_row();
+                }
+                SettingsTab::Curves => {
+                    ui.label("Max interpolation points");
+                    ui.add(egui::Slider::new(
+                        &mut g.curve_max_points,
+                        ad_io::settings::CURVE_MAX_POINTS_RANGE,
+                    ));
+                    ui.end_row();
+                    let max = g.curve_max_points.max(1);
+                    g.curve_default_points = g.curve_default_points.clamp(1, max);
+                    ui.label("Default interpolation points");
+                    ui.add(egui::Slider::new(&mut g.curve_default_points, 1..=max));
+                    ui.end_row();
+                    ui.label("Default priority");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut g.curve_default_subprio, false, "Regular");
+                        ui.selectable_value(&mut g.curve_default_subprio, true, "SubPrio");
+                    });
+                    ui.end_row();
+                    ui.label("Default type");
+                    ui.horizontal(|ui| {
+                        use ad_io::settings::CurveKind;
+                        let kind = &mut g.curve_default_kind;
+                        ui.selectable_value(kind, CurveKind::Regular, "Regular");
+                        ui.selectable_value(kind, CurveKind::Dual, "Dual");
+                        ui.selectable_value(kind, CurveKind::Reverse, "Reverse");
+                    });
+                    ui.end_row();
+                    ui.label("Control point movement");
+                    ui.add(egui::Slider::new(
+                        &mut g.control_point_scaler,
+                        ad_io::settings::SCALER_RANGE,
+                    ));
+                    ui.end_row();
+                }
+                SettingsTab::Connections => {
+                    ui.label("End node");
+                    ui.checkbox(
+                        &mut g.create_line_end_node,
+                        "A connect click on empty map ends at a new node",
+                    );
+                    ui.end_row();
+                    ui.label("Line node spacing");
+                    ui.add(egui::Slider::new(&mut g.line_node_distance, 1..=50).suffix(" m"));
+                    ui.end_row();
+                }
+            });
+        ui.separator();
+        close = ui.button("Close").clicked();
+    });
+    // Always asked, so Escape is consumed while the window is on top.
+    let closed = modal.should_close();
+    app.settings_window = (!close && !closed).then_some(tab);
 }
 
 /// The routes window: the routes of one `routes.xml`, sorted by name, and the row picked.
@@ -1987,6 +2113,65 @@ mod tests {
             })
             .collect();
         texts.join("|")
+    }
+
+    /// One frame of the settings window with `events`; returns the texts it painted.
+    fn settings_frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> String {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 1024.0),
+            )),
+            time: Some(ctx.input(|i| i.time) + 0.016),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| settings_window(app, ui.ctx()));
+        out.textures_delta.clear();
+        let texts: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        texts.join("|")
+    }
+
+    #[test]
+    fn the_settings_window_shows_each_tab_and_closes_on_escape() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        app.settings_window = Some(SettingsTab::Editor);
+        settings_frame(&ctx, &mut app, vec![]);
+        let texts = settings_frame(&ctx, &mut app, vec![]);
+        assert!(
+            texts.contains("Editor|AutoSave|Curves|Connections"),
+            "{texts}"
+        );
+        assert!(
+            texts.contains("Max zoom") && texts.contains("Theme"),
+            "{texts}"
+        );
+        for (tab, label) in [
+            (SettingsTab::AutoSave, "Interval (minutes)"),
+            (SettingsTab::Curves, "Default type"),
+            (SettingsTab::Connections, "Line node spacing"),
+        ] {
+            app.settings_window = Some(tab);
+            settings_frame(&ctx, &mut app, vec![]);
+            let texts = settings_frame(&ctx, &mut app, vec![]);
+            assert!(texts.contains(label), "{label}: {texts}");
+        }
+        // A default above the maximum is pulled down while the Curves tab is shown.
+        app.settings.global.curve_max_points = 4;
+        app.settings.global.curve_default_points = 9;
+        app.settings_window = Some(SettingsTab::Curves);
+        settings_frame(&ctx, &mut app, vec![]);
+        assert_eq!(app.settings.global.curve_default_points, 4);
+        settings_frame(&ctx, &mut app, vec![key(egui::Key::Escape)]);
+        assert!(app.settings_window.is_none());
     }
 
     #[test]

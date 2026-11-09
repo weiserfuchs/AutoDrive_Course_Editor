@@ -112,6 +112,8 @@ pub struct Curve {
     pub controls: usize,
     /// Interpolation points, priority and connection type.
     pub settings: CurveSettings,
+    /// A handle drag moves its control point this many times as far.
+    pub scaler: f64,
 }
 
 impl Curve {
@@ -126,6 +128,7 @@ impl Curve {
             controls_at: [mid; MAX_CONTROLS],
             controls: DEFAULT_CONTROLS,
             settings: CurveSettings::default(),
+            scaler: MOVE_SCALER,
         }
     }
 
@@ -150,7 +153,7 @@ impl Curve {
             return;
         };
         *h = (h.0 + dx, h.1 + dz);
-        *c = (c.0 + dx * MOVE_SCALER, c.1 + dz * MOVE_SCALER);
+        *c = (c.0 + dx * self.scaler, c.1 + dz * self.scaler);
     }
 
     /// Swaps start and end and reverses the used handles and control points, so the shape
@@ -201,8 +204,10 @@ struct Drag {
     last: (f64, f64),
 }
 
-#[derive(Default)]
 pub struct BezierTool {
+    /// The settings and drag scaler a new curve starts with.
+    defaults: CurveSettings,
+    scaler: f64,
     start: Option<Start>,
     curve: Option<Curve>,
     drag: Option<Drag>,
@@ -210,7 +215,25 @@ pub struct BezierTool {
     world_per_px: Cell<Option<f64>>,
 }
 
+impl Default for BezierTool {
+    fn default() -> Self {
+        Self::with_defaults(CurveSettings::default(), MOVE_SCALER)
+    }
+}
+
 impl BezierTool {
+    /// A tool whose new curves start with `defaults` and drag handles `scaler` times as far.
+    pub fn with_defaults(defaults: CurveSettings, scaler: f64) -> Self {
+        Self {
+            defaults,
+            scaler,
+            start: None,
+            curve: None,
+            drag: None,
+            world_per_px: Cell::new(None),
+        }
+    }
+
     /// Remembers the view the handles are drawn in; [`Tool::paint_selection`] calls it every
     /// frame. A handle drag can start only after it.
     pub fn see(&self, t: &ViewTransform, geometry: MapGeometry) {
@@ -288,7 +311,10 @@ impl Tool for BezierTool {
             None => self.start = Some(Start { id, x: n.x, z: n.z }),
             Some(start) if start.id == id => self.start = None,
             Some(start) => {
-                self.curve = Some(Curve::new(start.id, (start.x, start.z), id, (n.x, n.z)));
+                let mut curve = Curve::new(start.id, (start.x, start.z), id, (n.x, n.z));
+                curve.settings = self.defaults;
+                curve.scaler = self.scaler;
+                self.curve = Some(curve);
                 self.start = None;
             }
         }
@@ -861,5 +887,25 @@ mod tests {
                 }
             )
         );
+    }
+
+    #[test]
+    fn a_tool_with_defaults_starts_its_curves_with_them_and_scales_handle_drags() {
+        let (net, [a, b, _]) = setup();
+        let map = no_heightmap();
+        let defaults = CurveSettings {
+            points: 12,
+            flag: NodeFlag::SUB_PRIO,
+            shape: ConnectionShape::Dual,
+        };
+        let mut tool = BezierTool::with_defaults(defaults, 5.0);
+        tool.on_click(&ctx(&net, &map, (0.0, 0.0), Some(a)));
+        tool.on_click(&ctx(&net, &map, (100.0, 0.0), Some(b)));
+        let curve = tool.curve_mut().expect("curve");
+        assert_eq!(curve.settings, defaults);
+        let before = curve.control_points()[0];
+        curve.move_handle(0, (1.0, 2.0));
+        let after = curve.control_points()[0];
+        assert!(close((after.0 - before.0, after.1 - before.1), (5.0, 10.0)));
     }
 }
