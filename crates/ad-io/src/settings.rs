@@ -65,6 +65,10 @@ pub struct GlobalSettings {
     pub rotation_snap: bool,
     /// The rotation snap step in degrees, 5 to 90 (Java `RotationStep`).
     pub rotation_step: f64,
+    /// Whether the app asks GitHub for a newer release at start.
+    pub check_updates: bool,
+    /// The newest release tag already shown, so each new version is shown once.
+    pub update_seen: Option<String>,
     /// Spacing of the nodes a connect line puts in, in world units; at least 1 (Java
     /// `LinearLineNodeDistance`).
     #[serde(deserialize_with = "at_least_one")]
@@ -174,6 +178,8 @@ impl Default for GlobalSettings {
             snap_subdivisions: false,
             rotation_snap: true,
             rotation_step: 5.0,
+            check_updates: true,
+            update_seen: None,
             line_node_distance: 12,
             create_line_end_node: false,
             online_map_images: true,

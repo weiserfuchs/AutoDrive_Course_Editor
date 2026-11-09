@@ -41,7 +41,94 @@ fn action_item(app: &mut App, ui: &mut egui::Ui, action: Action, label: &str, en
     }
 }
 
-/// The menu bar: File, Edit, Display, Scan and Import (R2).
+/// The map images help page of the map-image data repository (allowed: data repo).
+const MAP_IMAGES_HELP_URL: &str = "https://github.com/KillBait/AutoDrive_MapImages/discussions/20";
+
+fn help_menu(app: &mut App, ui: &mut egui::Ui) {
+    ui.menu_button("Help", |ui| {
+        if ui.button("About…").clicked() {
+            app.about = true;
+        }
+        if ui.button("Version history").clicked() {
+            ui.ctx()
+                .open_url(egui::OpenUrl::new_tab(ad_io::update::RELEASES_URL));
+        }
+        if ui.button("How to create map images").clicked() {
+            ui.ctx()
+                .open_url(egui::OpenUrl::new_tab(MAP_IMAGES_HELP_URL));
+        }
+        ui.separator();
+        if ui.button("Open log folder").clicked() {
+            app.open_log_folder();
+        }
+    });
+}
+
+/// Help ▸ About…: the version, the fork and the people the editor owes. Closes with its
+/// window button.
+pub(crate) fn about_window(app: &mut App, ctx: &egui::Context) {
+    if !app.about {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("About")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.heading(format!(
+                "AutoDrive Course Editor {}",
+                env!("CARGO_PKG_VERSION")
+            ));
+            ui.label("Rust rewrite, maintained by weiserfuchs.");
+            ui.hyperlink(ad_io::update::REPO_URL);
+            ui.separator();
+            ui.label("Thanks to:");
+            ui.label("KillBait, author of the Java editor this one is ported from");
+            ui.label("Stephan, AutoDrive founder and author of the original editor");
+            ui.label("rhaetional and whitevamp, for code in the Java editor");
+            ui.label("Everybody who sent suggestions and bug reports");
+        });
+    app.about = open;
+}
+
+/// A newer release than this build: its version, notes and page. Close (or the window
+/// button) marks it seen, so it is shown once.
+pub(crate) fn update_window(app: &mut App, ctx: &egui::Context) {
+    let Some(release) = &app.update else {
+        return;
+    };
+    let (mut open, mut close) = (true, false);
+    egui::Window::new("Update available")
+        .open(&mut open)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "Version {} is available; this is {}.",
+                release.tag_name,
+                env!("CARGO_PKG_VERSION")
+            ));
+            if let Some(notes) = release.body.as_deref().filter(|b| !b.trim().is_empty()) {
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        ui.label(notes);
+                    });
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Open release page").clicked() {
+                    ui.ctx()
+                        .open_url(egui::OpenUrl::new_tab(release.html_url.clone()));
+                }
+                close = ui.button("Close").clicked();
+            });
+        });
+    if close || !open {
+        app.close_update();
+    }
+}
+
+/// The menu bar: File, Edit, Display, Scan, Import and Help (R2).
 pub(crate) fn menu_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     egui::Panel::top("menu_bar").show(ui, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
@@ -50,6 +137,7 @@ pub(crate) fn menu_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             display_menu(app, ui);
             scan_menu(app, ui);
             import_menu(app, ui, ctx);
+            help_menu(app, ui);
         });
     });
 }
@@ -1616,6 +1704,9 @@ pub(crate) fn settings_window(app: &mut App, ctx: &egui::Context) {
                     ui.label("Online map images");
                     ui.checkbox(&mut g.online_map_images, "Download a missing map image");
                     ui.end_row();
+                    ui.label("Updates");
+                    ui.checkbox(&mut g.check_updates, "Look for a newer release at start");
+                    ui.end_row();
                     ui.label("Max zoom");
                     ui.add(egui::Slider::new(
                         &mut g.max_zoom,
@@ -2664,6 +2755,49 @@ mod tests {
         hidden.toggle_nodes([a, b]);
         hidden.toggle_nodes([a]);
         assert!(!hidden.node(a) && hidden.node(b));
+    }
+
+    #[test]
+    fn the_about_and_update_windows_name_the_version_and_the_fork() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        app.about = true;
+        app.update = Some(ad_io::update::Release {
+            tag_name: "v9.9.9".to_owned(),
+            html_url: "https://example/r".to_owned(),
+            body: Some("- faster".to_owned()),
+        });
+        let mut texts = String::new();
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                about_window(&mut app, ui.ctx());
+                update_window(&mut app, ui.ctx());
+            });
+            out.textures_delta.clear();
+            texts = out
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("|");
+        }
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(
+            texts.contains(&format!("AutoDrive Course Editor {version}")),
+            "{texts}"
+        );
+        assert!(
+            texts.contains("weiserfuchs/AutoDrive_Course_Editor"),
+            "{texts}"
+        );
+        assert!(texts.contains("Version v9.9.9 is available"), "{texts}");
+        assert!(
+            texts.contains("- faster|Open release page|Close"),
+            "{texts}"
+        );
     }
 
     #[test]

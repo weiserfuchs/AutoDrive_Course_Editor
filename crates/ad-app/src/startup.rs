@@ -12,6 +12,8 @@ pub struct Startup {
     /// Where changed settings are written back; `None` without a config directory or when
     /// the file could not be read (a broken file is never overwritten).
     pub settings_path: Option<PathBuf>,
+    /// Where the log files go (Help ▸ Open log folder).
+    pub log_dir: Option<PathBuf>,
     pub _log_guard: Option<WorkerGuard>,
 }
 
@@ -66,7 +68,8 @@ pub fn init() -> Startup {
     let dirs = ProjectDirs::from("", "", "AutoDrive Course Editor");
     let log_dir = dirs.as_ref().map(|d| d.data_dir().join("logs"));
     let log_guard = log_dir.as_deref().and_then(start_logging);
-    install_panic_hook(log_guard.as_ref().and(log_dir));
+    let log_dir = log_guard.as_ref().and(log_dir);
+    install_panic_hook(log_dir.clone());
 
     if cfg!(debug_assertions) && std::env::var_os("AD_DEBUG_PANIC").is_some_and(|v| v == "1") {
         panic!("AD_DEBUG_PANIC requested a test panic");
@@ -82,6 +85,7 @@ pub fn init() -> Startup {
     Startup {
         settings,
         settings_path,
+        log_dir,
         _log_guard: log_guard,
     }
 }

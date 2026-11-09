@@ -174,6 +174,14 @@ struct App {
     goto_dialog: Option<(String, Option<String>)>,
     /// The Map info window is shown.
     map_info: bool,
+    /// Where the log files go; Help ▸ Open log folder opens it.
+    log_dir: Option<PathBuf>,
+    /// Where the update check asks, taken when it starts; `None` checks nothing.
+    update_url: Option<String>,
+    /// A newer release to show, while its window is open.
+    update: Option<ad_io::update::Release>,
+    /// The About window is shown.
+    about: bool,
     /// The Grid and snap window's draft grid (x, z spacing, subdivisions), while shown.
     grid_dialog: Option<((f64, f64), u32)>,
     /// The action that continues once the save started from the prompt has finished.
@@ -264,6 +272,10 @@ impl App {
             settings_window: None,
             goto_dialog: None,
             map_info: false,
+            log_dir: None,
+            update_url: None,
+            update: None,
+            about: false,
             grid_dialog: None,
             pending: None,
             prompt: None,
@@ -465,6 +477,12 @@ impl App {
                     self.importing = false;
                     if let JobResult::ZipRead { epoch, result } = result {
                         self.zip_read(epoch, result);
+                    }
+                    continue;
+                }
+                JobResult::UpdateChecked { .. } => {
+                    if let JobResult::UpdateChecked { result } = result {
+                        self.update_checked(result);
                     }
                     continue;
                 }
@@ -769,6 +787,51 @@ impl App {
         entry.node_size = map.node_size;
         (entry.grid_x, entry.grid_y) = map.grid;
         entry.grid_subdivisions = map.subdivisions;
+    }
+
+    /// The update check's answer: a release newer than this build and not shown before
+    /// opens the update window; anything else is only logged.
+    fn update_checked(&mut self, result: Result<ad_io::update::Release, String>) {
+        match result {
+            Ok(release) => {
+                let current = env!("CARGO_PKG_VERSION");
+                let seen = self.settings.global.update_seen.as_deref();
+                if ad_io::update::is_newer(&release.tag_name, current)
+                    && seen != Some(release.tag_name.as_str())
+                {
+                    tracing::info!("release {} is newer than {current}", release.tag_name);
+                    self.update = Some(release);
+                } else {
+                    tracing::info!("no newer release than {current}");
+                }
+            }
+            Err(e) => tracing::info!("update check failed: {e}"),
+        }
+    }
+
+    /// Closes the update window; this release is not shown again.
+    fn close_update(&mut self) {
+        if let Some(release) = self.update.take() {
+            self.settings.global.update_seen = Some(release.tag_name);
+        }
+    }
+
+    /// Help ▸ Open log folder: the folder in the system's file manager.
+    fn open_log_folder(&mut self) {
+        let Some(dir) = &self.log_dir else {
+            self.error = Some("No log folder: logging could not start".to_owned());
+            return;
+        };
+        let opener = if cfg!(windows) {
+            "explorer"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        if let Err(e) = std::process::Command::new(opener).arg(dir).spawn() {
+            self.error = Some(format!("Cannot open {}: {e}", dir.display()));
+        }
     }
 
     /// Whether the open document has a map name, so per-map values can be kept.
@@ -1754,6 +1817,10 @@ impl eframe::App for App {
         self.resume(&ctx);
         self.intercept_close(&ctx);
         self.apply_settings(&ctx);
+        if let Some(url) = self.update_url.take() {
+            let repaint = ctx.clone();
+            jobs::spawn_update_check(url, self.tx.clone(), move || repaint.request_repaint());
+        }
         // Kept even when the close is cancelled; `persist_settings` writes it this frame.
         if ctx.input(|i| i.viewport().close_requested()) {
             self.settings.global.window = ctx.input(|i| {
@@ -1785,6 +1852,8 @@ impl eframe::App for App {
         ui::settings_window(self, &ctx);
         ui::goto_dialog(self, &ctx);
         ui::map_info_window(self, &ctx);
+        ui::about_window(self, &ctx);
+        ui::update_window(self, &ctx);
         ui::grid_dialog(self, &ctx);
         ui::overlap_dialog(self, &ctx);
         ui::merge_prompt(self, &ctx);
@@ -1816,6 +1885,12 @@ fn main() -> eframe::Result {
         Box::new(move |_cc| {
             let mut app = App::new(settings);
             app.settings_path = startup.settings_path;
+            app.log_dir = startup.log_dir;
+            app.update_url = app
+                .settings
+                .global
+                .check_updates
+                .then(|| ad_io::update::LATEST_URL.to_owned());
             Ok(Box::new(app))
         }),
     )
@@ -1962,6 +2037,63 @@ mod tests {
         assert_eq!(restored.inner_size, Some(egui::vec2(1200.0, 800.0)));
         assert_eq!(restored.position, Some(egui::pos2(10.0, 20.0)));
         assert_eq!(restored.maximized, Some(true));
+    }
+
+    fn release(tag: &str) -> ad_io::update::Release {
+        ad_io::update::Release {
+            tag_name: tag.to_owned(),
+            html_url: "https://example/r".to_owned(),
+            body: Some("notes".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_newer_release_is_shown_once_and_anything_else_never() {
+        let mut app = App::new(Settings::default());
+        assert!(
+            app.update_url.is_none(),
+            "tests and App::new never ask GitHub"
+        );
+        app.update_checked(Ok(release("v999.0.0")));
+        assert_eq!(app.update, Some(release("v999.0.0")));
+        app.close_update();
+        assert!(app.update.is_none());
+        assert_eq!(app.settings.global.update_seen.as_deref(), Some("v999.0.0"));
+        // Seen, the same version, an older one, no version or a failure: nothing shown.
+        let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+        for result in [
+            Ok(release("v999.0.0")),
+            Ok(release(&current)),
+            Ok(release("v0.0.1")),
+            Ok(release("nightly")),
+            Err("offline".to_owned()),
+        ] {
+            app.update_checked(result);
+            assert!(app.update.is_none());
+        }
+        app.update_checked(Ok(release("v999.1.0")));
+        assert!(app.update.is_some(), "a newer one again");
+    }
+
+    #[test]
+    fn no_source_points_at_the_upstream_editor_repository() {
+        let upstream = format!("KillBait/{}", "AutoDrive_Course_Editor");
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut stack = vec![crates];
+        let mut checked = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("ls").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs" || e == "toml") {
+                    let text = std::fs::read_to_string(&path).expect("read");
+                    assert!(!text.contains(&upstream), "{}", path.display());
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 20, "{checked} files");
     }
 
     #[test]
