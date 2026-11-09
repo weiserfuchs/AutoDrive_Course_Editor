@@ -9,6 +9,9 @@ use tracing_appender::non_blocking::WorkerGuard;
 /// What `init` hands to the app. Keep `_log_guard` alive so buffered log lines are flushed.
 pub struct Startup {
     pub settings: Settings,
+    /// Where changed settings are written back; `None` without a config directory or when
+    /// the file could not be read (a broken file is never overwritten).
+    pub settings_path: Option<PathBuf>,
     pub _log_guard: Option<WorkerGuard>,
 }
 
@@ -69,20 +72,23 @@ pub fn init() -> Startup {
         panic!("AD_DEBUG_PANIC requested a test panic");
     }
 
-    let settings = match dirs {
+    let (settings, settings_path) = match dirs {
         Some(d) => load_settings(&d.config_dir().join("settings.toml")),
         None => {
             tracing::warn!("no config directory available; using default settings");
-            Settings::default()
+            (Settings::default(), None)
         }
     };
     Startup {
         settings,
+        settings_path,
         _log_guard: log_guard,
     }
 }
 
-fn load_settings(path: &std::path::Path) -> Settings {
+/// The settings at `path` and the path to write them back to: `None` when the file could
+/// not be read, so a broken file is never overwritten. A missing file gets the defaults.
+fn load_settings(path: &std::path::Path) -> (Settings, Option<PathBuf>) {
     tracing::info!("loading settings from {}", path.display());
     match settings::load(path) {
         Ok(settings) => {
@@ -92,11 +98,43 @@ fn load_settings(path: &std::path::Path) -> Settings {
                     Err(e) => tracing::warn!("cannot write default settings: {e}"),
                 }
             }
-            settings
+            (settings, Some(path.to_path_buf()))
         }
         Err(e) => {
-            tracing::warn!("{e}; using default settings and leaving the file untouched");
-            Settings::default()
+            tracing::warn!(
+                "{e}; using default settings, leaving the file untouched and not saving changes"
+            );
+            (Settings::default(), None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_broken_settings_file_is_kept_and_never_written_back() {
+        let dir = std::env::temp_dir().join("ad_app_startup_settings");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "[global\nbroken").expect("write");
+        let (settings, back) = load_settings(&path);
+        assert_eq!(settings, Settings::default());
+        assert_eq!(back, None);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "[global\nbroken"
+        );
+        // A missing file gets the defaults written and is written back later.
+        let fresh = dir.join("fresh.toml");
+        let (settings, back) = load_settings(&fresh);
+        assert_eq!(settings, Settings::default());
+        assert_eq!(back.as_deref(), Some(fresh.as_path()));
+        assert!(fresh.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
