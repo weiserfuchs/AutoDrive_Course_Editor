@@ -81,3 +81,7 @@
 - source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-route-manager/tickets/story-a-route-manager-file-opens-with-its-markers-groups-and-map-plan.md`
   summary: The mod's `readGraphFromXml` renumbers groups so "All" is always id 1 (others 2..n in table order) when the file has "All" at another id or not at all; the route loader keeps the group list as read. Decide in 11.2 whether the writer applies that rule.
   evidence: XML.lua `readGraphFromXml` "fix group 'All' index"; routes_xml.rs `load` returns the `groups/g` entries unchanged.
+
+- source_plan: `_bmad-output/initiative-rust-rewrite/tickets/epic-route-manager/tickets/story-a-route-document-saves-back-in-the-routeexport-format-plan.md`
+  summary: Resolved the two 11.1 entries above: route autosave and merge backup write route files (11.2); the writer keeps group ids as read and does not apply the mod's "All is id 1" renumbering, which the mod applies itself on load.
+  evidence: config_xml.rs `save` hands a route to `routes_xml::save`; main.rs tests `save_and_autosave_of_a_route_write_route_files_and_nothing_else`, `a_merge_on_a_route_writes_a_route_backup_first`.

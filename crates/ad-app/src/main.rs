@@ -450,8 +450,7 @@ impl App {
         let interval = Duration::from_secs(60 * u64::from(global.autosave_minutes.max(1)));
         let slots = global.autosave_slots;
         let blocked = self.saving || self.loading || self.autosaving || self.busy();
-        // A route is not autosaved until story 11.2 adds the route writer.
-        let Some(doc) = self.doc.as_mut().filter(|d| d.editable() && !d.is_route()) else {
+        let Some(doc) = self.doc.as_mut().filter(|d| d.editable()) else {
             return label_wait;
         };
         let due = *doc.autosave_since.get_or_insert(now) + interval;
@@ -877,14 +876,6 @@ impl App {
             revision: doc.revision,
             overlap,
         };
-        // A merge never runs without a backup (AD-16), and a route's backup needs the route
-        // writer (story 11.2): refuse until then.
-        if doc.is_route() {
-            if let Some(doc) = &mut self.doc {
-                doc.add_notice(jobs::ROUTE_MERGE_NO_BACKUP.to_owned());
-            }
-            return;
-        }
         self.merging = true;
         jobs::spawn_merge_backup(
             doc.config.clone(),
@@ -1240,12 +1231,6 @@ impl App {
             return false;
         };
         if doc.config.read_only().is_some() {
-            return false;
-        }
-        // Never the config writer on a route; story 11.2 adds the route writer.
-        if doc.is_route() {
-            doc.drop_notice_lines(jobs::ROUTE_SAVE_LATER);
-            doc.add_notice(jobs::ROUTE_SAVE_LATER.to_owned());
             return false;
         }
         let mut dialog = rfd::FileDialog::new().add_filter("XML", &["xml"]);
@@ -3587,7 +3572,7 @@ mod tests {
         };
         app.tx.send(result).expect("send");
         app.poll_jobs();
-        assert!(app.doc.as_ref().is_some_and(Document::is_route));
+        assert!(app.doc.as_ref().is_some_and(|d| d.config.is_route()));
         (app, dir)
     }
 
@@ -3607,46 +3592,71 @@ mod tests {
         out
     }
 
+    /// The node count of the route file at `path`.
+    fn route_nodes(path: &Path) -> usize {
+        let bytes = std::fs::read(path).expect("read");
+        ad_io::routes_xml::load(&bytes)
+            .expect("a route")
+            .network
+            .len()
+    }
+
     #[test]
-    fn save_and_autosave_of_a_route_write_nothing() {
+    fn save_and_autosave_of_a_route_write_route_files_and_nothing_else() {
         let (mut app, dir) = route_case("save");
-        let before = files(&dir);
+        let path = app.doc.as_ref().expect("doc").path.clone();
+        let list = dir.join("routesManager").join("routes.xml");
+        let list_before = std::fs::read(&list).expect("routes.xml");
         edit(&mut app);
         assert!(app.dirty());
-        let ctx = egui::Context::default();
-        assert!(!app.save(&ctx));
-        assert!(!app.save(&ctx));
-        assert!(!app.saving);
-        assert_eq!(
-            notice(&app)
-                .unwrap_or_default()
-                .matches(jobs::ROUTE_SAVE_LATER)
-                .count(),
-            1
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(jobs::vehicles_to_patch(doc, &path).is_none());
+        let (done_tx, done_rx) = mpsc::channel();
+        app.saving = true;
+        jobs::spawn_save(
+            doc.config.clone(),
+            None,
+            doc.epoch,
+            doc.history.save_point(),
+            path.clone(),
+            app.tx.clone(),
+            move || {
+                let _ = done_tx.send(());
+            },
         );
-        // A due autosave of the dirty route writes nothing either.
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("save finished");
+        app.poll_jobs();
+        assert!(!app.dirty() && app.error.is_none());
+        assert_eq!(route_nodes(&path), 4);
+        // A due autosave of the edited route writes a route file beside it.
         let t0 = Instant::now();
-        assert!(!tick(&mut app, t0, Duration::ZERO).0);
-        assert!(!tick(&mut app, t0, 10 * MINUTE).0);
-        assert!(app.dirty());
-        assert_eq!(files(&dir), before);
+        tick(&mut app, t0, Duration::ZERO);
+        edit(&mut app);
+        assert!(tick(&mut app, t0, 10 * MINUTE).0);
+        assert!(app.error.is_none());
+        assert_eq!(route_nodes(&jobs::autosave_path(&path, 1)), 5);
+        assert_eq!(route_nodes(&path), 4);
+        assert_eq!(std::fs::read(&list).expect("routes.xml"), list_before);
+        let written: Vec<_> = files(&dir).into_iter().map(|(p, _)| p).collect();
+        let mut want = vec![list, jobs::autosave_path(&path, 1), path];
+        want.sort();
+        assert_eq!(written, want);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_merge_on_a_route_is_refused_until_routes_have_backups() {
+    fn a_merge_on_a_route_writes_a_route_backup_first() {
         let (mut app, dir) = route_case("merge");
-        let before = files(&dir);
+        let path = app.doc.as_ref().expect("doc").path.clone();
         scan(&mut app, "0.1");
         assert_eq!(overlap_marks(&app).map(|m| m.len()), Some(2));
-        app.ask_merge();
-        app.finish_merge(true, || {});
-        app.poll_jobs();
+        merge(&mut app, true, |_| {});
         assert_eq!(app.error, None);
-        assert_eq!(nodes(&app), 3, "nothing merged");
-        assert!(notice(&app).is_some_and(|n| n.contains(jobs::ROUTE_MERGE_NO_BACKUP)));
+        assert_eq!(nodes(&app), 2, "merged");
         assert!(!app.merging);
-        assert_eq!(files(&dir), before, "no backup written");
+        assert_eq!(route_nodes(&jobs::merge_backup_path(&path)), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

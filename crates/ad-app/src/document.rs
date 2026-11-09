@@ -384,11 +384,6 @@ impl Document {
         self.config.read_only().is_none()
     }
 
-    /// True for a route-manager file; the config writer never writes one.
-    pub fn is_route(&self) -> bool {
-        self.config.is_route()
-    }
-
     pub fn is_dirty(&self) -> bool {
         self.history.is_dirty()
     }
