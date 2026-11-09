@@ -55,6 +55,7 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     ui.menu_button("File", |ui| {
         let idle = !app.loading && !app.saving;
         action_item(app, ui, Action::Open, "Open…", idle);
+        recent_menu(app, ui, ctx, idle);
         if ui
             .add_enabled(idle && !app.reading_routes, egui::Button::new("Routes…"))
             .on_hover_text("Open a route from an AutoDrive routes.xml")
@@ -68,6 +69,38 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
         action_item(app, ui, Action::SaveAs, "Save As…", can_save_as);
         ui.separator();
         action_item(app, ui, Action::Exit, "Exit", true);
+    });
+}
+
+/// File ▸ Open Recent: the recent files, newest first, by file name with the full path as
+/// hover text; a file that is gone is shown off. "Clear list" empties it.
+fn recent_menu(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context, idle: bool) {
+    let recent = app.settings.global.recent_files.clone();
+    ui.add_enabled_ui(idle && !recent.is_empty(), |ui| {
+        ui.menu_button("Open Recent", |ui| {
+            for path in recent {
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                let parent = path
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                let label = format!("{name}  ({parent})");
+                if ui
+                    .add_enabled(path.is_file(), egui::Button::new(label))
+                    .on_hover_text(path.display().to_string())
+                    .clicked()
+                {
+                    app.open_recent(path, ctx);
+                }
+            }
+            ui.separator();
+            if ui.button("Clear list").clicked() {
+                app.settings.global.recent_files.clear();
+            }
+        });
     });
 }
 
