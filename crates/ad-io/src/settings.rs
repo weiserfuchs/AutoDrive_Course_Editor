@@ -38,6 +38,12 @@ pub struct GlobalSettings {
     pub history_cap: usize,
     /// Whether the grid starts switched on (Java `bShowGrid`).
     pub show_grid: bool,
+    /// Whether grid snap starts switched on (Java `GridSnapEnabled`).
+    pub snap: bool,
+    /// Whether the connect tools start in continuous mode (Java `Continuous_Connection`).
+    pub continuous: bool,
+    /// Whether the right drag starts as a lasso instead of a rectangle.
+    pub lasso: bool,
     /// Spacing of the nodes a connect line puts in, in world units; at least 1 (Java
     /// `LinearLineNodeDistance`).
     #[serde(deserialize_with = "at_least_one")]
@@ -63,6 +69,9 @@ impl Default for GlobalSettings {
         Self {
             history_cap: DEFAULT_CAP,
             show_grid: false,
+            snap: false,
+            continuous: false,
+            lasso: false,
             line_node_distance: 12,
             create_line_end_node: false,
             online_map_images: true,

@@ -107,12 +107,17 @@ struct App {
     view_epoch: Option<u64>,
     /// The active tool, if any (AD-10).
     tool: Option<Box<dyn Tool>>,
-    /// Grid snap for the tools; session only. Shift inverts it while held.
+    /// Grid snap for the tools; persisted. Shift inverts it while held.
     snap: bool,
-    /// Continuous connections for the connect tools; session only (Java default off).
+    /// Continuous connections for the connect tools; persisted (Java default off).
     continuous: bool,
-    /// The right drag draws a lasso instead of a rectangle; session only (Java default off).
+    /// The right drag draws a lasso instead of a rectangle; persisted (Java default off).
     lasso: bool,
+    /// Where changed settings are written back; `None` never writes (tests, no config
+    /// directory, a broken file).
+    settings_path: Option<std::path::PathBuf>,
+    /// The settings as last loaded or written; a difference is written back.
+    settings_written: Settings,
     /// The action that continues once the save started from the prompt has finished.
     pending: Option<Pending>,
     /// The action whose unsaved-changes prompt is shown.
@@ -158,6 +163,12 @@ impl App {
     fn new(settings: Settings) -> Self {
         let mut view = MapView::default();
         view.show_grid = settings.global.show_grid;
+        let (snap, continuous, lasso) = (
+            settings.global.snap,
+            settings.global.continuous,
+            settings.global.lasso,
+        );
+        let settings_written = settings.clone();
         let (tx, rx) = mpsc::channel();
         Self {
             doc: None,
@@ -177,9 +188,11 @@ impl App {
             view,
             view_epoch: None,
             tool: None,
-            snap: false,
-            continuous: false,
-            lasso: false,
+            snap,
+            continuous,
+            lasso,
+            settings_path: None,
+            settings_written,
             pending: None,
             prompt: None,
             location: None,
@@ -204,6 +217,51 @@ impl App {
 
     fn dirty(&self) -> bool {
         self.doc.as_ref().is_some_and(Document::is_dirty)
+    }
+
+    /// Copies the persisted toggles into the settings and gives a map seen for the first
+    /// time its entry with the values it opened with (AD-14).
+    fn sync_settings(&mut self) {
+        let global = &mut self.settings.global;
+        global.show_grid = self.view.show_grid;
+        global.snap = self.snap;
+        global.continuous = self.continuous;
+        global.lasso = self.lasso;
+        if let Some(map) = self.doc.as_ref().map(|d| &d.map)
+            && let Some(name) = &map.name
+            && !self.settings.maps.contains_key(name)
+        {
+            // Whole units: the scale was built from a `u32` setting.
+            let scale = map.geometry.scale.round().max(1.0) as u32;
+            self.settings.maps.insert(
+                name.clone(),
+                ad_io::settings::MapSettings {
+                    scale,
+                    node_size: map.node_size,
+                    grid_x: map.grid.0,
+                    grid_y: map.grid.1,
+                },
+            );
+        }
+    }
+
+    /// Writes the settings back when they changed since the last write (R1). Called at
+    /// the end of every frame, so a change survives any later exit. The file is small and
+    /// written atomically on the UI thread; a failed write is logged and not retried until
+    /// the next change.
+    fn persist_settings(&mut self) {
+        self.sync_settings();
+        if self.settings == self.settings_written {
+            return;
+        }
+        self.settings_written = self.settings.clone();
+        let Some(path) = &self.settings_path else {
+            return;
+        };
+        match ad_io::settings::save(&self.settings, path) {
+            Ok(()) => tracing::info!("saved settings to {}", path.display()),
+            Err(e) => tracing::warn!("{e}"),
+        }
     }
 
     /// Runs `action` at once, or first asks Save, Discard or Cancel while the document is dirty.
@@ -1385,6 +1443,7 @@ impl eframe::App for App {
         if let Some(wait) = self.tick_autosave(Instant::now(), move || repaint.request_repaint()) {
             ctx.request_repaint_after(wait);
         }
+        self.persist_settings();
     }
 }
 
@@ -1394,7 +1453,11 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "AutoDrive Course Editor",
         eframe::NativeOptions::default(),
-        Box::new(move |_cc| Ok(Box::new(App::new(settings)))),
+        Box::new(move |_cc| {
+            let mut app = App::new(settings);
+            app.settings_path = startup.settings_path;
+            Ok(Box::new(app))
+        }),
     )
 }
 
@@ -1444,6 +1507,51 @@ mod tests {
 
     fn nodes(app: &App) -> usize {
         app.doc.as_ref().expect("doc").config.network.len()
+    }
+
+    #[test]
+    fn changed_settings_are_written_back_and_restored_at_the_next_start() {
+        let dir = std::env::temp_dir().join("ad_app_settings_persist");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.toml");
+        let mut settings = Settings::default();
+        let kept = ad_io::settings::MapSettings {
+            scale: 4,
+            ..Default::default()
+        };
+        settings.maps.insert("Known".to_owned(), kept.clone());
+        let mut app = App::new(settings);
+        app.settings_path = Some(path.clone());
+        // Nothing changed: nothing written.
+        app.persist_settings();
+        assert!(!path.exists());
+        // Toggles are written at the end of the frame that changed them.
+        app.run(Action::ToggleSnap);
+        app.view.show_grid = true;
+        app.lasso = true;
+        app.persist_settings();
+        let written = ad_io::settings::load(&path).expect("written");
+        let g = &written.global;
+        assert!(g.snap && g.show_grid && g.lasso && !g.continuous);
+        // A map seen for the first time gets its entry; a known one keeps its values.
+        load(&mut app, "<MapName>Neu</MapName><version>3</version>");
+        app.persist_settings();
+        let written = ad_io::settings::load(&path).expect("written");
+        assert_eq!(written.maps.get("Neu"), Some(&Default::default()));
+        load(&mut app, "<MapName>Known</MapName><version>3</version>");
+        app.persist_settings();
+        let written = ad_io::settings::load(&path).expect("written");
+        assert_eq!(written.maps.get("Known"), Some(&kept));
+        // The next start restores the toggles.
+        let next = App::new(written);
+        assert!(next.snap && next.view.show_grid && next.lasso && !next.continuous);
+        // Without a path (a broken file) nothing is ever written.
+        let other = dir.join("other.toml");
+        let mut app = App::new(Settings::default());
+        app.run(Action::ToggleSnap);
+        app.persist_settings();
+        assert!(!other.exists() && app.settings.global.snap);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
