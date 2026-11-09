@@ -23,7 +23,8 @@ use eframe::egui;
 
 use ad_core::command::{Command, DeleteNodes, Transaction};
 use ad_core::geometry::MAP_PIXELS;
-use ad_io::settings::{Settings, WindowPlace};
+use ad_core::network::{ConnectionShape, NodeFlag};
+use ad_io::settings::{CurveKind, Settings, WindowPlace};
 use document::{Document, Fix};
 use input::Action;
 use jobs::JobResult;
@@ -159,6 +160,10 @@ struct App {
     settings_path: Option<std::path::PathBuf>,
     /// The settings as last loaded or written; a difference is written back.
     settings_written: Settings,
+    /// The theme last handed to egui; a different setting is applied next frame.
+    theme_applied: Option<ad_io::settings::Theme>,
+    /// The settings window's tab, while it is shown.
+    settings_window: Option<ui::SettingsTab>,
     /// The action that continues once the save started from the prompt has finished.
     pending: Option<Pending>,
     /// The action whose unsaved-changes prompt is shown.
@@ -234,6 +239,8 @@ impl App {
             lasso,
             settings_path: None,
             settings_written,
+            theme_applied: None,
+            settings_window: None,
             pending: None,
             prompt: None,
             location: None,
@@ -530,6 +537,54 @@ impl App {
         tools::connect::LineOptions::from_settings(&self.settings.global)
     }
 
+    /// Hands the settings that act on the view and egui to them: the highest zoom and,
+    /// when it changed, the theme.
+    fn apply_settings(&mut self, ctx: &egui::Context) {
+        let range = ad_io::settings::MAX_ZOOM_RANGE;
+        self.view.max_zoom = self
+            .settings
+            .global
+            .max_zoom
+            .clamp(*range.start(), *range.end());
+        let theme = self.settings.global.theme;
+        if self.theme_applied != Some(theme) {
+            ctx.set_theme(match theme {
+                ad_io::settings::Theme::System => egui::ThemePreference::System,
+                ad_io::settings::Theme::Light => egui::ThemePreference::Light,
+                ad_io::settings::Theme::Dark => egui::ThemePreference::Dark,
+            });
+            self.theme_applied = Some(theme);
+        }
+    }
+
+    /// The settings a new curve or arc starts with (story 9.4).
+    fn curve_defaults(&self) -> tools::bezier::CurveSettings {
+        let g = &self.settings.global;
+        let max = g.curve_max_points.clamp(2, tools::bezier::MAX_POINTS);
+        tools::bezier::CurveSettings {
+            points: g.curve_default_points.clamp(1, max),
+            flag: if g.curve_default_subprio {
+                NodeFlag::SUB_PRIO
+            } else {
+                NodeFlag::REGULAR
+            },
+            shape: match g.curve_default_kind {
+                CurveKind::Regular => ConnectionShape::OneWay,
+                CurveKind::Dual => ConnectionShape::Dual,
+                CurveKind::Reverse => ConnectionShape::Reverse,
+            },
+        }
+    }
+
+    /// How many times as far a handle drag moves its control point.
+    fn curve_scaler(&self) -> f64 {
+        let range = ad_io::settings::SCALER_RANGE;
+        self.settings
+            .global
+            .control_point_scaler
+            .clamp(*range.start(), *range.end())
+    }
+
     /// Whether the open document may be edited: tools, Undo and Redo need this.
     fn editable(&self) -> bool {
         self.doc.as_ref().is_some_and(document::Document::editable)
@@ -543,6 +598,7 @@ impl App {
             || self.marker.is_some()
             || self.groups.is_some()
             || self.routes.is_some()
+            || self.settings_window.is_some()
             || self.overlap_dialog.is_some()
             || self.merge_prompt.is_some()
             || self.fix_prompt.is_some()
@@ -695,7 +751,11 @@ impl App {
             }
             // A new Bézier tool, so a previewed curve is dropped (AD-10).
             Action::BezierTool if self.editable() => {
-                self.set_tool(Some(Box::new(tools::bezier::BezierTool::default())));
+                let tool = tools::bezier::BezierTool::with_defaults(
+                    self.curve_defaults(),
+                    self.curve_scaler(),
+                );
+                self.set_tool(Some(Box::new(tool)));
             }
             Action::Undo if self.editable() => {
                 // A preview built on the old network must not commit afterwards.
@@ -1541,6 +1601,7 @@ impl eframe::App for App {
         self.poll_jobs();
         self.resume(&ctx);
         self.intercept_close(&ctx);
+        self.apply_settings(&ctx);
         // Kept even when the close is cancelled; `persist_settings` writes it this frame.
         if ctx.input(|i| i.viewport().close_requested()) {
             self.settings.global.window = ctx.input(|i| {
@@ -1569,6 +1630,7 @@ impl eframe::App for App {
         ui::marker_dialog(self, &ctx);
         ui::groups_window(self, &ctx);
         ui::routes_window(self, &ctx);
+        ui::settings_window(self, &ctx);
         ui::overlap_dialog(self, &ctx);
         ui::merge_prompt(self, &ctx);
         ui::fix_prompt(self, &ctx);
@@ -1745,6 +1807,66 @@ mod tests {
         assert_eq!(restored.inner_size, Some(egui::vec2(1200.0, 800.0)));
         assert_eq!(restored.position, Some(egui::pos2(10.0, 20.0)));
         assert_eq!(restored.maximized, Some(true));
+    }
+
+    #[test]
+    fn curve_defaults_follow_the_settings_within_their_ranges() {
+        let mut settings = Settings::default();
+        assert_eq!(
+            App::new(settings.clone()).curve_defaults(),
+            tools::bezier::CurveSettings::default()
+        );
+        let g = &mut settings.global;
+        g.curve_max_points = 8;
+        g.curve_default_points = 20;
+        g.curve_default_subprio = true;
+        g.curve_default_kind = CurveKind::Reverse;
+        g.control_point_scaler = 40.0;
+        let mut app = App::new(settings);
+        let c = app.curve_defaults();
+        assert_eq!(
+            (c.points, c.flag, c.shape),
+            (8, NodeFlag::SUB_PRIO, ConnectionShape::Reverse)
+        );
+        assert_eq!(app.curve_scaler(), 10.0);
+        // The B key gives a Bézier tool with them.
+        load(&mut app, "<version>3</version>");
+        app.run(Action::BezierTool);
+        assert_eq!(
+            app.tool.as_ref().map(|t| t.name()),
+            Some(tools::bezier::NAME)
+        );
+    }
+
+    #[test]
+    fn the_max_zoom_and_the_theme_are_handed_to_the_view_and_egui() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.global.max_zoom = 500.0;
+        settings.global.theme = ad_io::settings::Theme::Dark;
+        let mut app = App::new(settings);
+        app.apply_settings(&ctx);
+        assert_eq!(app.view.max_zoom, 250.0);
+        assert_eq!(
+            ctx.options(|o| o.theme_preference),
+            egui::ThemePreference::Dark
+        );
+        app.settings.global.theme = ad_io::settings::Theme::Light;
+        app.settings.global.max_zoom = 5.0;
+        app.apply_settings(&ctx);
+        assert_eq!(app.view.max_zoom, 5.0);
+        assert_eq!(
+            ctx.options(|o| o.theme_preference),
+            egui::ThemePreference::Light
+        );
+        // A view zoomed in further zooms out to the new limit.
+        let mut t = view::ViewTransform::new((500.0, 400.0), (1000.0, 800.0));
+        t.zoom_at((500.0, 400.0), 100.0);
+        assert!(t.zoom > 5.0);
+        t.set_max_zoom(5.0);
+        assert_eq!(t.zoom, 5.0);
+        t.zoom_at((500.0, 400.0), 10.0);
+        assert_eq!(t.zoom, 5.0);
     }
 
     #[test]

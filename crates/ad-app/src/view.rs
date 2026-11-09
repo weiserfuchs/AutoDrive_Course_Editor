@@ -38,6 +38,8 @@ pub struct ViewTransform {
     pub center: (f64, f64),
     panel_center: (f64, f64),
     panel_size: (f64, f64),
+    /// The highest zoom; below the panel's minimum the minimum wins.
+    max_zoom: f64,
 }
 
 impl ViewTransform {
@@ -48,9 +50,18 @@ impl ViewTransform {
             center: (MAP_PIXELS / 2.0, MAP_PIXELS / 2.0),
             panel_center,
             panel_size,
+            max_zoom: MAX_ZOOM,
         };
         v.clamp();
         v
+    }
+
+    /// Sets the highest zoom (the setting); a view zoomed in further zooms out to it.
+    pub fn set_max_zoom(&mut self, max_zoom: f64) {
+        if self.max_zoom != max_zoom {
+            self.max_zoom = max_zoom;
+            self.clamp();
+        }
     }
 
     /// Java minimum: the map always covers the panel.
@@ -67,7 +78,7 @@ impl ViewTransform {
 
     fn clamp(&mut self) {
         let min = self.min_zoom();
-        self.zoom = self.zoom.clamp(min, MAX_ZOOM.max(min));
+        self.zoom = self.zoom.clamp(min, self.max_zoom.max(min));
         let axis = |c: f64, size: f64| {
             let half = size / 2.0 / self.zoom;
             if half * 2.0 >= MAP_PIXELS {
@@ -99,7 +110,8 @@ impl ViewTransform {
     /// Zooms by `ZOOM_STEP^steps` keeping the map point under `cursor` there.
     pub fn zoom_at(&mut self, cursor: (f64, f64), steps: f64) {
         let (mx, my) = self.screen_to_map(cursor.0, cursor.1);
-        self.zoom = (self.zoom * ZOOM_STEP.powf(steps)).clamp(self.min_zoom(), MAX_ZOOM);
+        self.zoom = (self.zoom * ZOOM_STEP.powf(steps))
+            .clamp(self.min_zoom(), self.max_zoom.max(self.min_zoom()));
         self.center = (
             mx - (cursor.0 - self.panel_center.0) / self.zoom,
             my - (cursor.1 - self.panel_center.1) / self.zoom,
@@ -393,6 +405,8 @@ pub struct MapView {
     pub hovered_edge: Option<(NodeId, NodeId)>,
     /// Grid spacing in world units, from the map's settings.
     pub grid: (f64, f64),
+    /// The highest zoom, from the settings.
+    pub max_zoom: f64,
 }
 
 impl Default for MapView {
@@ -413,6 +427,7 @@ impl Default for MapView {
             hovered_node: None,
             hovered_edge: None,
             grid: (2.0, 2.0),
+            max_zoom: MAX_ZOOM,
         }
     }
 }
@@ -487,6 +502,7 @@ impl MapView {
         let transform = self
             .transform
             .get_or_insert_with(|| ViewTransform::new(panel_center, panel_size));
+        transform.set_max_zoom(self.max_zoom);
         transform.set_panel(panel_center, panel_size);
 
         let primary = egui::PointerButton::Primary;
