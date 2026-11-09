@@ -31,10 +31,12 @@ use tools::Tool;
 use view::MapView;
 
 /// What waits for the document to be saved or discarded (R7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Pending {
     Close,
     Open,
+    /// Opens this route file, picked in the routes window.
+    OpenRoute(std::path::PathBuf),
 }
 
 /// The user's answer to the unsaved-changes prompt.
@@ -121,6 +123,10 @@ struct App {
     marker: Option<tools::marker::MarkerDialog>,
     /// The groups window, while it is shown.
     groups: Option<tools::marker::GroupsWindow>,
+    /// The routes window, while it is shown.
+    routes: Option<ui::RoutesWindow>,
+    /// A `routes.xml` is being read for the routes window.
+    reading_routes: bool,
     /// The text of the overlap scan's distance field, while its dialog is shown.
     overlap_dialog: Option<String>,
     /// The merge question, while it is shown: how many nodes are marked and how many stay.
@@ -179,6 +185,8 @@ impl App {
             location: None,
             marker: None,
             groups: None,
+            routes: None,
+            reading_routes: false,
             overlap_dialog: None,
             merge_prompt: None,
             fix_prompt: None,
@@ -256,6 +264,7 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Pending::Open => self.open(ctx),
+            Pending::OpenRoute(path) => self.load(path, ctx),
         }
     }
 
@@ -311,6 +320,22 @@ impl App {
                     self.importing = false;
                     if let JobResult::ZipRead { epoch, result } = result {
                         self.zip_read(epoch, result);
+                    }
+                    continue;
+                }
+                JobResult::RoutesRead { .. } => {
+                    self.reading_routes = false;
+                    if let JobResult::RoutesRead { path, result } = result {
+                        match result {
+                            Ok(routes) => {
+                                self.routes = Some(ui::RoutesWindow {
+                                    list: path,
+                                    routes,
+                                    selected: None,
+                                });
+                            }
+                            Err(message) => self.error = Some(message),
+                        }
                     }
                     continue;
                 }
@@ -408,6 +433,7 @@ impl App {
         self.location.is_some()
             || self.marker.is_some()
             || self.groups.is_some()
+            || self.routes.is_some()
             || self.overlap_dialog.is_some()
             || self.merge_prompt.is_some()
             || self.fix_prompt.is_some()
@@ -1022,6 +1048,11 @@ impl App {
         else {
             return;
         };
+        self.load(path, ctx);
+    }
+
+    /// Loads the config or route at `path` on a background thread.
+    fn load(&mut self, path: std::path::PathBuf, ctx: &egui::Context) {
         self.loading = true;
         let ctx = ctx.clone();
         jobs::spawn_load(
@@ -1033,6 +1064,43 @@ impl App {
                 ctx.request_repaint();
             },
         );
+    }
+
+    /// Asks for a `routes.xml` and reads it for the routes window.
+    fn pick_routes_list(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("routes.xml", &["xml"])
+            .set_file_name("routes.xml")
+            .pick_file()
+        else {
+            return;
+        };
+        let ctx = ctx.clone();
+        self.start_routes_read(path, move || ctx.request_repaint());
+    }
+
+    fn start_routes_read(
+        &mut self,
+        path: std::path::PathBuf,
+        notify: impl FnOnce() + Send + 'static,
+    ) {
+        self.reading_routes = true;
+        jobs::spawn_routes_read(path, self.tx.clone(), notify);
+    }
+
+    /// Closes the routes window and opens its selected route, asking first while the
+    /// document has unsaved changes, as Open does. A missing route file fails the load
+    /// with an error and keeps the document (AD-12).
+    fn open_route(&mut self, ctx: &egui::Context) {
+        let Some(window) = self.routes.take() else {
+            return;
+        };
+        let Some(entry) = window.selected.and_then(|i| window.routes.get(i)) else {
+            self.routes = Some(window);
+            return;
+        };
+        let path = jobs::route_file(&window.list, entry);
+        self.request(Pending::OpenRoute(path), ctx);
     }
 
     /// Asks for a DDS and imports it as the open document's map image, cropped for
@@ -1303,6 +1371,7 @@ impl eframe::App for App {
         ui::location_dialog(self, &ctx);
         ui::marker_dialog(self, &ctx);
         ui::groups_window(self, &ctx);
+        ui::routes_window(self, &ctx);
         ui::overlap_dialog(self, &ctx);
         ui::merge_prompt(self, &ctx);
         ui::fix_prompt(self, &ctx);
@@ -3657,6 +3726,140 @@ mod tests {
         assert_eq!(nodes(&app), 2, "merged");
         assert!(!app.merging);
         assert_eq!(route_nodes(&jobs::merge_backup_path(&path)), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A route manager in `<temp>/ad_app_routes_<name>`: `TestRoute0000001.xml` (3 nodes,
+    /// map "M") listed as "b route", plus "A route" (map "N") and "c route" whose files do
+    /// not exist. Returns the folder and the path of its `routes.xml`.
+    fn routes_list_case(name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ad_app_routes_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = "<AutoDrive><version>3</version><waypoints><id>1,2,3</id><x>1,2,9</x>\
+            <y>0,0,0</y><z>2,2,9</z><out>3;3;-1</out><incoming>-1;-1;1,2</incoming>\
+            <flags>0,0,0</flags></waypoints></AutoDrive>";
+        let network = config_xml::load(config.as_bytes()).expect("loads").network;
+        jobs::test_route_manager(&dir, &network, "M").expect("route");
+        let list = dir.join("routesManager").join("routes.xml");
+        let route = |name: &str, file: &str, map: &str| {
+            format!(
+                "<route name=\"{name}\" fileName=\"{file}\" map=\"{map}\" revision=\"2\" \
+                 date=\"2026/11/09 10:00:00\"><serverId>7</serverId></route>"
+            )
+        };
+        let text = format!(
+            "<autoDriveRoutesManager><routes>{}{}{}</routes></autoDriveRoutesManager>",
+            route("c route", "Missing00000002.xml", "M"),
+            route("b route", "TestRoute0000001.xml", "M"),
+            route("A route", "Missing00000001.xml", "N"),
+        );
+        std::fs::write(&list, text).expect("routes.xml");
+        (dir, list)
+    }
+
+    /// Reads `list` into the routes window and waits for it.
+    fn show_routes(app: &mut App, list: &Path) {
+        let (done_tx, done_rx) = mpsc::channel();
+        app.start_routes_read(list.to_path_buf(), move || {
+            let _ = done_tx.send(());
+        });
+        assert!(app.reading_routes);
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("read finished");
+        app.poll_jobs();
+        assert!(!app.reading_routes);
+    }
+
+    /// Polls until the load started by the app has finished.
+    fn wait_for_load(app: &mut App) {
+        for _ in 0..3000 {
+            app.poll_jobs();
+            if !app.loading {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("load did not finish");
+    }
+
+    /// Selects the routes window's row named `name`.
+    fn select_route(app: &mut App, name: &str) {
+        let window = app.routes.as_mut().expect("routes window");
+        window.selected = window.routes.iter().position(|r| r.name == name);
+        assert!(window.selected.is_some(), "{name}");
+    }
+
+    #[test]
+    fn the_routes_window_lists_by_name_and_opens_the_picked_route_with_its_map() {
+        let (dir, list) = routes_list_case("open");
+        let mut app = App::new(Settings::default());
+        show_routes(&mut app, &list);
+        let window = app.routes.as_ref().expect("routes window");
+        let names: Vec<_> = window.routes.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["A route", "b route", "c route"]);
+        assert_eq!(window.routes[0].map, "N");
+        assert_eq!(window.routes[0].revision, 2);
+        assert_eq!(window.routes[0].server_id, "7");
+        assert!(app.dialog_shown());
+        // Open needs a selected row.
+        let ctx = egui::Context::default();
+        app.open_route(&ctx);
+        assert!(app.routes.is_some() && !app.loading);
+        select_route(&mut app, "b route");
+        app.open_route(&ctx);
+        assert!(app.routes.is_none() && app.loading);
+        wait_for_load(&mut app);
+        assert_eq!(app.error, None);
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(doc.config.is_route());
+        assert!(
+            doc.path
+                .ends_with("routesManager/routes/TestRoute0000001.xml")
+        );
+        assert_eq!(doc.config.map_name(), Some("M"));
+        assert_eq!(nodes(&app), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_route_over_unsaved_changes_asks_first_and_a_missing_file_keeps_the_document() {
+        let (dir, list) = routes_list_case("ask");
+        let mut app = App::new(Settings::default());
+        load(&mut app, "<version>3</version>");
+        edit(&mut app);
+        assert!(app.dirty());
+        let before = snapshot(&app);
+        let ctx = egui::Context::default();
+        show_routes(&mut app, &list);
+        select_route(&mut app, "A route");
+        app.open_route(&ctx);
+        let missing = list.with_file_name("routes").join("Missing00000001.xml");
+        assert_eq!(app.prompt, Some(Pending::OpenRoute(missing)));
+        assert!(app.routes.is_none() && !app.loading);
+        app.choose(Choice::Discard, &ctx);
+        assert!(app.loading);
+        wait_for_load(&mut app);
+        let error = app.error.clone().expect("an error");
+        assert!(error.contains("Missing00000001.xml"), "{error}");
+        assert_eq!(snapshot(&app), before, "the document stays");
+        assert!(app.dirty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_broken_or_missing_routes_xml_is_an_error_and_shows_no_window() {
+        let (dir, list) = routes_list_case("broken");
+        std::fs::write(&list, "<autoDriveRoutesManager><routes><route name=\"x\"/>")
+            .expect("write");
+        let mut app = App::new(Settings::default());
+        show_routes(&mut app, &list);
+        assert!(app.routes.is_none());
+        let error = app.error.take().expect("an error");
+        assert!(error.contains("routes.xml"), "{error}");
+        show_routes(&mut app, &dir.join("nothing.xml"));
+        assert!(app.routes.is_none());
+        assert!(app.error.take().is_some_and(|e| e.contains("nothing.xml")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

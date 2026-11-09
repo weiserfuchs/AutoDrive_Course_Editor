@@ -41,6 +41,16 @@ pub(crate) fn top_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             {
                 app.request(Pending::Open, ctx);
             }
+            if ui
+                .add_enabled(
+                    !app.loading && !app.saving && !app.reading_routes,
+                    egui::Button::new("Routes…"),
+                )
+                .on_hover_text("Open a route from an AutoDrive routes.xml")
+                .clicked()
+            {
+                app.pick_routes_list(ctx);
+            }
             // Load and save never overlap: either could read or replace the same file.
             let editable = !app.saving
                 && !app.loading
@@ -1063,6 +1073,69 @@ pub(crate) fn zip_preview_window(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// The routes window: the routes of one `routes.xml`, sorted by name, and the row picked.
+pub(crate) struct RoutesWindow {
+    pub list: std::path::PathBuf,
+    pub routes: Vec<ad_io::routes_xml::RouteEntry>,
+    pub selected: Option<usize>,
+}
+
+/// Lists the routes of a `routes.xml` (name, map, revision, date). A click selects a row;
+/// Open or a double click opens it. Close, Escape or a click beside the window closes it.
+pub(crate) fn routes_window(app: &mut App, ctx: &egui::Context) {
+    let Some(window) = &mut app.routes else {
+        return;
+    };
+    let can_open = !app.loading && !app.saving;
+    let (mut open, mut close) = (false, false);
+    let modal = egui::Modal::new(egui::Id::unique("routes")).show(ctx, |ui| {
+        ui.heading("Routes");
+        ui.label(window.list.display().to_string());
+        if window.routes.is_empty() {
+            ui.label("This routes.xml lists no routes.");
+        }
+        egui::ScrollArea::vertical()
+            .max_height(400.0)
+            .show(ui, |ui| {
+                egui::Grid::new("routes_grid")
+                    .striped(true)
+                    .num_columns(4)
+                    .show(ui, |ui| {
+                        for title in ["Name", "Map", "Revision", "Date"] {
+                            ui.strong(title);
+                        }
+                        ui.end_row();
+                        for (i, route) in window.routes.iter().enumerate() {
+                            let row = ui.selectable_label(window.selected == Some(i), &route.name);
+                            if row.clicked() {
+                                window.selected = Some(i);
+                            }
+                            if row.double_clicked() {
+                                window.selected = Some(i);
+                                open = can_open;
+                            }
+                            ui.label(&route.map);
+                            ui.label(route.revision.to_string());
+                            ui.label(&route.date);
+                            ui.end_row();
+                        }
+                    });
+            });
+        ui.horizontal(|ui| {
+            let enabled = can_open && window.selected.is_some();
+            open |= ui.add_enabled(enabled, egui::Button::new("Open")).clicked();
+            close = ui.button("Close").clicked();
+        });
+    });
+    // Always asked, so Escape is consumed while the window is on top.
+    let closed = modal.should_close();
+    if open {
+        app.open_route(ctx);
+    } else if close || closed {
+        app.routes = None;
+    }
+}
+
 /// The unsaved-changes prompt: Save (not for a read-only document), Discard or Cancel.
 /// Its backdrop keeps the pointer off the map while it is shown.
 pub(crate) fn unsaved_prompt(app: &mut App, ctx: &egui::Context) {
@@ -1793,13 +1866,67 @@ mod tests {
                 })
                 .collect();
         }
-        for name in ["Open…", "Node", "Delete marker", "Groups"] {
+        for name in ["Open…", "Routes…", "Node", "Delete marker", "Groups"] {
             let (_, x) = texts
                 .iter()
                 .find(|(t, _)| t == name)
                 .unwrap_or_else(|| panic!("{name} drawn: {texts:?}"));
             assert!(*x < width, "{name} at x = {x}");
         }
+    }
+
+    /// One frame of the routes window with `events`; returns the texts it painted.
+    fn routes_frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) -> String {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 1024.0),
+            )),
+            time: Some(ctx.input(|i| i.time) + 0.016),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| routes_window(app, ui.ctx()));
+        out.textures_delta.clear();
+        let texts: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        texts.join("|")
+    }
+
+    #[test]
+    fn the_routes_window_shows_each_route_and_closes_on_escape() {
+        let ctx = egui::Context::default();
+        let mut app = app("<version>3</version>");
+        let route = |name: &str, map: &str| ad_io::routes_xml::RouteEntry {
+            name: name.to_owned(),
+            file_name: format!("{name}.xml"),
+            map: map.to_owned(),
+            revision: 3,
+            date: "2026/11/09 10:00:00".to_owned(),
+            server_id: String::new(),
+        };
+        app.routes = Some(RoutesWindow {
+            list: PathBuf::from("routes.xml"),
+            routes: vec![route("Felder", "Marsch"), route("Hof", "Elmcreek")],
+            selected: None,
+        });
+        // The first frame only sizes the window.
+        routes_frame(&ctx, &mut app, vec![]);
+        let texts = routes_frame(&ctx, &mut app, vec![]);
+        assert!(
+            texts.contains("Name|Map|Revision|Date|Felder|Marsch|3|2026/11/09 10:00:00|Hof"),
+            "{texts}"
+        );
+        assert!(texts.contains("Open|Close"), "{texts}");
+        routes_frame(&ctx, &mut app, vec![key(egui::Key::Escape)]);
+        assert!(app.routes.is_none());
+        assert!(app.doc.is_some(), "Escape opens nothing");
     }
 
     #[test]
