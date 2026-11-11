@@ -10,7 +10,7 @@ Editor for AutoDrive route networks (AutoDrive_config.xml) of Farming Simulator.
 - This fork is independent of KillBait/AutoDrive_Course_Editor: never point update checks, version/history URLs or links at upstream; use weiserfuchs/AutoDrive_Course_Editor.
 - The Java editor was removed in epic 10; its source is in git history up to commit 0084b5e (`git show 0084b5e:src/main/java/...`) if old behaviour must be looked up.
 - Work on a branch per story (`rust/<story-slug>`); commit there, merge to `master` only when `cargo build`, `cargo test` and `cargo clippy` pass.
-- Never overwrite `AutoDrive_config.xml` or `vehicles.xml` in the repo root; they are the FS25 reference fixtures (config and its savegame vehicles). Write round-trip output to a temp dir and compare.
+- Never overwrite `AutoDrive_config.xml`, `vehicles.xml` or `placeables.xml` in the repo root; they are the FS25 reference fixtures (config and its savegame vehicles and placeables). Write round-trip output to a temp dir and compare.
 - Never commit build output (`target/`); it is gitignored.
 - Code, comments and commit messages in English.
 

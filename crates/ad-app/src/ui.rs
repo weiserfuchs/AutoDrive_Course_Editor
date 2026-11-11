@@ -278,6 +278,7 @@ fn display_menu(app: &mut App, ui: &mut egui::Ui) {
                 "Parking icons",
                 v.show_parking_icons,
             ),
+            (Action::TogglePlaceables, "Placeables", v.show_placeables),
             (Action::ToggleNodeId, "Selected node id", v.show_node_id),
             (
                 Action::ToggleSelectHidden,
@@ -889,6 +890,8 @@ pub(crate) struct ToolHooks<'a> {
     pub overlap: Option<&'a BTreeSet<NodeId>>,
     /// The hidden nodes and connections, handed to the view.
     pub hidden: Option<HiddenView<'a>>,
+    /// The buildings of `placeables.xml`, handed to the view.
+    pub placeables: Option<&'a [ad_io::placeables::Placeable]>,
     pub commit: Option<Transaction>,
     pub select_event: Option<SelectEvent>,
 }
@@ -911,6 +914,7 @@ impl<'a> ToolHooks<'a> {
             revision: 0,
             overlap: None,
             hidden: None,
+            placeables: None,
             commit: None,
             select_event: None,
         }
@@ -990,6 +994,10 @@ impl ViewHooks for ToolHooks<'_> {
 
     fn hidden(&self) -> Option<HiddenView<'_>> {
         self.hidden
+    }
+
+    fn placeables(&self) -> Option<&[ad_io::placeables::Placeable]> {
+        self.placeables
     }
 
     fn drag(&mut self, event: DragEvent) -> bool {
@@ -1107,6 +1115,7 @@ pub(crate) fn map_panel(app: &mut App, ui: &mut egui::Ui) {
     hooks.lasso = app.lasso;
     hooks.revision = doc.revision;
     hooks.overlap = doc.overlap.as_ref().map(|(_, marks)| marks);
+    hooks.placeables = doc.placeables.as_deref();
     hooks.hidden = Some(HiddenView {
         set: &doc.hidden,
         alpha: hidden_alpha,

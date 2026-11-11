@@ -235,6 +235,7 @@ impl App {
         view.show_marker_names = settings.global.show_marker_names;
         view.show_marker_icons = settings.global.show_marker_icons;
         view.show_parking_icons = settings.global.show_parking_icons;
+        view.show_placeables = settings.global.show_placeables;
         view.show_node_id = settings.global.show_node_id;
         let (snap, continuous, lasso) = (
             settings.global.snap,
@@ -314,6 +315,7 @@ impl App {
         global.show_marker_names = self.view.show_marker_names;
         global.show_marker_icons = self.view.show_marker_icons;
         global.show_parking_icons = self.view.show_parking_icons;
+        global.show_placeables = self.view.show_placeables;
         global.show_node_id = self.view.show_node_id;
         global.snap = self.snap;
         global.continuous = self.continuous;
@@ -912,6 +914,7 @@ impl App {
             Action::ToggleParkingIcons => {
                 self.view.show_parking_icons = !self.view.show_parking_icons;
             }
+            Action::TogglePlaceables => self.view.show_placeables = !self.view.show_placeables,
             Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
             Action::ToggleSubdivisionSnap => {
                 let g = &mut self.settings.global;
@@ -1936,6 +1939,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 true,
             ))),
         };
@@ -2140,6 +2144,7 @@ mod tests {
             Action::ToggleMarkerNames,
             Action::ToggleMarkerIcons,
             Action::ToggleParkingIcons,
+            Action::TogglePlaceables,
             Action::ToggleGrid,
             Action::ToggleNodeId,
         ] {
@@ -2148,10 +2153,12 @@ mod tests {
         app.sync_settings();
         let g = &app.settings.global;
         assert!(!g.show_marker_names && !g.show_marker_icons && !g.show_parking_icons);
+        assert!(!g.show_placeables);
         assert!(g.show_grid && g.show_node_id);
         let next = App::new(app.settings.clone());
         let v = &next.view;
         assert!(!v.show_marker_names && !v.show_marker_icons && !v.show_parking_icons);
+        assert!(!v.show_placeables);
         assert!(v.show_grid && v.show_node_id);
         // Node size and scale of a named map are kept in its entry.
         load(&mut app, "<MapName>Neu</MapName><version>3</version>");
@@ -4997,6 +5004,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 true,
             ))),
         };
@@ -5331,6 +5339,7 @@ mod tests {
             result: Ok(Box::new((
                 config,
                 map_image::blank(),
+                None,
                 None,
                 None,
                 None,
@@ -5812,6 +5821,7 @@ mod import_tests {
                     None,
                     None,
                     None,
+                    None,
                     true,
                 ))),
             })
@@ -5933,6 +5943,7 @@ mod import_tests {
                     None,
                     None,
                     None,
+                    None,
                     true,
                 ))),
             })
@@ -6010,7 +6021,7 @@ mod zip_tests {
         let config = config_xml::load(config_text(map_name).as_bytes()).expect("loads");
         open(
             &mut app,
-            (config, map_image::blank(), None, None, None, true),
+            (config, map_image::blank(), None, None, None, None, true),
         );
         app
     }
@@ -6275,7 +6286,7 @@ mod zip_tests {
         let config = config_xml::load(config_text("M").as_bytes()).expect("loads");
         open(
             &mut app,
-            (config, map_image::blank(), None, None, None, true),
+            (config, map_image::blank(), None, None, None, None, true),
         );
         app.tx.send(result).expect("send");
         app.poll_jobs();
@@ -6287,7 +6298,7 @@ mod zip_tests {
         let config = config_xml::load(config_text("M").as_bytes()).expect("loads");
         open(
             &mut app,
-            (config, map_image::blank(), None, None, None, true),
+            (config, map_image::blank(), None, None, None, None, true),
         );
         app.tx.send(result).expect("send");
         app.poll_jobs();
@@ -6365,6 +6376,7 @@ mod download_tests {
                 result: Ok(Box::new((
                     config,
                     map_image::blank(),
+                    None,
                     None,
                     None,
                     None,
@@ -6499,7 +6511,7 @@ mod manual_image_tests {
         let config = config_xml::load(config_text("M").as_bytes()).expect("loads");
         open(
             &mut app,
-            (config, map_image::blank(), None, None, None, true),
+            (config, map_image::blank(), None, None, None, None, true),
         );
         let doc = app.doc.as_mut().expect("doc");
         doc.map_image = None;
@@ -6789,7 +6801,7 @@ mod manual_image_tests {
         let config = config_xml::load(config_text("M").as_bytes()).expect("loads");
         open(
             &mut app,
-            (config, map_image::blank(), None, None, None, true),
+            (config, map_image::blank(), None, None, None, None, true),
         );
         app.doc.as_mut().expect("doc").map_image = None;
         app.tx.send(first).expect("send");

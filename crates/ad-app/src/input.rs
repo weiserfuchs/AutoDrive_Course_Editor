@@ -57,6 +57,8 @@ pub(crate) enum Action {
     ToggleMarkerIcons,
     /// Display: parking icons on or off (Java F3).
     ToggleParkingIcons,
+    /// Display: the buildings of `placeables.xml` on or off.
+    TogglePlaceables,
     /// Display: the grid on or off (Java G).
     ToggleGrid,
     /// Display: the map's node size 0.1 bigger (Java numpad +).
@@ -73,7 +75,7 @@ pub(crate) enum Action {
 
 /// The shortcut table. Modifiers match exactly, so Ctrl+Shift+Z is never read as Ctrl+Z
 /// and Shift+N or Alt+N do nothing.
-pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 36] = [
+pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 37] = [
     (
         Action::Redo,
         KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
@@ -198,6 +200,10 @@ pub(crate) const SHORTCUTS: [(Action, KeyboardShortcut); 36] = [
         KeyboardShortcut::new(Modifiers::NONE, Key::F3),
     ),
     (
+        Action::TogglePlaceables,
+        KeyboardShortcut::new(Modifiers::NONE, Key::F5),
+    ),
+    (
         Action::ToggleGrid,
         KeyboardShortcut::new(Modifiers::NONE, Key::G),
     ),
@@ -291,7 +297,7 @@ pub(crate) fn handle_shortcuts(app: &mut App, ctx: &egui::Context) {
 
 /// The actions the Key bindings tab lists: (action, settings id, label). Copy, Cut and
 /// Paste are not listed: Ctrl+C, Ctrl+X and Ctrl+V reach the app as clipboard events.
-pub(crate) const CONFIGURABLE: [(Action, &str, &str); 32] = [
+pub(crate) const CONFIGURABLE: [(Action, &str, &str); 33] = [
     (Action::Open, "open", "Open…"),
     (Action::Save, "save", "Save"),
     (Action::SaveAs, "save_as", "Save As…"),
@@ -346,6 +352,7 @@ pub(crate) const CONFIGURABLE: [(Action, &str, &str); 32] = [
         "toggle_parking_icons",
         "Parking icons",
     ),
+    (Action::TogglePlaceables, "toggle_placeables", "Placeables"),
     (Action::ToggleGrid, "toggle_grid", "Grid"),
     (Action::NodeSizeUp, "node_size_up", "Node size bigger"),
     (Action::NodeSizeDown, "node_size_down", "Node size smaller"),
@@ -640,6 +647,7 @@ mod tests {
         assert_eq!(press(CTRL, Key::Z), [Action::Undo]);
         assert_eq!(press(CTRL.plus(Modifiers::SHIFT), Key::Z), [Action::Redo]);
         assert_eq!(press(Modifiers::NONE, Key::F4), [Action::ToggleNodeId]);
+        assert_eq!(press(Modifiers::NONE, Key::F5), [Action::TogglePlaceables]);
         assert_eq!(press(Modifiers::NONE, Key::M), [Action::MoveTool]);
         assert_eq!(press(Modifiers::NONE, Key::R), [Action::RotateTool]);
         assert_eq!(press(Modifiers::NONE, Key::P), [Action::PriorityTool]);

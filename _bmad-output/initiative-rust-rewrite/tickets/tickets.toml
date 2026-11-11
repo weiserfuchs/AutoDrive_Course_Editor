@@ -86,3 +86,11 @@ title = "The Rust editor ships and Java is gone"
 description = "A tagged release publishes the Windows executable, parity is signed off against R1-R16, the frame budget is re-measured, and src/main/java with the Maven build is removed."
 covers = ["R15", "R16"]
 after = [{ epic = 9, needs = "feature parity across all menus and tools" }]
+
+[[epic]]
+id = 12
+slug = "epic-placeables"
+title = "Buildings from placeables.xml are shown on the map"
+description = "The savegame's placeables.xml beside the config is read for display only: each building is a symbol coloured by owner with its name, and with a mods folder its real rotated footprint from the mod zip."
+covers = []
+after = [{ epic = 10, needs = "the released editor" }]
