@@ -1672,7 +1672,7 @@ mod tests {
             .and_then(|d| d.placeables.clone())
             .expect("set");
         assert_eq!(
-            placeables[0].footprint,
+            placeables[0].footprint.outline,
             [[(99.0, 48.0), (101.0, 48.0), (101.0, 52.0), (99.0, 52.0)]]
         );
         // A base-game building keeps no footprint.

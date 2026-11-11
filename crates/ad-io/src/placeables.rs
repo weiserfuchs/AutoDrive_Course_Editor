@@ -24,6 +24,20 @@ fn xml_err(e: impl std::fmt::Display) -> PlaceablesError {
 /// A footprint part: four corners (x, z), in order around it.
 pub type Quad = [(f64, f64); 4];
 
+/// A building's areas: its outline (clear areas, else level areas, else test areas; often
+/// a base plate around the building) and its indoor areas (the building under its roof).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Footprint {
+    pub outline: Vec<Quad>,
+    pub indoor: Vec<Quad>,
+}
+
+impl Footprint {
+    pub fn is_empty(&self) -> bool {
+        self.outline.is_empty() && self.indoor.is_empty()
+    }
+}
+
 /// One placed building.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Placeable {
@@ -44,7 +58,7 @@ pub struct Placeable {
     pub farm_id: u32,
     /// Its footprint in the world, filled from the mods folder ([`crate::footprint`]);
     /// empty draws a square.
-    pub footprint: Vec<Quad>,
+    pub footprint: Footprint,
 }
 
 /// The value of attribute `key` of `e`, unescaped.
@@ -104,7 +118,7 @@ fn placeable(e: &BytesStart) -> Result<Option<Placeable>, PlaceablesError> {
         z,
         rotation_y,
         farm_id,
-        footprint: Vec::new(),
+        footprint: Footprint::default(),
     }))
 }
 
@@ -172,7 +186,7 @@ mod tests {
                 z: -847.008,
                 rotation_y: -76.0,
                 farm_id: 1,
-                footprint: Vec::new(),
+                footprint: Footprint::default(),
             }
         );
         assert_eq!((got[1].name.as_str(), got[1].farm_id), ("a&b", 0));

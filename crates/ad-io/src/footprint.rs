@@ -1,6 +1,6 @@
-//! Footprints of placed buildings: the clear, level or test areas of a placeable's XML,
-//! resolved through the node tree of its `.i3d` and placed with the savegame's position
-//! and rotation. Read only, from the mods folder (`<mods>/<mod>.zip` or `<mods>/<mod>/`).
+//! Footprints of placed buildings: the clear, level or test areas of a placeable's XML as
+//! its outline and its indoor areas as the building itself, resolved through the node tree
+//! of its `.i3d` and placed with the savegame's position and rotation. Read only, from the mods folder (`<mods>/<mod>.zip` or `<mods>/<mod>/`).
 //!
 //! Only the rotation about the vertical axis is applied; tilted nodes are rare in area
 //! paths and would only skew the outline.
@@ -16,7 +16,7 @@ use zip::ZipArchive;
 
 use crate::placeables::Placeable;
 
-pub use crate::placeables::Quad;
+pub use crate::placeables::{Footprint, Quad};
 
 /// Largest file read from a mod; placeable XMLs and text i3d files are far smaller.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
@@ -182,6 +182,8 @@ struct PlaceableXml {
     level: Vec<[String; 3]>,
     /// (start, end) of each test area.
     test: Vec<[String; 2]>,
+    /// (start, width, height) of each indoor area.
+    indoor: Vec<[String; 3]>,
     /// i3d mapping id -> node path.
     mapping: HashMap<String, String>,
 }
@@ -206,6 +208,7 @@ fn parse_placeable(bytes: &[u8]) -> Result<PlaceableXml, String> {
                 match name.as_str() {
                     "clearArea" => out.clear.extend(three(e)),
                     "levelArea" => out.level.extend(three(e)),
+                    "indoorArea" => out.indoor.extend(three(e)),
                     "testArea" => {
                         if let (Some(s), Some(t)) = (attr(e, "startNode"), attr(e, "endNode")) {
                             out.test.push([s, t]);
@@ -245,15 +248,15 @@ fn parse_placeable(bytes: &[u8]) -> Result<PlaceableXml, String> {
 }
 
 /// The footprint of a placeable in its own frame, from its XML and its i3d (read through
-/// `read_i3d` with the XML's i3d file name). Clear areas win, then level areas, then test
-/// areas; none gives an empty list.
+/// `read_i3d` with the XML's i3d file name); no areas give an empty one.
 fn local_footprint(
     placeable_xml: &[u8],
     read_i3d: impl FnOnce(&str) -> Option<Vec<u8>>,
-) -> Result<Vec<Quad>, String> {
+) -> Result<Footprint, String> {
     let xml = parse_placeable(placeable_xml)?;
-    if xml.clear.is_empty() && xml.level.is_empty() && xml.test.is_empty() {
-        return Ok(Vec::new());
+    if xml.indoor.is_empty() && xml.clear.is_empty() && xml.level.is_empty() && xml.test.is_empty()
+    {
+        return Ok(Footprint::default());
     }
     let i3d_name = xml.i3d.as_deref().ok_or("no i3d file named")?;
     let i3d = read_i3d(i3d_name).ok_or_else(|| format!("{i3d_name} not found"))?;
@@ -267,37 +270,38 @@ fn local_footprint(
         let (s, w, h) = (origin(node(s)?), origin(node(w)?), origin(node(h)?));
         Some([s, w, (w.0 + h.0 - s.0, w.1 + h.1 - s.1), h])
     };
-    let quads: Vec<Quad> = if !xml.clear.is_empty() {
+    let boxed = |[s, e]: &[String; 2]| -> Option<Quad> {
+        let start = node(s)?;
+        let end = origin(node(e)?);
+        let s0 = origin(start);
+        // The box is spanned along the start node's own axes.
+        let unit = |(x, z): (f64, f64)| {
+            let len = x.hypot(z);
+            (len > 0.0).then(|| (x / len, z / len))
+        };
+        let u = unit((start.a, start.c))?;
+        let v = unit((start.b, start.d))?;
+        let (dx, dz) = (end.0 - s0.0, end.1 - s0.1);
+        let (p, q) = (dx * u.0 + dz * u.1, dx * v.0 + dz * v.1);
+        let pu = (s0.0 + p * u.0, s0.1 + p * u.1);
+        Some([
+            s0,
+            pu,
+            (pu.0 + q * v.0, pu.1 + q * v.1),
+            (s0.0 + q * v.0, s0.1 + q * v.1),
+        ])
+    };
+    let outline = if !xml.clear.is_empty() {
         xml.clear.iter().filter_map(parallelogram).collect()
     } else if !xml.level.is_empty() {
         xml.level.iter().filter_map(parallelogram).collect()
     } else {
-        xml.test
-            .iter()
-            .filter_map(|[s, e]| {
-                let start = node(s)?;
-                let end = origin(node(e)?);
-                let s0 = origin(start);
-                // The box is spanned along the start node's own axes.
-                let unit = |(x, z): (f64, f64)| {
-                    let len = x.hypot(z);
-                    (len > 0.0).then(|| (x / len, z / len))
-                };
-                let u = unit((start.a, start.c))?;
-                let v = unit((start.b, start.d))?;
-                let (dx, dz) = (end.0 - s0.0, end.1 - s0.1);
-                let (p, q) = (dx * u.0 + dz * u.1, dx * v.0 + dz * v.1);
-                let pu = (s0.0 + p * u.0, s0.1 + p * u.1);
-                Some([
-                    s0,
-                    pu,
-                    (pu.0 + q * v.0, pu.1 + q * v.1),
-                    (s0.0 + q * v.0, s0.1 + q * v.1),
-                ])
-            })
-            .collect()
+        xml.test.iter().filter_map(boxed).collect()
     };
-    Ok(quads)
+    Ok(Footprint {
+        outline,
+        indoor: xml.indoor.iter().filter_map(parallelogram).collect(),
+    })
 }
 
 /// `quads` in the world, for a placeable at (x, z) turned by `ry_deg` degrees.
@@ -370,17 +374,17 @@ impl ModFiles {
 /// The world footprint of each of `list`, in order; empty where none can be read (no mod,
 /// file or areas: the view then draws the square). Each
 /// placeable file is read once.
-pub fn footprints(list: &[Placeable], mods_dir: &Path) -> Vec<Vec<Quad>> {
+pub fn footprints(list: &[Placeable], mods_dir: &Path) -> Vec<Footprint> {
     let mut files = ModFiles::new(mods_dir);
-    let mut local: HashMap<String, Vec<Quad>> = HashMap::new();
+    let mut local: HashMap<String, Footprint> = HashMap::new();
     list.iter()
         .map(|p| {
-            let quads = local.entry(p.file.clone()).or_insert_with(|| {
+            let print = local.entry(p.file.clone()).or_insert_with(|| {
                 let Some((name, path)) = mod_path(&p.file) else {
-                    return Vec::new();
+                    return Footprint::default();
                 };
                 let Some(xml) = files.read(name, path) else {
-                    return Vec::new();
+                    return Footprint::default();
                 };
                 // Mod files name their i3d relative to the mod; try beside the XML too.
                 let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
@@ -394,7 +398,10 @@ pub fn footprints(list: &[Placeable], mods_dir: &Path) -> Vec<Vec<Quad>> {
                 };
                 local_footprint(&xml, read_i3d).unwrap_or_default()
             });
-            place(quads, p.x, p.z, p.rotation_y)
+            Footprint {
+                outline: place(&print.outline, p.x, p.z, p.rotation_y),
+                indoor: place(&print.indoor, p.x, p.z, p.rotation_y),
+            }
         })
         .collect()
 }
@@ -466,34 +473,61 @@ mod tests {
         let test = "<placement><testAreas><testArea startNode=\"ts\" endNode=\"te\"/></testAreas></placement>";
         let level = "<leveling><levelAreas><levelArea startNode=\"0>1|0\" widthNode=\"0>1|0|0\" heightNode=\"0>1|0|1\"/></levelAreas></leveling>";
         let both = local_footprint(xml(&format!("{test}{clear}")).as_bytes(), read).expect("ok");
-        assert_eq!(both.len(), 1);
+        assert_eq!(both.outline.len(), 1);
+        assert!(both.indoor.is_empty());
         // The clear area: start (-2, 4); width +4 along local x (turned: z -4); height +6
         // along local z (turned: x +6).
         let want = [(-2.0, 4.0), (-2.0, 0.0), (4.0, 0.0), (4.0, 4.0)];
-        for (got, want) in both[0].iter().zip(want) {
-            assert!(close(*got, want), "{:?}", both[0]);
+        for (got, want) in both.outline[0].iter().zip(want) {
+            assert!(close(*got, want), "{:?}", both.outline[0]);
         }
         // Direct node paths in a level area give the same rectangle.
         let lv = local_footprint(xml(level).as_bytes(), read).expect("ok");
-        assert_eq!(lv.len(), 1);
-        for (got, want) in lv[0].iter().zip(want) {
-            assert!(close(*got, want), "{:?}", lv[0]);
+        assert_eq!(lv.outline.len(), 1);
+        for (got, want) in lv.outline[0].iter().zip(want) {
+            assert!(close(*got, want), "{:?}", lv.outline[0]);
         }
         // The test area spans the same box along the start node's axes.
         let t = local_footprint(xml(test).as_bytes(), read).expect("ok");
-        for (got, want) in t[0].iter().zip(want) {
-            assert!(close(*got, want), "{:?}", t[0]);
+        for (got, want) in t.outline[0].iter().zip(want) {
+            assert!(close(*got, want), "{:?}", t.outline[0]);
         }
     }
 
     #[test]
+    fn indoor_areas_are_kept_beside_the_outline() {
+        let clear = "<clearAreas><clearArea startNode=\"0>1|1\" widthNode=\"0>1|1|0\" heightNode=\"0>1|1|0\"/></clearAreas>";
+        let indoor = "<indoorAreas><indoorArea startNode=\"cs\" widthNode=\"cw\" heightNode=\"ch\"/></indoorAreas>";
+        let want = [(-2.0, 4.0), (-2.0, 0.0), (4.0, 0.0), (4.0, 4.0)];
+        let both = local_footprint(xml(&format!("{clear}{indoor}")).as_bytes(), read).expect("ok");
+        assert_eq!((both.outline.len(), both.indoor.len()), (1, 1));
+        for (got, want) in both.indoor[0].iter().zip(want) {
+            assert!(close(*got, want), "{:?}", both.indoor[0]);
+        }
+        // Indoor areas alone: no outline, the building still has a footprint.
+        let only = local_footprint(xml(indoor).as_bytes(), read).expect("ok");
+        assert!(only.outline.is_empty());
+        assert_eq!(only.indoor.len(), 1);
+        assert!(!only.is_empty());
+    }
+
+    #[test]
     fn no_areas_or_a_missing_i3d_give_no_footprint() {
-        assert_eq!(local_footprint(xml("").as_bytes(), read), Ok(Vec::new()));
+        assert_eq!(
+            local_footprint(xml("").as_bytes(), read),
+            Ok(Footprint::default())
+        );
         let clear = "<clearAreas><clearArea startNode=\"cs\" widthNode=\"cw\" heightNode=\"ch\"/></clearAreas>";
         assert!(local_footprint(xml(clear).as_bytes(), |_| None).is_err());
+        let indoor = "<indoorAreas><indoorArea startNode=\"cs\" widthNode=\"cw\" heightNode=\"ch\"/></indoorAreas>";
+        assert!(local_footprint(xml(indoor).as_bytes(), |_| None).is_err());
         // An unknown mapping id drops only that area.
         let bad = "<clearAreas><clearArea startNode=\"zz\" widthNode=\"cw\" heightNode=\"ch\"/></clearAreas>";
-        assert_eq!(local_footprint(xml(bad).as_bytes(), read), Ok(Vec::new()));
+        assert!(
+            local_footprint(xml(bad).as_bytes(), read)
+                .expect("ok")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -554,17 +588,25 @@ mod tests {
         let start = std::time::Instant::now();
         let prints = footprints(&list, &mods);
         println!(
-            "{} of {} placeables have a footprint, read in {:.0} ms",
+            "{} of {} placeables have a footprint, {} with indoor areas, read in {:.0} ms",
             prints.iter().filter(|p| !p.is_empty()).count(),
             list.len(),
+            prints.iter().filter(|p| !p.indoor.is_empty()).count(),
             start.elapsed().as_secs_f64() * 1000.0
         );
-        for (p, quads) in list.iter().zip(&prints).take(40) {
-            let size = quads.first().map(|q| {
+        let size = |quads: &[Quad]| {
+            quads.first().map(|q| {
                 let d = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).hypot(a.1 - b.1);
-                (d(q[0], q[1]), d(q[0], q[3]))
-            });
-            println!("{:<40} {:>2} areas, first {:?}", p.name, quads.len(), size);
+                (d(q[0], q[1]).round(), d(q[0], q[3]).round())
+            })
+        };
+        for (p, print) in list.iter().zip(&prints).take(40) {
+            println!(
+                "{:<40} outline {:?}, indoor {:?}",
+                p.name,
+                size(&print.outline),
+                size(&print.indoor)
+            );
         }
     }
 }

@@ -32,3 +32,14 @@ covers = []
 after = [1, 2]
 hitl = false
 risk = "low"
+
+[[entry]]
+id = 4
+type = "story"
+title = "Buildings with indoor areas show the building filled and the base plate as a thin line"
+description = "A clear area often includes a base plate much larger than the building. The placeable's indoor areas (under its roof) are read beside the outline; with any, they are filled in the owner's colour and the outline is only a thin faint line; without, nothing changes. Hover works on both, the name sits on the building. Tip occlusion areas were measured and dropped: often copied template values. The person's step: compare buildings on a base plate with the map image."
+verify = "Tests cover indoor parsing beside the outline, indoor-only buildings, the two-layer drawing and hover on the plate; the real-mods read and frame time hold; the user compares with the map image."
+covers = ["R3"]
+after = [3]
+hitl = true
+risk = "low"
