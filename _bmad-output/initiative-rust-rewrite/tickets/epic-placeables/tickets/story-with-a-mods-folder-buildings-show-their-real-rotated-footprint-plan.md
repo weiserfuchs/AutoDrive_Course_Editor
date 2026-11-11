@@ -3,7 +3,7 @@ title: 'With a mods folder, buildings show their real rotated footprint'
 type: 'feature'
 ticket: '2'
 created: '2026-11-11'
-status: 'built'
+status: done
 baseline_revision: 'ac3c12b'
 route: 'full'
 route_source: 'auto'
