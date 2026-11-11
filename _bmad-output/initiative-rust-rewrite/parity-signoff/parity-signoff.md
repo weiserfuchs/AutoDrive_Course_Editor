@@ -105,3 +105,5 @@ The inventory is in `research-ui-shell-inventory.md`. The epic 9 sweep checked e
 |---|---|---|---|
 
 Signed off by the user on 2026-11-11 ("passt soweit alles"): the hand checks of epics 11, 9 and epic 10 story 1 and this checklist found no gap. The update-check line is confirmed with the real release in story 7.
+
+Update check (story 7): the published v0.9.0 is what `releases/latest` returns; a 0.9.0 build shows no update window, as expected.
