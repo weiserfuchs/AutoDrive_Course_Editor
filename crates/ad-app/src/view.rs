@@ -37,6 +37,10 @@ const PLACEABLE_NAME_ZOOM: f64 = 2.0;
 /// Opacity of a footprint's fill, and its outline width.
 const FOOTPRINT_FILL_ALPHA: f32 = 0.3;
 const FOOTPRINT_LINE_PX: f32 = 1.5;
+/// A building with indoor areas shows its outline (often a base plate) only as a thin,
+/// fainter line of this width and opacity.
+const PLATE_LINE_PX: f32 = 1.0;
+const PLATE_ALPHA: f32 = 0.6;
 
 /// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
 /// centre is in map px. The panel is the screen rectangle the map is shown in.
@@ -414,12 +418,14 @@ fn placeable_screen(p: &Placeable, geometry: MapGeometry, t: &ViewTransform) -> 
     egui::pos2(sx as f32, sy as f32)
 }
 
-/// How a building is drawn on screen: its footprint's quads, or a square while it has no
-/// footprint or the footprint is smaller than the square.
+/// How a building is drawn on screen: its footprint's outline and indoor quads, or a square
+/// while it has no footprint or the footprint is smaller than the square.
 enum PlaceableShape {
     Square(egui::Rect),
     Footprint {
-        quads: Vec<[egui::Pos2; 4]>,
+        outline: Vec<[egui::Pos2; 4]>,
+        indoor: Vec<[egui::Pos2; 4]>,
+        /// Around every quad.
         bounds: egui::Rect,
     },
 }
@@ -431,16 +437,26 @@ impl PlaceableShape {
             let (sx, sy) = t.map_to_screen(mx, my);
             egui::pos2(sx as f32, sy as f32)
         };
-        let quads: Vec<[egui::Pos2; 4]> = p.footprint.iter().map(|q| q.map(screen)).collect();
-        let bounds = egui::Rect::from_points(quads.as_flattened());
-        if quads.is_empty() || bounds.width().max(bounds.height()) < PLACEABLE_PX {
+        let on_screen = |quads: &[ad_io::placeables::Quad]| -> Vec<[egui::Pos2; 4]> {
+            quads.iter().map(|q| q.map(screen)).collect()
+        };
+        let outline = on_screen(&p.footprint.outline);
+        let indoor = on_screen(&p.footprint.indoor);
+        let bounds = egui::Rect::from_points(outline.as_flattened())
+            .union(egui::Rect::from_points(indoor.as_flattened()));
+        let empty = outline.is_empty() && indoor.is_empty();
+        if empty || bounds.width().max(bounds.height()) < PLACEABLE_PX {
             let centre = placeable_screen(p, geometry, t);
             Self::Square(egui::Rect::from_center_size(
                 centre,
                 egui::Vec2::splat(PLACEABLE_PX),
             ))
         } else {
-            Self::Footprint { quads, bounds }
+            Self::Footprint {
+                outline,
+                indoor,
+                bounds,
+            }
         }
     }
 
@@ -451,10 +467,24 @@ impl PlaceableShape {
         }
     }
 
+    /// Where the name goes: below the square, else in the middle of the building (its
+    /// indoor areas when it has any).
+    fn name_at(&self) -> egui::Pos2 {
+        match self {
+            Self::Square(r) => r.center_bottom(),
+            Self::Footprint { indoor, bounds, .. } if indoor.is_empty() => bounds.center(),
+            Self::Footprint { indoor, .. } => {
+                egui::Rect::from_points(indoor.as_flattened()).center()
+            }
+        }
+    }
+
     fn contains(&self, c: egui::Pos2) -> bool {
         match self {
             Self::Square(r) => r.contains(c),
-            Self::Footprint { quads, .. } => quads.iter().any(|q| in_quad(q, c)),
+            Self::Footprint {
+                outline, indoor, ..
+            } => outline.iter().chain(indoor).any(|q| in_quad(q, c)),
         }
     }
 }
@@ -962,7 +992,8 @@ impl MapView {
     }
 
     /// Draws each building of `list` in view in its owner's colour: its footprint as
-    /// translucent outlined quads, else a square. Names show from [`PLACEABLE_NAME_ZOOM`]
+    /// translucent outlined quads (with indoor areas, those filled and the outline a thin
+    /// line), else a square. Names show from [`PLACEABLE_NAME_ZOOM`]
     /// on; the hovered one also names its id and owner.
     fn paint_placeables(
         &self,
@@ -988,24 +1019,32 @@ impl MapView {
                     mesh.add_colored_rect(*rect, colour);
                     outline.push(*rect);
                 }
-                PlaceableShape::Footprint { quads, .. } => {
+                PlaceableShape::Footprint {
+                    outline, indoor, ..
+                } => {
+                    // With indoor areas those are the building: filled, while the outline
+                    // (often a base plate) is only a thin faint line.
+                    let filled = if indoor.is_empty() {
+                        outline
+                    } else {
+                        let plate =
+                            egui::Stroke::new(PLATE_LINE_PX, colour.gamma_multiply(PLATE_ALPHA));
+                        lines.extend(outline.iter().map(|q| (q.to_vec(), plate)));
+                        indoor
+                    };
                     let fill = colour.gamma_multiply(FOOTPRINT_FILL_ALPHA);
-                    for q in quads {
+                    for q in filled {
                         let base = mesh.vertices.len() as u32;
                         for v in q {
                             mesh.colored_vertex(*v, fill);
                         }
                         mesh.add_triangle(base, base + 1, base + 2);
                         mesh.add_triangle(base, base + 2, base + 3);
-                        lines.push((q.to_vec(), colour));
+                        lines.push((q.to_vec(), egui::Stroke::new(FOOTPRINT_LINE_PX, colour)));
                     }
                 }
             }
-            let bounds = shape.bounds();
-            let below = match shape {
-                PlaceableShape::Square(_) => bounds.center_bottom(),
-                PlaceableShape::Footprint { .. } => bounds.center(),
-            };
+            let below = shape.name_at();
             if self.hovered_placeable == Some(i) {
                 let owner = match p.farm_id {
                     0 => "map".to_owned(),
@@ -1025,11 +1064,8 @@ impl MapView {
         for rect in outline {
             painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
         }
-        for (points, colour) in lines {
-            painter.add(egui::Shape::closed_line(
-                points,
-                egui::Stroke::new(FOOTPRINT_LINE_PX, colour),
-            ));
+        for (points, stroke) in lines {
+            painter.add(egui::Shape::closed_line(points, stroke));
         }
         for (name, at) in names {
             painter.text(
@@ -2014,7 +2050,7 @@ mod tests {
             z,
             rotation_y: 0.0,
             farm_id,
-            footprint: Vec::new(),
+            footprint: Default::default(),
         }
     }
 
@@ -2115,7 +2151,7 @@ mod tests {
         let (net, _, _) = hover_net();
         let mut shed = building("Shed", -40.0, 20.0, 1);
         // A 16 x 8 world-unit footprint around the building.
-        shed.footprint = vec![[(-48.0, 16.0), (-32.0, 16.0), (-32.0, 24.0), (-48.0, 24.0)]];
+        shed.footprint.outline = vec![[(-48.0, 16.0), (-32.0, 16.0), (-32.0, 24.0), (-48.0, 24.0)]];
         let mut hooks = Buildings(vec![shed]);
         let g = MapGeometry::new(1.0);
         let fill = look::PLACEABLE_OWN.gamma_multiply(FOOTPRINT_FILL_ALPHA);
@@ -2145,6 +2181,59 @@ mod tests {
         let mut view = view_at(&ctx, &net, g, 0.4);
         let out = buildings_frame(&ctx, &mut view, &net, &mut hooks, None);
         assert_eq!((fill_vertices(&out), building_vertices(&out).1), (0, 4));
+    }
+
+    #[test]
+    fn with_indoor_areas_only_the_building_is_filled_and_the_plate_is_a_thin_line() {
+        let ctx = egui::Context::default();
+        let (net, _, _) = hover_net();
+        let mut shed = building("Shed", -40.0, 20.0, 1);
+        // A 16 x 8 plate with a 4 x 4 building in its middle.
+        shed.footprint.outline = vec![[(-48.0, 16.0), (-32.0, 16.0), (-32.0, 24.0), (-48.0, 24.0)]];
+        shed.footprint.indoor = vec![[(-42.0, 18.0), (-38.0, 18.0), (-38.0, 22.0), (-42.0, 22.0)]];
+        let mut hooks = Buildings(vec![shed]);
+        let g = MapGeometry::new(1.0);
+        let mut view = view_at(&ctx, &net, g, 10.0);
+        let out = buildings_frame(&ctx, &mut view, &net, &mut hooks, None);
+        let t = view.transform.expect("set");
+        let screen = |x: f64, z: f64| {
+            let (mx, my) = g.to_map(x, z);
+            let (sx, sy) = t.map_to_screen(mx, my);
+            egui::pos2(sx as f32, sy as f32)
+        };
+        let fill = look::PLACEABLE_OWN.gamma_multiply(FOOTPRINT_FILL_ALPHA);
+        let filled: Vec<egui::Pos2> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(m) => Some(m.vertices.clone()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|v| v.color == fill)
+            .map(|v| v.pos)
+            .collect();
+        // Only the building's four corners are filled.
+        let inner = egui::Rect::from_two_pos(screen(-42.0, 18.0), screen(-38.0, 22.0));
+        assert_eq!(filled.len(), 4);
+        assert!(
+            filled.iter().all(|p| inner.expand(0.5).contains(*p)),
+            "{filled:?}"
+        );
+        // The plate is a thin faint line, the building a full one.
+        let widths: Vec<f32> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Path(p) if p.closed => Some(p.stroke.width),
+                _ => None,
+            })
+            .collect();
+        assert!(widths.contains(&PLATE_LINE_PX), "{widths:?}");
+        assert!(widths.contains(&FOOTPRINT_LINE_PX), "{widths:?}");
+        // Hover on the plate, outside the building, still finds it.
+        let _ = buildings_frame(&ctx, &mut view, &net, &mut hooks, Some(screen(-46.0, 17.0)));
+        assert_eq!(view.hovered_placeable, Some(0));
     }
 
     #[test]
