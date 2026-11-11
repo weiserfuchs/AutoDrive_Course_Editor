@@ -144,6 +144,11 @@ pub enum JobResult {
     UpdateChecked {
         result: Result<ad_io::update::Release, String>,
     },
+    /// The buildings of the document of `epoch` with their footprints from the mods folder.
+    Footprints {
+        epoch: u64,
+        placeables: Arc<[Placeable]>,
+    },
     /// A `routes.xml` read for the routes window: its routes sorted by name.
     RoutesRead {
         path: PathBuf,
@@ -169,6 +174,31 @@ pub fn spawn_routes_read(
     thread::spawn(move || {
         let result = read_routes_list(&path);
         let _ = tx.send(JobResult::RoutesRead { path, result });
+        notify();
+    });
+}
+
+/// Reads the footprints of `placeables` from `mods` on a background thread, then calls
+/// `notify`. A building whose footprint cannot be read keeps none.
+pub fn spawn_footprints(
+    epoch: u64,
+    placeables: Arc<[Placeable]>,
+    mods: PathBuf,
+    tx: Sender<JobResult>,
+    notify: impl FnOnce() + Send + 'static,
+) {
+    thread::spawn(move || {
+        let prints = ad_io::footprint::footprints(&placeables, &mods);
+        let placeables = placeables
+            .iter()
+            .cloned()
+            .zip(prints)
+            .map(|(mut p, footprint)| {
+                p.footprint = footprint;
+                p
+            })
+            .collect();
+        let _ = tx.send(JobResult::Footprints { epoch, placeables });
         notify();
     });
 }
@@ -943,6 +973,12 @@ pub fn apply_result(
         JobResult::ZipRead { .. }
         | JobResult::RoutesRead { .. }
         | JobResult::UpdateChecked { .. } => None,
+        JobResult::Footprints { epoch, placeables } => {
+            if let Some(doc) = doc.as_mut().filter(|d| d.epoch == epoch) {
+                doc.placeables = Some(placeables);
+            }
+            None
+        }
         // The merge runs only after its backup was written, on the document, revision and
         // marks the backup was taken of (AD-18).
         JobResult::MergeBackup { start, result } => {
@@ -1595,6 +1631,59 @@ mod tests {
             notice.contains("placeables.xml could not be read"),
             "{notice}"
         );
+    }
+
+    #[test]
+    fn footprints_are_read_from_the_mods_folder_for_the_current_document() {
+        let (dir, doc, _) = open_in("footprints", None);
+        let mods = dir.join("mods");
+        std::fs::create_dir_all(mods.join("Mod/p")).expect("dir");
+        std::fs::write(
+            mods.join("Mod/p/shed.xml"),
+            "<placeable><base><filename>p/shed.i3d</filename></base>\
+             <clearAreas><clearArea startNode=\"0>0\" widthNode=\"0>0|0\" heightNode=\"0>0|1\"/>\
+             </clearAreas></placeable>",
+        )
+        .expect("write");
+        std::fs::write(
+            mods.join("Mod/p/shed.i3d"),
+            "<i3D><Scene><TransformGroup><TransformGroup translation=\"-1 0 -2\">\
+             <TransformGroup translation=\"2 0 0\"/><TransformGroup translation=\"0 0 4\"/>\
+             </TransformGroup></TransformGroup></Scene></i3D>",
+        )
+        .expect("write");
+        let list = ad_io::placeables::load(
+            b"<placeables><placeable filename=\"$moddir$Mod/p/shed.xml\" uniqueId=\"s\" \
+              position=\"100 0 50\" rotation=\"0 0 0\" farmId=\"1\"/>\
+              <placeable filename=\"$data/x.xml\" uniqueId=\"d\" position=\"1 0 1\"/>\
+              </placeables>",
+        )
+        .expect("list");
+        let (tx, rx) = mpsc::channel();
+        spawn_footprints(doc.epoch, list.into(), mods, tx, || {});
+        let result = rx.recv_timeout(Duration::from_secs(30)).expect("read");
+        let (mut slot, mut counter) = (Some(doc), 1);
+        assert_eq!(
+            apply_result(&mut slot, &mut counter, &settings(500), result),
+            None
+        );
+        let placeables = slot
+            .as_ref()
+            .and_then(|d| d.placeables.clone())
+            .expect("set");
+        assert_eq!(
+            placeables[0].footprint,
+            [[(99.0, 48.0), (101.0, 48.0), (101.0, 52.0), (99.0, 52.0)]]
+        );
+        // A base-game building keeps no footprint.
+        assert!(placeables[1].footprint.is_empty());
+        // A result for an older document is dropped.
+        let (tx, rx) = mpsc::channel();
+        let stale = slot.as_ref().map(|d| d.epoch + 1).expect("doc");
+        spawn_footprints(stale, Arc::from(Vec::new()), dir.join("none"), tx, || {});
+        let result = rx.recv_timeout(Duration::from_secs(30)).expect("read");
+        let _ = apply_result(&mut slot, &mut counter, &settings(500), result);
+        assert_eq!(slot.and_then(|d| d.placeables).map(|p| p.len()), Some(2));
     }
 
     #[test]

@@ -34,6 +34,9 @@ const LASSO_CLOSING_ALPHA: f32 = 0.25;
 const PLACEABLE_PX: f32 = 10.0;
 /// From this zoom on every building shows its name; below it only the hovered one.
 const PLACEABLE_NAME_ZOOM: f64 = 2.0;
+/// Opacity of a footprint's fill, and its outline width.
+const FOOTPRINT_FILL_ALPHA: f32 = 0.3;
+const FOOTPRINT_LINE_PX: f32 = 1.5;
 
 /// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
 /// centre is in map px. The panel is the screen rectangle the map is shown in.
@@ -411,8 +414,65 @@ fn placeable_screen(p: &Placeable, geometry: MapGeometry, t: &ViewTransform) -> 
     egui::pos2(sx as f32, sy as f32)
 }
 
-/// The index of the building whose square is under screen point `c`; the nearest when
-/// squares overlap.
+/// How a building is drawn on screen: its footprint's quads, or a square while it has no
+/// footprint or the footprint is smaller than the square.
+enum PlaceableShape {
+    Square(egui::Rect),
+    Footprint {
+        quads: Vec<[egui::Pos2; 4]>,
+        bounds: egui::Rect,
+    },
+}
+
+impl PlaceableShape {
+    fn of(p: &Placeable, geometry: MapGeometry, t: &ViewTransform) -> Self {
+        let screen = |(x, z): (f64, f64)| {
+            let (mx, my) = geometry.to_map(x, z);
+            let (sx, sy) = t.map_to_screen(mx, my);
+            egui::pos2(sx as f32, sy as f32)
+        };
+        let quads: Vec<[egui::Pos2; 4]> = p.footprint.iter().map(|q| q.map(screen)).collect();
+        let bounds = egui::Rect::from_points(quads.as_flattened());
+        if quads.is_empty() || bounds.width().max(bounds.height()) < PLACEABLE_PX {
+            let centre = placeable_screen(p, geometry, t);
+            Self::Square(egui::Rect::from_center_size(
+                centre,
+                egui::Vec2::splat(PLACEABLE_PX),
+            ))
+        } else {
+            Self::Footprint { quads, bounds }
+        }
+    }
+
+    fn bounds(&self) -> egui::Rect {
+        match self {
+            Self::Square(r) => *r,
+            Self::Footprint { bounds, .. } => *bounds,
+        }
+    }
+
+    fn contains(&self, c: egui::Pos2) -> bool {
+        match self {
+            Self::Square(r) => r.contains(c),
+            Self::Footprint { quads, .. } => quads.iter().any(|q| in_quad(q, c)),
+        }
+    }
+}
+
+/// Whether `c` lies inside the convex quad `q`, whichever way round its corners go.
+fn in_quad(q: &[egui::Pos2; 4], c: egui::Pos2) -> bool {
+    let side = |a: egui::Pos2, b: egui::Pos2| (b - a).x * (c - a).y - (b - a).y * (c - a).x;
+    let sides = [
+        side(q[0], q[1]),
+        side(q[1], q[2]),
+        side(q[2], q[3]),
+        side(q[3], q[0]),
+    ];
+    sides.iter().all(|s| *s >= 0.0) || sides.iter().all(|s| *s <= 0.0)
+}
+
+/// The index of the building drawn under screen point `c`; the one whose position is
+/// nearest when several are.
 fn placeable_at(
     list: &[Placeable],
     geometry: MapGeometry,
@@ -420,12 +480,11 @@ fn placeable_at(
     c: (f64, f64),
 ) -> Option<usize> {
     let c = egui::pos2(c.0 as f32, c.1 as f32);
-    let reach = PLACEABLE_PX / 2.0;
     list.iter()
         .enumerate()
-        .map(|(i, p)| (i, placeable_screen(p, geometry, t) - c))
-        .filter(|(_, d)| d.x.abs() <= reach && d.y.abs() <= reach)
-        .min_by(|a, b| a.1.length_sq().total_cmp(&b.1.length_sq()))
+        .filter(|(_, p)| PlaceableShape::of(p, geometry, t).contains(c))
+        .map(|(i, p)| (i, (placeable_screen(p, geometry, t) - c).length_sq()))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
 }
 
@@ -902,8 +961,9 @@ impl MapView {
         }
     }
 
-    /// Draws each building of `list` in view as a square in its owner's colour, with its
-    /// name from [`PLACEABLE_NAME_ZOOM`] on; the hovered one also names its id and owner.
+    /// Draws each building of `list` in view in its owner's colour: its footprint as
+    /// translucent outlined quads, else a square. Names show from [`PLACEABLE_NAME_ZOOM`]
+    /// on; the hovered one also names its id and owner.
     fn paint_placeables(
         &self,
         painter: &egui::Painter,
@@ -911,20 +971,41 @@ impl MapView {
         geometry: MapGeometry,
         t: &ViewTransform,
     ) {
-        let clip = painter.clip_rect().expand(PLACEABLE_PX);
+        let clip = painter.clip_rect();
         let mut mesh = egui::Mesh::default();
         let mut outline = Vec::new();
+        let mut lines = Vec::new();
         let mut names = Vec::new();
         let font = egui::FontId::proportional(NAME_FONT_SIZE);
         for (i, p) in list.iter().enumerate() {
-            let centre = placeable_screen(p, geometry, t);
-            if !clip.contains(centre) {
+            let shape = PlaceableShape::of(p, geometry, t);
+            if !clip.intersects(shape.bounds()) {
                 continue;
             }
-            let rect = egui::Rect::from_center_size(centre, egui::Vec2::splat(PLACEABLE_PX));
-            mesh.add_colored_rect(rect, look::placeable_colour(p.farm_id));
-            outline.push(rect);
-            let below = centre + egui::vec2(0.0, PLACEABLE_PX);
+            let colour = look::placeable_colour(p.farm_id);
+            match &shape {
+                PlaceableShape::Square(rect) => {
+                    mesh.add_colored_rect(*rect, colour);
+                    outline.push(*rect);
+                }
+                PlaceableShape::Footprint { quads, .. } => {
+                    let fill = colour.gamma_multiply(FOOTPRINT_FILL_ALPHA);
+                    for q in quads {
+                        let base = mesh.vertices.len() as u32;
+                        for v in q {
+                            mesh.colored_vertex(*v, fill);
+                        }
+                        mesh.add_triangle(base, base + 1, base + 2);
+                        mesh.add_triangle(base, base + 2, base + 3);
+                        lines.push((q.to_vec(), colour));
+                    }
+                }
+            }
+            let bounds = shape.bounds();
+            let below = match shape {
+                PlaceableShape::Square(_) => bounds.center_bottom(),
+                PlaceableShape::Footprint { .. } => bounds.center(),
+            };
             if self.hovered_placeable == Some(i) {
                 let owner = match p.farm_id {
                     0 => "map".to_owned(),
@@ -943,6 +1024,12 @@ impl MapView {
         let stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
         for rect in outline {
             painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+        }
+        for (points, colour) in lines {
+            painter.add(egui::Shape::closed_line(
+                points,
+                egui::Stroke::new(FOOTPRINT_LINE_PX, colour),
+            ));
         }
         for (name, at) in names {
             painter.text(
@@ -1927,6 +2014,7 @@ mod tests {
             z,
             rotation_y: 0.0,
             farm_id,
+            footprint: Vec::new(),
         }
     }
 
@@ -2019,6 +2107,56 @@ mod tests {
         let out = buildings_frame(&ctx, &mut view, &net, &mut hooks, Some(own));
         assert_eq!(building_vertices(&out), (0, 0, 0));
         assert_eq!(view.hovered_placeable, None);
+    }
+
+    #[test]
+    fn a_footprint_is_drawn_and_hovered_when_bigger_than_the_square() {
+        let ctx = egui::Context::default();
+        let (net, _, _) = hover_net();
+        let mut shed = building("Shed", -40.0, 20.0, 1);
+        // A 16 x 8 world-unit footprint around the building.
+        shed.footprint = vec![[(-48.0, 16.0), (-32.0, 16.0), (-32.0, 24.0), (-48.0, 24.0)]];
+        let mut hooks = Buildings(vec![shed]);
+        let g = MapGeometry::new(1.0);
+        let fill = look::PLACEABLE_OWN.gamma_multiply(FOOTPRINT_FILL_ALPHA);
+        let fill_vertices = |out: &egui::FullOutput| -> usize {
+            out.shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Mesh(m) => {
+                        Some(m.vertices.iter().filter(|v| v.color == fill).count())
+                    }
+                    _ => None,
+                })
+                .sum()
+        };
+        // Zoom 10: the footprint is 160 px wide, drawn as a translucent quad, no square.
+        let mut view = view_at(&ctx, &net, g, 10.0);
+        let out = buildings_frame(&ctx, &mut view, &net, &mut hooks, None);
+        assert_eq!((fill_vertices(&out), building_vertices(&out).1), (4, 0));
+        // Hover anywhere inside it, also away from its centre.
+        let t = view.transform.expect("set");
+        let (mx, my) = g.to_map(-46.0, 17.0);
+        let (sx, sy) = t.map_to_screen(mx, my);
+        let corner = egui::pos2(sx as f32, sy as f32);
+        let _ = buildings_frame(&ctx, &mut view, &net, &mut hooks, Some(corner));
+        assert_eq!(view.hovered_placeable, Some(0));
+        // Minimum zoom (0.5): 8 px, under the square, so the square stands in.
+        let mut view = view_at(&ctx, &net, g, 0.4);
+        let out = buildings_frame(&ctx, &mut view, &net, &mut hooks, None);
+        assert_eq!((fill_vertices(&out), building_vertices(&out).1), (0, 4));
+    }
+
+    #[test]
+    fn points_in_a_quad_either_way_round() {
+        let p = egui::pos2;
+        let q = [p(0.0, 0.0), p(4.0, 0.0), p(4.0, 2.0), p(0.0, 2.0)];
+        let r = [q[3], q[2], q[1], q[0]];
+        for quad in [q, r] {
+            assert!(in_quad(&quad, p(1.0, 1.0)));
+            assert!(in_quad(&quad, p(4.0, 2.0)));
+            assert!(!in_quad(&quad, p(5.0, 1.0)));
+        }
     }
 
     fn hover_net() -> (Network, NodeId, NodeId) {
@@ -3275,6 +3413,32 @@ mod tests {
                 .expect("placeables fixture"),
         )
         .expect("placeables load");
+        // With the FS25 mods of the fixture present, their footprints are drawn too (story 2).
+        let mods = std::env::var_os("USERPROFILE").map(|h| {
+            std::path::PathBuf::from(h).join("Documents/My Games/FarmingSimulator2025/mods")
+        });
+        let placeables: Vec<_> = match mods.filter(|d| d.is_dir()) {
+            Some(dir) => {
+                let prints = ad_io::footprint::footprints(&placeables, &dir);
+                placeables
+                    .into_iter()
+                    .zip(prints)
+                    .map(|(mut p, f)| {
+                        p.footprint = f;
+                        p
+                    })
+                    .collect()
+            }
+            None => placeables,
+        };
+        println!(
+            "{} placeables, {} with a footprint",
+            placeables.len(),
+            placeables
+                .iter()
+                .filter(|p| !p.footprint.is_empty())
+                .count()
+        );
         let net = &cfg.network;
         let geometry = MapGeometry::new(2.0);
         let map = ad_core::map_context::MapContext::new(None, 2, 2.0, (2.0, 2.0));

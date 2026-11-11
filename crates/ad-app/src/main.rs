@@ -181,6 +181,10 @@ struct App {
     log_dir: Option<PathBuf>,
     /// Where the update check asks, taken when it starts; `None` checks nothing.
     update_url: Option<String>,
+    /// The default FS mods folder, set only by `main` (tests read no real mods).
+    mods_default: Option<PathBuf>,
+    /// The mods folder and document epoch the last footprint read was for.
+    footprints_for: Option<(u64, PathBuf)>,
     /// A newer release to show, while its window is open.
     update: Option<ad_io::update::Release>,
     /// The About window is shown.
@@ -278,6 +282,8 @@ impl App {
             map_info: false,
             log_dir: None,
             update_url: None,
+            mods_default: None,
+            footprints_for: None,
             update: None,
             about: false,
             grid_dialog: None,
@@ -477,7 +483,7 @@ impl App {
                         });
                     }
                 }
-                JobResult::ImageSaved { .. } => {}
+                JobResult::ImageSaved { .. } | JobResult::Footprints { .. } => {}
                 JobResult::ZipRead { .. } => {
                     self.importing = false;
                     if let JobResult::ZipRead { epoch, result } = result {
@@ -622,6 +628,39 @@ impl App {
             });
             self.theme_applied = Some(theme);
         }
+        self.start_footprints();
+    }
+
+    /// The mods folder footprints are read from: the setting, else the default; only an
+    /// existing folder.
+    fn mods_dir(&self) -> Option<PathBuf> {
+        let g = &self.settings.global;
+        g.mods_folder
+            .clone()
+            .or_else(|| self.mods_default.clone())
+            .filter(|d| d.is_dir())
+    }
+
+    /// Reads the footprints of the open document's buildings once per document and mods
+    /// folder, in the background.
+    fn start_footprints(&mut self) {
+        let (Some(doc), Some(dir)) = (&self.doc, self.mods_dir()) else {
+            return;
+        };
+        let Some(list) = doc.placeables.clone() else {
+            return;
+        };
+        let key = (doc.epoch, dir.clone());
+        if self.footprints_for.as_ref() == Some(&key) {
+            return;
+        }
+        self.footprints_for = Some(key);
+        let ctx = self.repaint.clone();
+        jobs::spawn_footprints(doc.epoch, list, dir, self.tx.clone(), move || {
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+        });
     }
 
     /// The settings a new curve or arc starts with (story 9.4).
@@ -1892,6 +1931,10 @@ fn main() -> eframe::Result {
             let mut app = App::new(settings);
             app.settings_path = startup.settings_path;
             app.log_dir = startup.log_dir;
+            app.mods_default = directories::UserDirs::new().and_then(|u| {
+                u.document_dir()
+                    .map(|d| d.join("My Games/FarmingSimulator2025/mods"))
+            });
             app.update_url = app
                 .settings
                 .global

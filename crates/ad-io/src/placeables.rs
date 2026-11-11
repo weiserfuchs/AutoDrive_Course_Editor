@@ -21,6 +21,9 @@ fn xml_err(e: impl std::fmt::Display) -> PlaceablesError {
     PlaceablesError::Xml(e.to_string())
 }
 
+/// A footprint part: four corners (x, z), in order around it.
+pub type Quad = [(f64, f64); 4];
+
 /// One placed building.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Placeable {
@@ -39,6 +42,9 @@ pub struct Placeable {
     pub rotation_y: f64,
     /// The owning farm: 0 is the map, 1 the player's farm in a single-player game.
     pub farm_id: u32,
+    /// Its footprint in the world, filled from the mods folder ([`crate::footprint`]);
+    /// empty draws a square.
+    pub footprint: Vec<Quad>,
 }
 
 /// The value of attribute `key` of `e`, unescaped.
@@ -98,6 +104,7 @@ fn placeable(e: &BytesStart) -> Result<Option<Placeable>, PlaceablesError> {
         z,
         rotation_y,
         farm_id,
+        footprint: Vec::new(),
     }))
 }
 
@@ -165,6 +172,7 @@ mod tests {
                 z: -847.008,
                 rotation_y: -76.0,
                 farm_id: 1,
+                footprint: Vec::new(),
             }
         );
         assert_eq!((got[1].name.as_str(), got[1].farm_id), ("a&b", 0));
