@@ -3,7 +3,7 @@ title: 'Buildings with indoor areas show the building filled and the base plate 
 type: 'feature'
 ticket: '4'
 created: '2026-11-12'
-status: in-review
+status: done
 baseline_revision: '72984b4'
 route: 'full'
 route_source: 'auto'
