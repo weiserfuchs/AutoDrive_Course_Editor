@@ -3,7 +3,7 @@ title: 'Buildings from placeables.xml show as squares coloured by owner'
 type: 'feature'
 ticket: '1'
 created: '2026-11-11'
-status: 'built'
+status: done
 baseline_revision: 'b361bb3'
 route: 'full'
 route_source: 'auto'
