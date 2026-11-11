@@ -3,7 +3,7 @@ title: 'Grid spacing and rotation snap are set per map'
 type: 'feature'
 ticket: '8'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: 'd2cac59'
 route: 'full'
 route_source: 'auto'

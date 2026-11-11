@@ -3,7 +3,7 @@ title: 'Recent files, the last folder and the window place are remembered'
 type: 'feature'
 ticket: '3'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: 'b557a2a'
 route: 'full'
 route_source: 'auto'

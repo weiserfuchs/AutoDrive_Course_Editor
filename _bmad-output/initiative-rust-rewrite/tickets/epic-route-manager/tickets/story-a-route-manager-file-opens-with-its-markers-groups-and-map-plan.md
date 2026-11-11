@@ -3,7 +3,7 @@ title: 'A route-manager file opens with its markers, groups and map'
 type: 'feature'
 ticket: '1'
 created: '2026-11-08'
-status: 'built'
+status: done
 baseline_revision: '81c3ffc'
 route: 'full'
 route_source: 'auto'

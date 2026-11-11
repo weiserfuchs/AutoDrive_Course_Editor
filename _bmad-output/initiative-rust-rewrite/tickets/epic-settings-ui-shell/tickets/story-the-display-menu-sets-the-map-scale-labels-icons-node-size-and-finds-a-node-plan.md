@@ -3,7 +3,7 @@ title: 'The display menu sets the map scale, labels, icons, node size and finds 
 type: 'feature'
 ticket: '6'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: '774fd0c'
 route: 'full'
 route_source: 'auto'

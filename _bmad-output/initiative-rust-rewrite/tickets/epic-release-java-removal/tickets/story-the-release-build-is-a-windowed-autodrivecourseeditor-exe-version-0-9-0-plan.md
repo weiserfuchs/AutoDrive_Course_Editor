@@ -3,7 +3,7 @@ title: 'The release build is a windowed AutoDriveCourseEditor.exe, version 0.9.0
 type: 'chore'
 ticket: '1'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: '5609684'
 route: 'oneshot'
 route_source: 'auto'

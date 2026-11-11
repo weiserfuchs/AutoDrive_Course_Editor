@@ -3,7 +3,7 @@ title: 'The tool bar is grouped and shows each tool''s shortcut'
 type: 'feature'
 ticket: '10'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: 'acf1e57'
 route: 'full'
 route_source: 'auto'

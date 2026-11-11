@@ -3,7 +3,7 @@ title: 'A route document saves back in the routeExport format'
 type: 'feature'
 ticket: '2'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: 'c8676ef'
 route: 'full'
 route_source: 'auto'

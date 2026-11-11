@@ -3,7 +3,7 @@ title: 'A routes list opens an exported route'
 type: 'feature'
 ticket: '3'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: '89e6880'
 route: 'full'
 route_source: 'auto'

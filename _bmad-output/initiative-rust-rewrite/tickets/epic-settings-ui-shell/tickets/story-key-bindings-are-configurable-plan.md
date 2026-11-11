@@ -3,7 +3,7 @@ title: 'Key bindings are configurable'
 type: 'feature'
 ticket: '5'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: 'e9147c9'
 route: 'full'
 route_source: 'auto'
