@@ -5,6 +5,7 @@ mod atomic;
 pub mod config_xml;
 pub mod dds;
 pub mod download;
+pub mod footprint;
 pub mod map_image;
 pub mod mod_zip;
 pub mod placeables;

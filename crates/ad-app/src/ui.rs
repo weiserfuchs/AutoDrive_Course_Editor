@@ -1865,6 +1865,27 @@ pub(crate) fn settings_window(app: &mut App, ctx: &egui::Context) {
                     ui.label("Updates");
                     ui.checkbox(&mut g.check_updates, "Look for a newer release at start");
                     ui.end_row();
+                    ui.label("Mods folder");
+                    ui.horizontal(|ui| {
+                        match &g.mods_folder {
+                            Some(dir) => ui.label(dir.display().to_string()),
+                            None => ui
+                                .label("Default (Documents\\My Games\\FarmingSimulator2025\\mods)"),
+                        }
+                        .on_hover_text("Building footprints are read from the mods here");
+                        if ui.button("Browse…").clicked()
+                            && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                        {
+                            g.mods_folder = Some(dir);
+                        }
+                        if ui
+                            .add_enabled(g.mods_folder.is_some(), egui::Button::new("Default"))
+                            .clicked()
+                        {
+                            g.mods_folder = None;
+                        }
+                    });
+                    ui.end_row();
                     ui.label("Max zoom");
                     ui.add(egui::Slider::new(
                         &mut g.max_zoom,

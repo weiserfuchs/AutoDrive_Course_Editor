@@ -81,6 +81,9 @@ pub struct GlobalSettings {
     /// Whether a missing map image is downloaded from the data repository (Java
     /// `Check_Online_MapImages`).
     pub online_map_images: bool,
+    /// The FS mods folder building footprints are read from; none uses the default
+    /// `Documents/My Games/FarmingSimulator2025/mods`.
+    pub mods_folder: Option<PathBuf>,
     /// Whether unsaved edits are written to rotating side files (AD-16).
     pub autosave: bool,
     /// Minutes between autosaves; at least 1 (Java `autoSaveInterval`).
@@ -186,6 +189,7 @@ impl Default for GlobalSettings {
             line_node_distance: 12,
             create_line_end_node: false,
             online_map_images: true,
+            mods_folder: None,
             autosave: true,
             autosave_minutes: 10,
             autosave_slots: 10,
