@@ -3,7 +3,7 @@ title: 'Pushing a v* tag builds the exe and attaches it to a draft release'
 type: 'chore'
 ticket: '2'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: '900a2e0'
 route: 'oneshot'
 route_source: 'auto'
@@ -60,3 +60,4 @@ context: []
 
 - Quick review (orchestrator, inline): one finding, fixed. The version check first ran before the toolchain install; it now runs after, so `cargo pkgid` uses the pinned toolchain.
 - Quick review: one finding, fixed. A CRLF checkout would break the script; LF is now forced for `*.sh`.
+- First real run (v0.9.0, 2026-11-11, run 43094795891): every step succeeded, draft release created in about 15 minutes.
