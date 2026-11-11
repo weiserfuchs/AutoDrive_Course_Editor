@@ -3,7 +3,7 @@ title: 'A settings window edits the editor, autosave, curve and connection setti
 type: 'feature'
 ticket: '4'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: '2e84e04'
 route: 'full'
 route_source: 'auto'

@@ -3,7 +3,7 @@ title: 'A menu bar carries the file, edit, scan, import and routes commands'
 type: 'feature'
 ticket: '2'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: 'cba0b79'
 route: 'full'
 route_source: 'auto'

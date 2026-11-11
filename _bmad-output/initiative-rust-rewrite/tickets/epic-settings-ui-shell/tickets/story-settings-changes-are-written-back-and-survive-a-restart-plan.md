@@ -3,7 +3,7 @@ title: 'Settings changes are written back and survive a restart'
 type: 'feature'
 ticket: '1'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: '4cd51f1'
 route: 'full'
 route_source: 'auto'

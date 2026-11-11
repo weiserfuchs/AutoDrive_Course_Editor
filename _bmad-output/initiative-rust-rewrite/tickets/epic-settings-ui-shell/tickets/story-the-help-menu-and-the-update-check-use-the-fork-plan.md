@@ -3,7 +3,7 @@ title: 'The help menu and the update check use the fork'
 type: 'feature'
 ticket: '9'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: 'a3ddffb'
 route: 'full'
 route_source: 'auto'

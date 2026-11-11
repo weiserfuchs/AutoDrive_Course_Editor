@@ -3,7 +3,7 @@ title: 'Nodes and each connection kind can be hidden'
 type: 'feature'
 ticket: '7'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: '0203bca'
 route: 'full'
 route_source: 'auto'

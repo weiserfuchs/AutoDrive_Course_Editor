@@ -3,7 +3,7 @@ title: 'The frame budget is re-measured at minimum and maximum zoom'
 type: 'chore'
 ticket: '3'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: 'dc760cc'
 route: 'oneshot'
 route_source: 'auto'

@@ -3,7 +3,7 @@ title: 'Parity with R1-R16 is signed off on a checklist'
 type: 'chore'
 ticket: '4'
 created: '2026-11-09'
-status: 'built'
+status: done
 baseline_revision: '4114df4'
 route: 'oneshot'
 route_source: 'auto'
