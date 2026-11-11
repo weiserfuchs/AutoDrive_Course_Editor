@@ -3,7 +3,7 @@ title: 'The Java editor and the Maven build are removed and the readme describes
 type: 'chore'
 ticket: '5'
 created: '2026-11-11'
-status: 'built'
+status: done
 baseline_revision: '0084b5e'
 route: 'oneshot'
 route_source: 'auto'
