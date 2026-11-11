@@ -14,6 +14,19 @@ pub const DUAL_SUBPRIO: Color32 = Color32::from_rgb(150, 100, 50);
 pub const REVERSE: Color32 = Color32::from_rgb(0, 255, 255);
 pub const NODE_REGULAR: Color32 = Color32::from_rgb(255, 0, 0);
 pub const NODE_SUBPRIO: Color32 = Color32::from_rgb(255, 200, 0);
+/// Buildings of `placeables.xml` by owner, apart from every connection and node colour.
+pub const PLACEABLE_MAP: Color32 = Color32::from_rgb(200, 200, 200);
+pub const PLACEABLE_OWN: Color32 = Color32::from_rgb(230, 80, 200);
+pub const PLACEABLE_OTHER: Color32 = Color32::from_rgb(150, 90, 255);
+
+/// The colour of a building owned by `farm_id`: 0 is the map, 1 the player's farm.
+pub fn placeable_colour(farm_id: u32) -> Color32 {
+    match farm_id {
+        0 => PLACEABLE_MAP,
+        1 => PLACEABLE_OWN,
+        _ => PLACEABLE_OTHER,
+    }
+}
 
 /// Colour of the link `a -> b` from its kind and the flags of `a` and `b`.
 /// Crossed regular and unknown links draw like regular ones: nothing is left undrawn.

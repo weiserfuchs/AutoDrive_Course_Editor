@@ -8,6 +8,7 @@ use eframe::egui;
 
 use ad_core::geometry::{MAP_PIXELS, MapGeometry};
 use ad_core::network::{ConnectionKind, EdgeSegment, LinkLook, Network, Node, NodeId};
+use ad_io::placeables::Placeable;
 
 use crate::icons::{self, Icons};
 use crate::lod::{HOVER_RING_FACTOR, MAX_ZOOM, MIN_NODE_PX, WHEEL_POINTS_PER_STEP, ZOOM_STEP};
@@ -29,6 +30,10 @@ const MARK_HIT_SLACK_PX: f64 = 2.0;
 const LASSO_STEP_PX: f64 = 2.0;
 /// Opacity of the lasso's closing line back to its start (Java).
 const LASSO_CLOSING_ALPHA: f32 = 0.25;
+/// Side of a building's square on screen.
+const PLACEABLE_PX: f32 = 10.0;
+/// From this zoom on every building shows its name; below it only the hovered one.
+const PLACEABLE_NAME_ZOOM: f64 = 2.0;
 
 /// The only map-pixel <-> screen conversion. Zoom is screen px per map px; the
 /// centre is in map px. The panel is the screen rectangle the map is shown in.
@@ -372,6 +377,11 @@ pub trait ViewHooks {
         None
     }
 
+    /// The buildings of the savegame's `placeables.xml`, drawn under the network.
+    fn placeables(&self) -> Option<&[Placeable]> {
+        None
+    }
+
     /// Whether the hovered connection `(from, to)` is handed to `paint` for highlighting.
     fn highlights_edge(&self, _edge: (NodeId, NodeId)) -> bool {
         true
@@ -393,6 +403,31 @@ pub trait ViewHooks {
 }
 
 impl ViewHooks for () {}
+
+/// The screen centre of building `p`.
+fn placeable_screen(p: &Placeable, geometry: MapGeometry, t: &ViewTransform) -> egui::Pos2 {
+    let (mx, my) = geometry.to_map(p.x, p.z);
+    let (sx, sy) = t.map_to_screen(mx, my);
+    egui::pos2(sx as f32, sy as f32)
+}
+
+/// The index of the building whose square is under screen point `c`; the nearest when
+/// squares overlap.
+fn placeable_at(
+    list: &[Placeable],
+    geometry: MapGeometry,
+    t: &ViewTransform,
+    c: (f64, f64),
+) -> Option<usize> {
+    let c = egui::pos2(c.0 as f32, c.1 as f32);
+    let reach = PLACEABLE_PX / 2.0;
+    list.iter()
+        .enumerate()
+        .map(|(i, p)| (i, placeable_screen(p, geometry, t) - c))
+        .filter(|(_, d)| d.x.abs() <= reach && d.y.abs() <= reach)
+        .min_by(|a, b| a.1.length_sq().total_cmp(&b.1.length_sq()))
+        .map(|(i, _)| i)
+}
 
 /// Where node `id` is drawn: at its preview position if it is a previewed node.
 fn place(id: NodeId, n: &Node, preview: Option<&Preview>) -> (f64, f64) {
@@ -451,6 +486,10 @@ pub struct MapView {
     pub show_marker_names: bool,
     /// Parking icons on markers with parked vehicles (F3).
     pub show_parking_icons: bool,
+    /// Buildings of `placeables.xml` (F5).
+    pub show_placeables: bool,
+    /// The building under the pointer, an index into the hooks' list; recomputed every frame.
+    pub hovered_placeable: Option<usize>,
     /// Session toggle for the "Node ID" row of the info box.
     pub show_node_id: bool,
     /// The node under the pointer, recomputed every frame.
@@ -478,6 +517,8 @@ impl Default for MapView {
             show_marker_icons: true,
             show_marker_names: true,
             show_parking_icons: true,
+            show_placeables: true,
+            hovered_placeable: None,
             show_node_id: false,
             hovered_node: None,
             hovered_edge: None,
@@ -538,6 +579,7 @@ impl MapView {
     pub fn clear_hover(&mut self) {
         self.hovered_node = None;
         self.hovered_edge = None;
+        self.hovered_placeable = None;
     }
 
     /// Draws the view and handles pan and zoom. A middle drag pans; a primary drag pans
@@ -704,6 +746,12 @@ impl MapView {
         self.hovered_edge = cursor
             .and_then(|c| hover::edge_at(net, geometry, &t, ns, self.hovered_node, c))
             .filter(|&(a, b)| blocked.is_none_or(|h| !h.link(a, b)));
+        let placeables = hooks.placeables().filter(|_| self.show_placeables);
+        // Nodes and connections win: a building is hovered only when neither is.
+        self.hovered_placeable = cursor
+            .filter(|_| self.hovered_node.is_none() && self.hovered_edge.is_none())
+            .zip(placeables)
+            .and_then(|(c, list)| placeable_at(list, geometry, &t, c));
         self.paint(
             &painter,
             net,
@@ -715,6 +763,7 @@ impl MapView {
             selection,
             hooks.overlap(),
             hidden,
+            placeables,
         );
         if let Some(id) = self.hovered_node {
             self.paint_info_box(&painter, net, geometry, &t, ns, id, rect, preview);
@@ -853,6 +902,59 @@ impl MapView {
         }
     }
 
+    /// Draws each building of `list` in view as a square in its owner's colour, with its
+    /// name from [`PLACEABLE_NAME_ZOOM`] on; the hovered one also names its id and owner.
+    fn paint_placeables(
+        &self,
+        painter: &egui::Painter,
+        list: &[Placeable],
+        geometry: MapGeometry,
+        t: &ViewTransform,
+    ) {
+        let clip = painter.clip_rect().expand(PLACEABLE_PX);
+        let mut mesh = egui::Mesh::default();
+        let mut outline = Vec::new();
+        let mut names = Vec::new();
+        let font = egui::FontId::proportional(NAME_FONT_SIZE);
+        for (i, p) in list.iter().enumerate() {
+            let centre = placeable_screen(p, geometry, t);
+            if !clip.contains(centre) {
+                continue;
+            }
+            let rect = egui::Rect::from_center_size(centre, egui::Vec2::splat(PLACEABLE_PX));
+            mesh.add_colored_rect(rect, look::placeable_colour(p.farm_id));
+            outline.push(rect);
+            let below = centre + egui::vec2(0.0, PLACEABLE_PX);
+            if self.hovered_placeable == Some(i) {
+                let owner = match p.farm_id {
+                    0 => "map".to_owned(),
+                    id => format!("farm {id}"),
+                };
+                let text = format!("{} ( {}, {owner} )", p.name, p.unique_id);
+                names.push((Cow::Owned(text), below));
+            } else if t.zoom >= PLACEABLE_NAME_ZOOM {
+                names.push((Cow::Borrowed(p.name.as_str()), below));
+            }
+        }
+        if mesh.is_empty() {
+            return;
+        }
+        painter.add(egui::Shape::mesh(mesh));
+        let stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
+        for rect in outline {
+            painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+        }
+        for (name, at) in names {
+            painter.text(
+                at,
+                egui::Align2::CENTER_TOP,
+                name,
+                font.clone(),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn paint(
         &mut self,
@@ -866,6 +968,7 @@ impl MapView {
         selection: Option<&BTreeSet<NodeId>>,
         overlap: Option<&BTreeSet<NodeId>>,
         hidden: Option<HiddenView<'_>>,
+        placeables: Option<&[Placeable]>,
     ) {
         if let Some(id) = map_texture {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -904,6 +1007,9 @@ impl MapView {
                 mesh.add_colored_rect(egui::Rect::from_min_max(a, b), colour);
             }
             painter.add(egui::Shape::mesh(mesh));
+        }
+        if let Some(list) = placeables {
+            self.paint_placeables(painter, list, geometry, t);
         }
 
         let ns = look::node_px(node_size, t.zoom);
@@ -1803,6 +1909,118 @@ mod tests {
     }
 
     /// Two nodes on a view at zoom 10 (ns 11): `a` at the panel centre (512, 512), `b` 200 px right.
+    struct Buildings(Vec<Placeable>);
+
+    impl ViewHooks for Buildings {
+        fn placeables(&self) -> Option<&[Placeable]> {
+            Some(&self.0)
+        }
+    }
+
+    fn building(name: &str, x: f64, z: f64, farm_id: u32) -> Placeable {
+        Placeable {
+            name: name.to_owned(),
+            unique_id: format!("id_{name}"),
+            mod_name: None,
+            file: String::new(),
+            x,
+            z,
+            rotation_y: 0.0,
+            farm_id,
+        }
+    }
+
+    /// Two frames with `hooks` and the pointer at `pointer`; returns the second.
+    fn buildings_frame(
+        ctx: &egui::Context,
+        view: &mut MapView,
+        net: &Network,
+        hooks: &mut Buildings,
+        pointer: Option<egui::Pos2>,
+    ) -> egui::FullOutput {
+        let mut last = None;
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 1024.0),
+                )),
+                events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                view.show(ui, net, MapGeometry::new(1.0), 2.0, None, hooks);
+            });
+            out.textures_delta.clear();
+            last = Some(out);
+        }
+        last.expect("a frame")
+    }
+
+    /// Vertices painted in each building colour: (map, own, other).
+    fn building_vertices(out: &egui::FullOutput) -> (usize, usize, usize) {
+        let mut n = (0, 0, 0);
+        for s in &out.shapes {
+            if let egui::Shape::Mesh(m) = &s.shape {
+                for v in &m.vertices {
+                    match v.color {
+                        c if c == look::PLACEABLE_MAP => n.0 += 1,
+                        c if c == look::PLACEABLE_OWN => n.1 += 1,
+                        c if c == look::PLACEABLE_OTHER => n.2 += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn buildings_are_drawn_by_owner_named_when_zoomed_in_and_hovered() {
+        let ctx = egui::Context::default();
+        let (net, a, _) = hover_net();
+        let mut hooks = Buildings(vec![
+            building("Own", -30.0, 0.0, 1),
+            building("Map", 40.0, 10.0, 0),
+            building("Other", 0.0, 30.0, 15),
+            building("Far", 900.0, 900.0, 1),
+        ]);
+        let g = MapGeometry::new(1.0);
+        // Zoomed out: squares, no names.
+        let mut view = view_at(&ctx, &net, g, 1.0);
+        let out = buildings_frame(&ctx, &mut view, &net, &mut hooks, None);
+        assert_eq!(building_vertices(&out), (4, 4, 4));
+        assert!(overlay_shapes(&out).1.is_empty());
+        // Zoomed in: the three in view are named; Far is off screen.
+        let mut view = view_at(&ctx, &net, g, 10.0);
+        let out = buildings_frame(&ctx, &mut view, &net, &mut hooks, None);
+        assert_eq!(building_vertices(&out), (4, 4, 4));
+        let mut names: Vec<String> = overlay_shapes(&out).1.into_iter().map(|t| t.0).collect();
+        names.sort();
+        assert_eq!(names, ["Map", "Other", "Own"]);
+        // Hovering a square names its id and owner.
+        let t = view.transform.expect("set");
+        let own = placeable_screen(&hooks.0[0], g, &t);
+        let out = buildings_frame(&ctx, &mut view, &net, &mut hooks, Some(own));
+        assert_eq!(view.hovered_placeable, Some(0));
+        assert!(
+            overlay_shapes(&out)
+                .1
+                .iter()
+                .any(|(text, _)| text == "Own ( id_Own, farm 1 )")
+        );
+        // A node wins over a building under it.
+        hooks.0.push(building("UnderNode", 0.0, 0.0, 0));
+        let on_node = placeable_screen(&hooks.0[4], g, &t);
+        let _ = buildings_frame(&ctx, &mut view, &net, &mut hooks, Some(on_node));
+        assert_eq!((view.hovered_node, view.hovered_placeable), (Some(a), None));
+        // Switched off: nothing drawn, nothing hovered.
+        view.show_placeables = false;
+        let out = buildings_frame(&ctx, &mut view, &net, &mut hooks, Some(own));
+        assert_eq!(building_vertices(&out), (0, 0, 0));
+        assert_eq!(view.hovered_placeable, None);
+    }
+
     fn hover_net() -> (Network, NodeId, NodeId) {
         let mut net = Network::new();
         let a = net.add_node(0.0, -1.0, 0.0, NodeFlag::REGULAR);
@@ -3051,6 +3269,12 @@ mod tests {
             .expect("vehicles fixture");
         ad_io::vehicles::load(&vehicles, cfg.game_version(), &mut cfg.network)
             .expect("vehicles load");
+        // The fixture's placeables.xml, drawn under the network (placeables story 1).
+        let placeables = ad_io::placeables::load(
+            &std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../placeables.xml"))
+                .expect("placeables fixture"),
+        )
+        .expect("placeables load");
         let net = &cfg.network;
         let geometry = MapGeometry::new(2.0);
         let map = ad_core::map_context::MapContext::new(None, 2, 2.0, (2.0, 2.0));
@@ -3207,6 +3431,7 @@ mod tests {
                 let mut hooks =
                     crate::ui::ToolHooks::new(app.tool.as_deref_mut(), &map, net, selection, false);
                 hooks.overlap = marks_shown.get().then_some(&wide_marks);
+                hooks.placeables = Some(&placeables);
                 view.show(ui, net, geometry, 2.0, Some(texture), &mut hooks);
             });
             out.textures_delta.clear();

@@ -15,6 +15,7 @@ use ad_io::config_xml::{self, GameVersion, LoadedConfig};
 use ad_io::dds;
 use ad_io::download::{self, DownloadError};
 use ad_io::map_image::{self, MapImage};
+use ad_io::placeables::{self, Placeable};
 use ad_io::routes_xml;
 use ad_io::settings::Settings;
 use ad_io::vehicles::{self, VehiclesFile};
@@ -27,7 +28,7 @@ pub type CalibratedHeightmap = (Arc<Heightmap>, f64);
 
 /// A parsed config with its map image, the calibrated heightmap if one was found, the
 /// notice about image, heightmap and `vehicles.xml`, if any, and the `vehicles.xml` beside
-/// the config, if it was read, and whether a local map image was found (false: the image
+/// the config, if it was read, the buildings of the `placeables.xml` beside it, and whether a local map image was found (false: the image
 /// is Blank and may be downloaded).
 pub type Loaded = (
     LoadedConfig,
@@ -35,6 +36,7 @@ pub type Loaded = (
     Option<CalibratedHeightmap>,
     Option<String>,
     Option<Arc<VehiclesFile>>,
+    Option<Arc<[Placeable]>>,
     bool,
 );
 
@@ -511,17 +513,25 @@ pub fn load_file(
     let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
     let cannot_load = |e: &dyn std::fmt::Display| format!("Cannot load {}: {e}", path.display());
     // A route has no vehicles.xml; its notice says why it has no map name.
-    let (config, vehicles, file_notice) = if routes_xml::is_route(&bytes) {
+    let (config, vehicles, placeables, file_notice) = if routes_xml::is_route(&bytes) {
         let route = routes_xml::load(&bytes).map_err(|e| cannot_load(&e))?;
         let (map_name, notice) = match routes_xml::map_name_for(path) {
             Ok(name) => (Some(name), None),
             Err(why) => (None, Some(format!("{NO_ROUTE_MAP_NAME} ({why})"))),
         };
-        (LoadedConfig::for_route(route, map_name), None, notice)
+        (LoadedConfig::for_route(route, map_name), None, None, notice)
     } else {
         let mut config = config_xml::load(&bytes).map_err(|e| cannot_load(&e))?;
         let (vehicles, notice) = load_vehicles(path, &mut config);
-        (config, vehicles, notice)
+        let (placeables, placeables_notice) = load_placeables(path);
+        let notice = match (notice, placeables_notice) {
+            (Some(a), Some(b)) => Some(format!(
+                "{a}
+{b}"
+            )),
+            (a, b) => a.or(b),
+        };
+        (config, vehicles, placeables, notice)
     };
     let found = config
         .map_name()
@@ -537,7 +547,15 @@ pub fn load_file(
         .flatten()
         .collect();
     let notice = (!notices.is_empty()).then(|| notices.join("\n"));
-    Ok((config, image, heightmap, notice, vehicles, image_found))
+    Ok((
+        config,
+        image,
+        heightmap,
+        notice,
+        vehicles,
+        placeables,
+        image_found,
+    ))
 }
 
 /// The map name to download an image for after `loaded`: none when a local image was found,
@@ -627,6 +645,31 @@ fn load_vehicles(
                 None,
                 Some(format!(
                     "{} could not be read ({e}); parking is not shown and the file will not be saved",
+                    path.display()
+                )),
+            )
+        }
+    }
+}
+
+/// Reads the `placeables.xml` beside the config, for display only; it is never written. A
+/// missing file gives none; one that cannot be read gives none and a notice.
+fn load_placeables(config_path: &Path) -> (Option<Arc<[Placeable]>>, Option<String>) {
+    let path = config_path.with_file_name("placeables.xml");
+    if !path.is_file() {
+        return (None, None);
+    }
+    let result = std::fs::read(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| placeables::load(&bytes).map_err(|e| e.to_string()));
+    match result {
+        Ok(list) => (Some(list.into()), None),
+        Err(e) => {
+            tracing::warn!("cannot read {}: {e}", path.display());
+            (
+                None,
+                Some(format!(
+                    "{} could not be read ({e}); buildings are not shown",
                     path.display()
                 )),
             )
@@ -757,7 +800,7 @@ pub fn replace_document(
     path: PathBuf,
     settings: &Settings,
 ) {
-    let (config, image, heightmap, notice, vehicles, found) = loaded;
+    let (config, image, heightmap, notice, vehicles, placeables, found) = loaded;
     let map_settings = config
         .map_name()
         .and_then(|name| settings.maps.get(name))
@@ -787,6 +830,7 @@ pub fn replace_document(
         settings.global.history_cap,
     );
     new.vehicles = vehicles;
+    new.placeables = placeables;
     new.has_image = found;
     *doc = Some(new);
 }
@@ -1064,7 +1108,7 @@ mod tests {
     }
 
     fn loaded_config(config: LoadedConfig) -> Loaded {
-        (config, map_image::blank(), None, None, None, true)
+        (config, map_image::blank(), None, None, None, None, true)
     }
 
     fn config() -> LoadedConfig {
@@ -1358,7 +1402,7 @@ mod tests {
         std::fs::write(&config, named(&inline_text("1.000,2.500"))).expect("write");
         let loaded = load_file(&config, None, &settings(500));
         std::fs::remove_dir_all(&dir).expect("cleanup");
-        let (_, image, _, notice, _, _) = loaded.expect("loads");
+        let (_, image, _, notice, _, _, _) = loaded.expect("loads");
         assert_ne!(image, map_image::blank());
         assert_eq!(&image.rgba[..4], &[1, 2, 3, 255]);
         assert!(notice.expect("notice").contains("Tiny.png"));
@@ -1373,7 +1417,7 @@ mod tests {
             inline_text("1.000,2.500"),
         ] {
             std::fs::write(&config, text).expect("write");
-            let (_, image, heightmap, notice, _, found) =
+            let (_, image, heightmap, notice, _, _, found) =
                 load_file(&config, None, &settings(500)).expect("loads");
             assert_eq!((image, heightmap, found), (map_image::blank(), None, false));
             assert!(
@@ -1454,7 +1498,7 @@ mod tests {
         std::fs::write(&config, inline_text("1.000,2.500")).expect("write");
         let loaded = load_file(&config, None, &settings(500));
         std::fs::remove_dir_all(&dir).expect("cleanup");
-        let (_, _, heightmap, notice, _, _) = loaded.expect("loads");
+        let (_, _, heightmap, notice, _, _, _) = loaded.expect("loads");
         assert!(heightmap.is_none());
         assert!(notice.expect("notice").contains("terrain.heightmap.png"));
     }
@@ -1509,6 +1553,48 @@ mod tests {
         let edit = ad_core::command::EditMarker::new(node, None);
         doc.apply(Transaction::new(vec![Command::EditMarker(edit)]))
             .expect("edit");
+    }
+
+    #[test]
+    fn placeables_beside_the_config_are_read_for_display_only() {
+        let (dir, doc, notice) = open_in("placeables_none", None);
+        assert!(doc.placeables.is_none());
+        assert!(!notice.unwrap_or_default().contains("placeables"));
+        let text = "<placeables>\n    <placeable filename=\"$moddir$M/x/barn.xml\" \
+            uniqueId=\"b\" position=\"1 2 3\" farmId=\"1\"/>\n</placeables>\n";
+        std::fs::write(dir.join("placeables.xml"), text).expect("write");
+        let config = dir.join("AutoDrive_config.xml");
+        let loaded = load_file(&config, None, &settings(500)).expect("loads");
+        assert!(!loaded.3.clone().unwrap_or_default().contains("placeables"));
+        let (mut doc, mut counter) = (None, 0);
+        replace_document(
+            &mut doc,
+            &mut counter,
+            loaded,
+            config.clone(),
+            &settings(500),
+        );
+        let doc = doc.expect("doc");
+        let list = doc.placeables.as_deref().expect("placeables");
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            (list[0].name.as_str(), list[0].x, list[0].z),
+            ("barn", 1.0, 3.0)
+        );
+        // A save never touches it.
+        let (_, message) = save_as(doc, &config);
+        assert_eq!(message, None);
+        let after = std::fs::read_to_string(dir.join("placeables.xml")).expect("read");
+        assert_eq!(after, text);
+        // A broken file shows nothing and says so; the config still opens.
+        std::fs::write(dir.join("placeables.xml"), "<vehicles/>").expect("write");
+        let loaded = load_file(&config, None, &settings(500)).expect("loads");
+        assert!(loaded.5.is_none());
+        let notice = loaded.3.expect("notice");
+        assert!(
+            notice.contains("placeables.xml could not be read"),
+            "{notice}"
+        );
     }
 
     #[test]
@@ -1742,7 +1828,7 @@ mod tests {
         std::fs::create_dir_all(&folder).expect("folder");
         std::fs::write(folder.join("Tiny.png"), png(4, 4, [1, 2, 3, 255])).expect("write");
         let local = load_file(&config, None, &settings(500)).expect("loads");
-        assert!(local.5);
+        assert!(local.6);
         assert_eq!(download_wanted(&local, &settings(500)), None);
         // No map name.
         std::fs::write(&config, inline_text("1.000,2.500")).expect("write");
@@ -2041,12 +2127,13 @@ mod route_tests {
             "<vehicles>\n    <vehicle id=\"1\" parkDestination=\"1\"/>\n</vehicles>\n",
         )
         .expect("write");
-        let (config, image, _, notice, vehicles, found) =
+        let (config, image, _, notice, vehicles, placeables, found) =
             load_file(&route, None, &Settings::default()).expect("loads");
         assert!(config.is_route());
         assert_eq!(config.map_name(), None);
         assert_eq!((image, found), (map_image::blank(), false));
         assert!(vehicles.is_none());
+        assert!(placeables.is_none());
         let notice = notice.expect("notice");
         assert!(
             notice.contains("No map name for this route (routes.xml not found)"),

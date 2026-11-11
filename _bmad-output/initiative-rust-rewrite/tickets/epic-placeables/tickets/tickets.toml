@@ -1,0 +1,34 @@
+# Stories of epic-placeables in build order.
+
+[[entry]]
+id = 1
+type = "story"
+title = "Buildings from placeables.xml show as squares coloured by owner"
+description = "ad-io reads placeables.xml (position, rotation, file, owner); the load job reads it beside the config, never writes it; the view draws a square per building under the network in the owner's colour, names them from zoom 2, and names id and owner on hover; Display ▸ Placeables (F5) toggles and persists. The person's step: open the fixture copy with placeables.xml beside it and see the buildings."
+verify = "Tests cover parsing (fixture, preplaced skipped, broken), loading beside the config and no write on save, drawing by owner, names by zoom, hover, toggle; frame time holds; the user sees the buildings."
+covers = ["R1", "R2"]
+after = ["epic-release-java-removal"]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 2
+type = "story"
+title = "With a mods folder, buildings show their real rotated footprint"
+description = "A mods-folder setting; for each building its placeable XML is read from the mod zip named by $moddir$ and its footprint (test or clear areas) drawn as rotated outlines; a building without a readable footprint keeps its square. The rotation sign is checked against the map image. The person's step: set the mods folder and compare footprints with the map image."
+verify = "Tests cover footprint parsing from a built zip, rotation, a missing mod or file; the user compares with the map image."
+covers = ["R3"]
+after = [1]
+hitl = true
+risk = "medium"
+
+[[entry]]
+id = 3
+type = "story"
+title = "Refactor sweep"
+description = "Cleans up what the epic's plans and reviews deferred; scope is set at its start and limited to cleanup."
+verify = "CI is green and the sweep is recorded."
+covers = []
+after = [1, 2]
+hitl = false
+risk = "low"

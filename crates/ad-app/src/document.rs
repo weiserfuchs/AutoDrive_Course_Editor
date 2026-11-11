@@ -56,6 +56,8 @@ pub struct Document {
     pub opened_path: PathBuf,
     /// The `vehicles.xml` beside the opened config, when one was read (AD-17).
     pub vehicles: Option<Arc<VehiclesFile>>,
+    /// The buildings of the `placeables.xml` beside the opened config, shown on the map; read only.
+    pub placeables: Option<Arc<[ad_io::placeables::Placeable]>>,
     pub epoch: u64,
     pub map: MapContext,
     /// Decoded image waiting for the UI thread to upload it; taken right after (AD-14).
@@ -114,6 +116,7 @@ impl Document {
             history,
             opened_path: path.clone(),
             vehicles: None,
+            placeables: None,
             path,
             epoch,
             map,

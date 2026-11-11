@@ -1,3 +1,4 @@
 AutoDrive_config.xml -text
 vehicles.xml -text
 *.sh text eol=lf
+placeables.xml -text

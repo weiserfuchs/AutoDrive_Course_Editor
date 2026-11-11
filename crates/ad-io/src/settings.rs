@@ -53,6 +53,8 @@ pub struct GlobalSettings {
     pub show_marker_icons: bool,
     /// Parking icons on markers with parked vehicles (Java `ShowParkingIcons`, F3).
     pub show_parking_icons: bool,
+    /// Buildings from the savegame's `placeables.xml` on the map (F5).
+    pub show_placeables: bool,
     /// The node id row of the hover info (Java `ShowSelectedNodeID`, F4).
     pub show_node_id: bool,
     /// Whether hidden nodes and connections can be hovered and selected (Java `SelectHidden`).
@@ -172,6 +174,7 @@ impl Default for GlobalSettings {
             show_marker_names: true,
             show_marker_icons: true,
             show_parking_icons: true,
+            show_placeables: true,
             show_node_id: false,
             select_hidden: false,
             hidden_alpha: 0.25,
